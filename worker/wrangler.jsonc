@@ -1,0 +1,26 @@
+{
+  "name": "airyfs",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "containers": [
+    {
+      "class_name": "AiryFS",
+      "image": "../container/Dockerfile",
+      "max_instances": 10
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AiryFS",
+        "class_name": "AiryFS"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AiryFS"]
+    }
+  ]
+}
