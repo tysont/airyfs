@@ -1,4 +1,4 @@
-// ABOUTME: Hrana pipeline server that executes SQL against a backend.
+// ABOUTME: Hrana pipeline server that executes SQL against DO SQLite.
 // ABOUTME: Reads pipeline requests from a TCP stream, executes SQL, writes pipeline responses.
 
 import {
@@ -79,21 +79,14 @@ function hranaToJs(val: HranaValue): unknown {
 }
 
 function jsToHrana(val: unknown): HranaValue {
-  if (val === null || val === undefined) {
-    return { type: 'null' };
-  }
+  if (val === null || val === undefined) return { type: 'null' };
   if (typeof val === 'number') {
-    if (Number.isInteger(val)) {
-      return { type: 'integer', value: String(val) };
-    }
-    return { type: 'float', value: val };
+    return Number.isInteger(val)
+      ? { type: 'integer', value: String(val) }
+      : { type: 'float', value: val };
   }
-  if (typeof val === 'bigint') {
-    return { type: 'integer', value: String(val) };
-  }
-  if (typeof val === 'string') {
-    return { type: 'text', value: val };
-  }
+  if (typeof val === 'bigint') return { type: 'integer', value: String(val) };
+  if (typeof val === 'string') return { type: 'text', value: val };
   if (val instanceof ArrayBuffer || val instanceof Uint8Array) {
     const bytes = val instanceof Uint8Array ? val : new Uint8Array(val);
     let binary = '';
@@ -106,25 +99,95 @@ function jsToHrana(val: unknown): HranaValue {
 }
 
 // ---------------------------------------------------------------------------
+// DO SQLite statement filter
+//
+// DO SQLite wraps every sql.exec() call in an implicit transaction and does
+// not support explicit transaction control or most PRAGMA statements.
+// Statements that hit these restrictions are filtered here rather than
+// letting them fail at the runtime level.
+// ---------------------------------------------------------------------------
+
+const EMPTY_RESULT: StmtResult = {
+  cols: [], rows: [], affected_row_count: 0, last_insert_rowid: null,
+  replication_index: null, rows_read: 0, rows_written: 0, query_duration_ms: 0,
+};
+
+/** Statements that DO SQLite does not support. Return empty results as no-ops. */
+const BLOCKED_PREFIXES = ['BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'RELEASE'];
+
+function isBlockedStatement(sql: string): boolean {
+  const upper = sql.trimStart().toUpperCase();
+  return BLOCKED_PREFIXES.some(p => upper === p || upper.startsWith(p + ' '));
+}
+
+function isPragma(sql: string): boolean {
+  return sql.trimStart().toUpperCase().startsWith('PRAGMA');
+}
+
+/**
+ * Simulate PRAGMA table_info(table) by parsing the CREATE TABLE DDL from
+ * sqlite_master. Returns column metadata in the same format as the real PRAGMA.
+ */
+function simulateTableInfo(backend: SqlBackend, tableName: string): StmtResult {
+  const result = backend.exec(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+    tableName
+  );
+  const createSql = result.rows[0]?.['sql'] as string | undefined;
+  if (!createSql) return EMPTY_RESULT;
+
+  const colsMatch = createSql.match(/\(([^)]+)\)/);
+  if (!colsMatch) return EMPTY_RESULT;
+
+  const colDefs = colsMatch[1].split(',').map(c => c.trim());
+  const rows: Row[] = colDefs.map((def, i) => {
+    const parts = def.split(/\s+/);
+    return { values: [
+      { type: 'integer' as const, value: String(i) },
+      { type: 'text' as const, value: parts[0] },
+      { type: 'text' as const, value: parts[1] || '' },
+      { type: 'integer' as const, value: '0' },
+      { type: 'null' as const },
+      { type: 'integer' as const, value: '0' },
+    ]};
+  });
+
+  return {
+    cols: [
+      { name: 'cid', decltype: null }, { name: 'name', decltype: null },
+      { name: 'type', decltype: null }, { name: 'notnull', decltype: null },
+      { name: 'dflt_value', decltype: null }, { name: 'pk', decltype: null },
+    ],
+    rows,
+    affected_row_count: 0, last_insert_rowid: null,
+    replication_index: null, rows_read: rows.length, rows_written: 0, query_duration_ms: 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Statement execution
 // ---------------------------------------------------------------------------
 
-function executeStmt(sql: SqlBackend, stmt: Stmt): StmtResult {
+function executeStmt(backend: SqlBackend, stmt: Stmt): StmtResult {
   const query = stmt.sql ?? '';
-  const bindings: unknown[] = [];
 
+  if (isBlockedStatement(query)) return EMPTY_RESULT;
+
+  if (isPragma(query)) {
+    const tableInfoMatch = query.match(/PRAGMA\s+table_info\s*\(\s*(\w+)\s*\)/i);
+    if (tableInfoMatch) return simulateTableInfo(backend, tableInfoMatch[1]);
+    return EMPTY_RESULT;
+  }
+
+  const bindings: unknown[] = [];
   if (stmt.args) {
-    for (const arg of stmt.args) {
-      bindings.push(hranaToJs(arg));
-    }
+    for (const arg of stmt.args) bindings.push(hranaToJs(arg));
   }
   if (stmt.named_args) {
-    for (const na of stmt.named_args) {
-      bindings.push(hranaToJs(na.value));
-    }
+    for (const na of stmt.named_args) bindings.push(hranaToJs(na.value));
   }
 
-  const cursor = sql.exec(query, ...bindings);
+  const cursor = backend.exec(query, ...bindings);
 
   const cols = cursor.columnNames.map((name) => ({
     name,
@@ -138,22 +201,16 @@ function executeStmt(sql: SqlBackend, stmt: Stmt): StmtResult {
   let lastInsertRowid: string | null = null;
   if (cursor.rowsWritten > 0) {
     try {
-      const ridCursor = sql.exec('SELECT last_insert_rowid() as rid');
-      const ridRow = ridCursor.rows[0];
-      if (ridRow) {
-        const rid = ridRow['rid'];
-        if (rid !== null && rid !== undefined) {
-          lastInsertRowid = String(rid);
-        }
-      }
+      const ridCursor = backend.exec('SELECT last_insert_rowid() as rid');
+      const rid = ridCursor.rows[0]?.['rid'];
+      if (rid !== null && rid !== undefined) lastInsertRowid = String(rid);
     } catch {
-      // Not critical
+      // last_insert_rowid() may not be available in all contexts
     }
   }
 
   return {
-    cols,
-    rows,
+    cols, rows,
     affected_row_count: cursor.rowsWritten,
     last_insert_rowid: lastInsertRowid,
     replication_index: null,
@@ -164,7 +221,7 @@ function executeStmt(sql: SqlBackend, stmt: Stmt): StmtResult {
 }
 
 // ---------------------------------------------------------------------------
-// HranaServer — pipeline format
+// HranaServer
 // ---------------------------------------------------------------------------
 
 export class HranaServer {
@@ -183,7 +240,6 @@ export class HranaServer {
     this.sql = opts.sql;
   }
 
-  /** Run the server loop until the readable stream closes. */
   async serve(): Promise<void> {
     const reader = this.readable.getReader();
     const writer = this.writable.getWriter();
@@ -195,9 +251,7 @@ export class HranaServer {
         if (done) break;
 
         buffer.push(value);
-        const messages = buffer.drain();
-
-        for (const msg of messages) {
+        for (const msg of buffer.drain()) {
           const response = this.handlePipeline(msg as PipelineRequest);
           await writer.write(serializeFrame(response));
         }
@@ -209,34 +263,21 @@ export class HranaServer {
   }
 
   private handlePipeline(req: PipelineRequest): PipelineResponse {
-    const results: StreamResult[] = [];
-
-    for (const streamReq of req.requests) {
+    const results: StreamResult[] = req.requests.map((streamReq) => {
       try {
-        const response = this.handleStreamRequest(streamReq);
-        results.push({ type: 'ok', response });
+        return { type: 'ok' as const, response: this.handleStreamRequest(streamReq) };
       } catch (err) {
-        results.push({
-          type: 'error',
-          error: {
-            message: err instanceof Error ? err.message : String(err),
-          },
-        });
+        return {
+          type: 'error' as const,
+          error: { message: err instanceof Error ? err.message : String(err) },
+        };
       }
-    }
+    });
 
-    // Generate a baton for session continuity if still open
-    // (close request sets baton to null, and we don't regenerate it)
-    const wasOpen = this.baton !== null || !req.requests.some(r => r.type === 'close');
-    if (wasOpen && !this.baton) {
-      this.baton = 'airyfs-1';
-    }
+    const hasClose = req.requests.some(r => r.type === 'close');
+    if (!hasClose && !this.baton) this.baton = 'airyfs-1';
 
-    return {
-      baton: this.baton,
-      base_url: null,
-      results,
-    };
+    return { baton: this.baton, base_url: null, results };
   }
 
   private handleStreamRequest(req: StreamRequest): StreamResponse {
@@ -245,41 +286,36 @@ export class HranaServer {
         this.baton = null;
         return { type: 'close' };
 
-      case 'execute': {
-        const result = executeStmt(this.sql, req.stmt);
-        return { type: 'execute', result };
-      }
+      case 'execute':
+        return { type: 'execute', result: executeStmt(this.sql, req.stmt) };
 
-      case 'batch': {
-        const result = this.executeBatch(req.batch.steps);
-        return { type: 'batch', result };
-      }
+      case 'batch':
+        return { type: 'batch', result: this.executeBatch(req.batch.steps) };
 
       case 'get_autocommit':
         return { type: 'get_autocommit', is_autocommit: true };
 
       case 'sequence': {
-        // Execute SQL without returning results
-        const query = req.sql ?? '';
-        if (query) {
-          this.sql.exec(query);
+        const seqSql = req.sql ?? '';
+        for (const part of seqSql.split(';')) {
+          const t = part.trim();
+          if (!t || isBlockedStatement(t) || isPragma(t)) continue;
+          this.sql.exec(t);
         }
         return { type: 'sequence' };
       }
 
       case 'store_sql':
-        // We don't cache SQL statements — just acknowledge
         return { type: 'store_sql' };
 
       case 'close_sql':
         return { type: 'close_sql' };
 
       case 'describe':
-        // Minimal describe response
         return { type: 'describe', result: { params: [], cols: [], is_explain: false, is_readonly: false } };
 
       default:
-        throw new Error(`Unsupported stream request type: ${(req as { type: string }).type}`);
+        throw new Error(`Unsupported stream request: ${(req as { type: string }).type}`);
     }
   }
 
@@ -295,14 +331,11 @@ export class HranaServer {
       }
 
       try {
-        const result = executeStmt(this.sql, step.stmt);
-        stepResults.push(result);
+        stepResults.push(executeStmt(this.sql, step.stmt));
         stepErrors.push(null);
       } catch (err) {
         stepResults.push(null);
-        stepErrors.push({
-          message: err instanceof Error ? err.message : String(err),
-        });
+        stepErrors.push({ message: err instanceof Error ? err.message : String(err) });
       }
     }
 
@@ -315,7 +348,6 @@ export class HranaServer {
     errors: ({ message: string } | null)[]
   ): boolean {
     const c = cond as { type: string; step?: number; cond?: unknown; conds?: unknown[] };
-
     switch (c.type) {
       case 'ok':
         return c.step !== undefined && c.step < results.length && results[c.step] !== null;

@@ -15,52 +15,27 @@ export class AiryFS extends Container<Env> {
   sleepAfter = '30m';
 
   private fs!: AgentFS;
-
-  // Track the active Hrana serve promise so we don't open multiple TCP connections
   private activeServePromise: Promise<void> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx as never, env);
     this.ctx.blockConcurrencyWhile(async () => {
       initSchema(this.ctx.storage.sql);
-      // AgentFS.create() must run after initSchema so it finds existing tables
-      // rather than creating its own partial set
       this.fs = AgentFS.create(this.ctx.storage as unknown as CloudflareStorage);
     });
   }
 
-  override onStart() {
-    console.log('Container started');
-  }
-
   override onStop() {
-    console.log('Container stopped');
     this.activeServePromise = null;
-  }
-
-  override onError(error: unknown) {
-    console.error('Container error:', error);
   }
 
   // ---------------------------------------------------------------------------
   // Core API
   // ---------------------------------------------------------------------------
 
-  /**
-   * Execute a shell command in the Container against the FUSE-mounted volume.
-   * The FUSE mount is backed by DO SQLite via the Hrana TCP pipe.
-   */
+  /** Execute a shell command in the Container against the FUSE-mounted volume. */
   async exec(command: string): Promise<unknown> {
-    try {
-      await this.ensureContainer();
-    } catch (err) {
-      // Return error details instead of a generic 500
-      return {
-        error: 'ensureContainer failed',
-        message: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
-      };
-    }
+    await this.ensureContainer();
 
     const resp = await this.containerFetch(
       new Request('http://localhost/exec', {
@@ -116,23 +91,64 @@ export class AiryFS extends Container<Env> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Start the Container with FUSE mount and Hrana bridge if not already running.
+   * Start the Container and set up bridge + FUSE mount via HTTP calls.
    *
-   * Startup order matters — there's a dependency chain:
-   *   1. Bridge listens on TCP :9000
-   *   2. DO connects TCP and starts HranaServer (serves SQL from DO SQLite)
-   *   3. FUSE daemon connects to bridge WS :8080 → bridge relays to DO via TCP
-   *   4. Command server starts on :4000 after FUSE is mounted
-   *
-   * We wait for :9000 first, connect TCP and start Hrana, then wait for :4000.
-   * If we waited for both ports before connecting TCP, we'd deadlock — FUSE
-   * can't mount without the Hrana connection, and the command server can't
-   * start without FUSE.
+   * The DO drives the sequence:
+   *   1. Container starts with command-server.js (port 4000)
+   *   2. POST /setup → bridge starts in-process (ports 9000 + 8080)
+   *   3. DO connects TCP to :9000, starts HranaServer
+   *   4. POST /mount → agentfs FUSE daemon at /volume
    */
-  /** Start the Container and wait for the command server. */
   private async ensureContainer(): Promise<void> {
-    this.entrypoint = ['node', 'dist/command-server.js'];
+    if (this.activeServePromise) return;
+
+    this.entrypoint = ['node', '/app/dist/command-server.js'];
+
+    // 1. Wait for command server
     await this.startAndWaitForPorts({ ports: [4000] });
+
+    // 2. Start bridge in-process
+    const setupResp = await this.containerFetch(
+      new Request('http://localhost/setup', { method: 'POST' }),
+      4000
+    );
+    const setupResult = (await setupResp.json()) as { ok: boolean; error?: string };
+    if (!setupResult.ok) {
+      throw new Error(`Bridge setup failed: ${setupResult.error}`);
+    }
+
+    // 3. Connect TCP to bridge, start Hrana server in background
+    const socket = this.ctx.container!.getTcpPort(9000).connect('0.0.0.0:9000');
+    await socket.opened;
+
+    const server = new HranaServer({
+      readable: socket.readable,
+      writable: socket.writable,
+      sql: wrapSqlStorage(this.ctx.storage.sql),
+    });
+
+    this.activeServePromise = server.serve().then(
+      () => { this.activeServePromise = null; },
+      () => { this.activeServePromise = null; }
+    );
+
+    // 4. Mount FUSE — fire-and-forget, then poll for readiness.
+    // Can't await because the mount blocks while FUSE queries flow through serve().
+    this.containerFetch(
+      new Request('http://localhost/mount', { method: 'POST' }),
+      4000
+    ).catch(() => {});
+
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const healthResp = await this.containerFetch('http://localhost/health', 4000);
+        const health = (await healthResp.json()) as { fuseMounted?: boolean };
+        if (health.fuseMounted) break;
+      } catch {
+        // Container not ready yet
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -143,8 +159,6 @@ export class AiryFS extends Container<Env> {
     const url = new URL(request.url);
 
     try {
-      // -- Container commands --
-
       if (url.pathname === '/exec' && request.method === 'POST') {
         const body = (await request.json()) as { command: string };
         return Response.json(await this.exec(body.command));
@@ -154,8 +168,6 @@ export class AiryFS extends Container<Env> {
         await this.destroyContainer();
         return new Response('ok');
       }
-
-      // -- Filesystem (direct DO access, no Container) --
 
       if (url.pathname === '/fs/write' && request.method === 'POST') {
         const path = url.searchParams.get('path');
@@ -174,8 +186,6 @@ export class AiryFS extends Container<Env> {
         const path = url.searchParams.get('path') ?? '/';
         return Response.json(await this.listDir(path));
       }
-
-      // -- KV store --
 
       if (url.pathname === '/kv/set' && request.method === 'POST') {
         const key = url.searchParams.get('key');
@@ -198,8 +208,6 @@ export class AiryFS extends Container<Env> {
         if (rows.length === 0) return new Response('Not found', { status: 404 });
         return new Response(rows[0].value);
       }
-
-      // -- Volume info --
 
       if (url.pathname === '/db-info') {
         return Response.json(this.dbInfo());
