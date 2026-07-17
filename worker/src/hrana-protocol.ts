@@ -123,10 +123,18 @@ export interface PipelineResponse {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const HEADER_SIZE = 4;
+export const MAX_TRANSPORT_FRAME_BYTES = 8 * 1024 * 1024;
+
+export class FrameTooLargeError extends Error {
+  constructor(readonly frameLength: number) {
+    super(`Transport frame exceeds ${MAX_TRANSPORT_FRAME_BYTES} bytes: ${frameLength}`);
+  }
+}
 
 /** Serialize a message into a length-prefixed frame. */
 export function serializeFrame(msg: unknown): Uint8Array {
   const json = encoder.encode(JSON.stringify(msg));
+  if (json.length > MAX_TRANSPORT_FRAME_BYTES) throw new FrameTooLargeError(json.length);
   const frame = new Uint8Array(HEADER_SIZE + json.length);
   const view = new DataView(frame.buffer);
   view.setUint32(0, json.length, false);
@@ -144,6 +152,7 @@ export function deserializeFrame(
 
   const view = new DataView(buf.buffer, buf.byteOffset + offset, remaining);
   const jsonLength = view.getUint32(0, false);
+  if (jsonLength > MAX_TRANSPORT_FRAME_BYTES) throw new FrameTooLargeError(jsonLength);
 
   if (remaining < HEADER_SIZE + jsonLength) return null;
 
@@ -159,6 +168,10 @@ export class FrameBuffer {
   private totalLength = 0;
 
   push(chunk: Uint8Array): void {
+    const bufferedLength = this.totalLength + chunk.length;
+    if (bufferedLength > MAX_TRANSPORT_FRAME_BYTES + HEADER_SIZE) {
+      throw new FrameTooLargeError(bufferedLength - HEADER_SIZE);
+    }
     this.chunks.push(chunk);
     this.totalLength += chunk.length;
   }

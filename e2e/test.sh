@@ -139,8 +139,32 @@ check_contains "DO reads FUSE-written file" "from-fuse" "$DO_READ"
 
 echo ""
 
-# -- 4. Git inside FUSE --
-echo "4. Git inside FUSE"
+# -- 4. Transport admission --
+echo "4. Transport admission"
+
+EXEC_ONE_FILE=$(mktemp)
+curl -sf --max-time 30 -X POST "$BASE/exec?volume=$VOL" \
+  -H "Content-Type: application/json" -d '{"command":"printf ready > /volume/phase4-ready; sleep 3; printf phase4"}' > "$EXEC_ONE_FILE" &
+EXEC_ONE_PID=$!
+for _ in $(seq 1 50); do
+  [ "$(curl -s "$BASE/fs/read?volume=$VOL&path=/phase4-ready")" = "ready" ] && break
+  sleep 0.1
+done
+EXEC_BUSY_RESPONSE=$(curl -s --max-time 15 -w $'\n%{http_code}' -X POST "$BASE/exec?volume=$VOL" \
+  -H "Content-Type: application/json" -d '{"command":"printf overlap"}')
+EXEC_BUSY_STATUS=${EXEC_BUSY_RESPONSE##*$'\n'}
+EXEC_BUSY=${EXEC_BUSY_RESPONSE%$'\n'*}
+wait "$EXEC_ONE_PID"
+EXEC_ONE=$(<"$EXEC_ONE_FILE")
+rm -f "$EXEC_ONE_FILE"
+check_contains "first concurrent exec completes" '"stdout":"phase4"' "$EXEC_ONE"
+check "overlapping exec returns 503" "503" "$EXEC_BUSY_STATUS"
+check_contains "overlapping exec is rejected" '"code":"EXEC_BUSY"' "$EXEC_BUSY"
+
+echo ""
+
+# -- 5. Git inside FUSE --
+echo "5. Git inside FUSE"
 
 # Run metadata-heavy Git work on the same volume after mixed direct/FUSE
 # mutations; the journal poller must invalidate the active mount first.
@@ -163,8 +187,8 @@ check_contains "DO sees main.py" "main.py" "$LS2"
 
 echo ""
 
-# -- 5. Persistence across container eviction --
-echo "5. Persistence"
+# -- 6. Persistence across container eviction --
+echo "6. Persistence"
 
 curl -sf -X POST "$BASE/destroy?volume=$GIT_VOL" > /dev/null
 sleep 3

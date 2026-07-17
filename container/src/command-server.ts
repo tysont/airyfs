@@ -16,6 +16,7 @@ let cwd = '/tmp';
 let bridgeStarted = false;
 let fuseProcess: ChildProcess | null = null;
 let fuseExitCode: number | null = null;
+let activeExec: ChildProcess | null = null;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -122,6 +123,12 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && req.url === '/exec') {
+    if (activeExec && activeExec.exitCode === null) {
+      res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '1' });
+      res.end(JSON.stringify({ error: 'Another command is already running' }));
+      return;
+    }
+
     // Check FUSE health before executing
     const fuseErr = fuseDaemonError();
     if (cwd === MOUNT_POINT && fuseErr) {
@@ -148,7 +155,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    exec(command, {
+    const child = exec(command, {
       cwd,
       timeout: EXEC_TIMEOUT_MS,
       env: {
@@ -158,6 +165,7 @@ const server = createServer(async (req, res) => {
       },
       maxBuffer: EXEC_MAX_BUFFER,
     }, (error, stdout, stderr) => {
+      if (activeExec === child) activeExec = null;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         exitCode: error ? (error.code ?? 1) : 0,
@@ -165,6 +173,7 @@ const server = createServer(async (req, res) => {
         stderr: stderr || '',
       }));
     });
+    activeExec = child;
     return;
   }
 

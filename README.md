@@ -320,7 +320,7 @@ The first `exec` performs four steps:
 
 Inside the Container, AgentFS uses `libsql::Builder::new_remote("http://localhost:8080", "")`. A filesystem operation becomes a Hrana HTTP request to the bridge. The bridge forwards a framed request over TCP to the Durable Object. The Durable Object executes the SQL against `ctx.storage.sql` and returns the result along the same path.
 
-The bridge rejects pending requests when a connection drops or is replaced and applies a response timeout. Container startup is single-flight, so concurrent first executions wait for the same mount attempt.
+The bridge rejects pending requests when a connection drops and applies a response timeout. On replacement, new requests switch to the new generation while already-dispatched work drains on the retired socket. Container startup is single-flight, so concurrent first executions wait for the same mount attempt.
 
 ### Persistence And Lifecycle
 
@@ -389,11 +389,11 @@ Each active `HranaServer` records pipeline and statement counts for `/usage` and
 
 ### Framing, Ordering, And Failure Handling
 
-TCP does not preserve application message boundaries. `FrameBuffer` handles partial headers, partial payloads, and multiple frames delivered in one chunk. The bridge keeps a FIFO queue because the Durable Object processes requests sequentially and responses arrive in request order.
+TCP does not preserve application message boundaries. `FrameBuffer` handles partial headers, partial payloads, and multiple frames delivered in one chunk. Each bridge channel admits at most 16 requests, assigns local request IDs, serializes socket writes with backpressure, and resolves the bounded Hrana pipeline in FIFO order. Request IDs are returned in `X-AiryFS-Request-ID` and never alter the Hrana wire payload.
 
-Every bridge request has a 30-second response deadline. A write failure, timeout, socket error, socket end, or socket close invalidates that connection generation, clears buffered bytes, and rejects every pending HTTP request. When the Durable Object reconnects, the bridge destroys the previous socket and prevents late events from that socket from clearing the replacement connection.
+Every bridge request has a 30-second response deadline and an 8 MiB frame limit. Queued work is removed when its HTTP client disconnects. An active canceled request is drained and discarded before later responses are resolved, preserving FIFO alignment. A write failure, timeout, oversized response, socket error, socket end, or socket close invalidates that connection generation, clears buffered bytes, and rejects every pending HTTP request. When the Durable Object reconnects, the retired generation remains isolated until its admitted requests drain or time out.
 
-The bridge returns `503` for protocol requests until the Durable Object TCP connection exists. Pipeline transport failures become `502` responses to the libSQL client.
+The bridge returns `503` with `Retry-After` when the Durable Object TCP connection is absent or admission is full. Pipeline transport failures become `502` responses to the libSQL client. A volume permits one active `exec`; overlapping commands receive `503 EXEC_BUSY` so one command cannot replace another command's TCP session.
 
 ## API
 
@@ -623,13 +623,14 @@ npm test
 npm run typecheck
 ```
 
-The 72 tests cover Hrana framing and execution, schema creation and migration, stored SQL, locking, binary streaming, ranges, atomic replacement, metadata operations, direct truncation, mutation journaling, chunk-size boundaries, and POSIX-style HTTP errors. `npm run test:cloud` covers deployment rendering, account selection, environment validation, production guards, and Docker credential isolation.
+The 75 Worker tests cover Hrana framing and execution, transport frame limits, schema creation and migration, stored SQL, locking, binary streaming, ranges, atomic replacement, metadata operations, direct truncation, mutation journaling, chunk-size boundaries, and POSIX-style HTTP errors. `npm run test:cloud` covers deployment rendering, account selection, environment validation, production guards, and Docker credential isolation.
 
 ### Container Build
 
 ```bash
 cd container
 npm run build
+npm test
 ```
 
 ### AgentFS Tests

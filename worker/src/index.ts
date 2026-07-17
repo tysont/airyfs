@@ -30,6 +30,13 @@ interface Env {
   AiryFS: DurableObjectNamespace<AiryFS>;
 }
 
+interface WorkerSocket {
+  opened: Promise<unknown>;
+  readable: ReadableStream<Uint8Array>;
+  writable: WritableStream<Uint8Array>;
+  close(): Promise<void>;
+}
+
 export class AiryFS extends Container<Env> {
   defaultPort = 8080;
   sleepAfter = '30m';
@@ -37,6 +44,8 @@ export class AiryFS extends Container<Env> {
   private fs: AgentFS | null = null;
   private startupPromise: Promise<void> | null = null;
   private activeServePromise: Promise<void> | null = null;
+  private invalidationServePromise: Promise<void> | null = null;
+  private execActive = false;
   private hranaServer: HranaServer | null = null;
   private readonly access = new VolumeAccessCoordinator();
   private readonly mutations: MutationJournal;
@@ -77,6 +86,8 @@ export class AiryFS extends Container<Env> {
   override onStop() {
     this.startupPromise = null;
     this.activeServePromise = null;
+    this.invalidationServePromise = null;
+    this.execActive = false;
   }
 
   // ---------------------------------------------------------------------------
@@ -85,23 +96,29 @@ export class AiryFS extends Container<Env> {
 
   /** Execute a shell command in the Container against the FUSE-mounted volume. */
   async exec(command: string): Promise<unknown> {
-    await this.ensureContainer(true);
+    if (this.execActive) throw new HttpError(503, 'EXEC_BUSY', 'Another command is already running');
+    this.execActive = true;
+    try {
+      await this.ensureContainer(true);
 
-    const resp = await this.containerFetch(
-      new Request('http://localhost/exec', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command }),
-      }),
-      4000
-    );
+      const resp = await this.containerFetch(
+        new Request('http://localhost/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command }),
+        }),
+        4000
+      );
 
-    if (!resp.ok) {
-      if (resp.status === 503) this.activeServePromise = null;
-      throw new Error(`Container exec failed (${resp.status}): ${await resp.text()}`);
+      if (!resp.ok) {
+        if (resp.status === 503) this.activeServePromise = null;
+        throw new Error(`Container exec failed (${resp.status}): ${await resp.text()}`);
+      }
+
+      return resp.json();
+    } finally {
+      this.execActive = false;
     }
-
-    return resp.json();
   }
 
   /** Read a file from the volume (direct DO access, no Container needed). */
@@ -322,12 +339,10 @@ export class AiryFS extends Container<Env> {
       throw new Error(`Bridge setup failed: ${setupResult.error}`);
     }
 
-    // 3. Connect TCP to bridge, start Hrana server in background.
-    // On TCP close or error, reset activeServePromise so the next
-    // ensureContainer() call reconnects instead of returning early.
+    // 3. Reconnect FUSE data traffic for this exec. Keep the independent
+    // invalidation channel alive so journal polling is never interrupted by exec.
     const socket = this.ctx.container!.getTcpPort(9000).connect('0.0.0.0:9000');
-    const invalidationSocket = this.ctx.container!.getTcpPort(9001).connect('0.0.0.0:9001');
-    await Promise.all([socket.opened, invalidationSocket.opened]);
+    await socket.opened;
 
     this.hranaServer = new HranaServer({
       readable: socket.readable,
@@ -336,21 +351,32 @@ export class AiryFS extends Container<Env> {
       writeLock: () => this.access.acquireWrite('*'),
     });
 
-    const invalidationServer = new HranaServer({
-      readable: invalidationSocket.readable,
-      writable: invalidationSocket.writable,
-      sql: wrapSqlStorage(this.ctx.storage.sql),
-    });
-    const servePromise = Promise.all([
-      this.hranaServer.serve(),
-      invalidationServer.serve(),
-    ]).then(() => undefined);
+    const servePromise = this.hranaServer.serve();
     this.activeServePromise = servePromise;
     this.ctx.waitUntil(servePromise);
     const clearServePromise = (): void => {
       if (this.activeServePromise === servePromise) this.activeServePromise = null;
     };
     void servePromise.then(clearServePromise, clearServePromise);
+
+    let newInvalidationSocket: WorkerSocket | null = null;
+    if (!this.invalidationServePromise) {
+      const invalidationSocket = this.ctx.container!.getTcpPort(9001).connect('0.0.0.0:9001');
+      newInvalidationSocket = invalidationSocket;
+      await invalidationSocket.opened;
+      const invalidationServer = new HranaServer({
+        readable: invalidationSocket.readable,
+        writable: invalidationSocket.writable,
+        sql: wrapSqlStorage(this.ctx.storage.sql),
+      });
+      const invalidationServePromise = invalidationServer.serve();
+      this.invalidationServePromise = invalidationServePromise;
+      this.ctx.waitUntil(invalidationServePromise);
+      const clearInvalidationPromise = (): void => {
+        if (this.invalidationServePromise === invalidationServePromise) this.invalidationServePromise = null;
+      };
+      void invalidationServePromise.then(clearInvalidationPromise, clearInvalidationPromise);
+    }
 
     // 4. Mount FUSE — fire-and-forget, then poll for readiness.
     // Can't await because the mount blocks while FUSE queries flow through serve().
@@ -390,7 +416,7 @@ export class AiryFS extends Container<Env> {
 
     if (!mounted) {
       await socket.close().catch(() => undefined);
-      await invalidationSocket.close().catch(() => undefined);
+      if (newInvalidationSocket) await newInvalidationSocket.close().catch(() => undefined);
       if (this.activeServePromise === servePromise) this.activeServePromise = null;
       throw mountError ?? new Error('FUSE mount did not complete within 30 seconds');
     }

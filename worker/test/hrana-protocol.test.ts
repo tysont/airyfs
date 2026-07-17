@@ -6,6 +6,8 @@ import {
   serializeFrame,
   deserializeFrame,
   FrameBuffer,
+  FrameTooLargeError,
+  MAX_TRANSPORT_FRAME_BYTES,
   type PipelineRequest,
   type PipelineResponse,
   type HranaValue,
@@ -199,6 +201,12 @@ describe('FrameBuffer', () => {
     expect(fb.drain()).toHaveLength(2);
   });
 
+  it('bounds aggregate buffered frame data', () => {
+    const fb = new FrameBuffer();
+    expect(() => fb.push(new Uint8Array(MAX_TRANSPORT_FRAME_BYTES + 5)))
+      .toThrow(FrameTooLargeError);
+  });
+
   it('drain is idempotent', () => {
     const fb = new FrameBuffer();
     fb.push(serializeFrame({ baton: null, requests: [] }));
@@ -219,5 +227,16 @@ describe('frame format', () => {
     const len = view.getUint32(0, false);
     expect(len).toBe(frame.length - 4);
     expect(JSON.parse(new TextDecoder().decode(frame.slice(4)))).toEqual(msg);
+  });
+
+  it('rejects oversized serialized frames', () => {
+    expect(() => serializeFrame('x'.repeat(MAX_TRANSPORT_FRAME_BYTES)))
+      .toThrow(FrameTooLargeError);
+  });
+
+  it('rejects an oversized declared frame from its header', () => {
+    const frame = new Uint8Array(4);
+    new DataView(frame.buffer).setUint32(0, MAX_TRANSPORT_FRAME_BYTES + 1, false);
+    expect(() => deserializeFrame(frame, 0)).toThrow(FrameTooLargeError);
   });
 });
