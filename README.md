@@ -136,8 +136,9 @@ The patch series:
 - Adds `ConnectionPool::new_remote(url, token)` and `AgentFSOptions::with_remote(url)`.
 - Adds `--remote-url` and `--auth-token` to `agentfs mount`.
 - Adds bounded FUSE cache TTLs and an independent `--invalidation-url` journal poller.
+- Adds persistent, expiring `fs_open_inode` leases so a live remote FUSE handle keeps reading after a direct unlink or streaming rename-over.
 - Adjusts PRAGMA execution for libSQL compatibility.
-- Keeps the upstream AgentFS schema and filesystem behavior.
+- Keeps the upstream AgentFS schema version and default local filesystem behavior.
 
 The resulting mount command connects to the bridge inside the Container:
 
@@ -503,6 +504,7 @@ AgentFS stores the filesystem as normalized SQLite tables:
 - `fs_config` stores filesystem configuration and schema version.
 - `fs_whiteout`, `fs_overlay_config`, and `fs_origin` support overlay metadata.
 - `fs_mutation_journal` records direct mutations for active FUSE cache invalidation.
+- `fs_open_inode` records persistent, expiring open-handle leases so a direct unlink or streaming rename-over retains a file that a remote FUSE handle is still reading. A trigger on `fs_inode` deletion cascades chunk, symlink, and lease cleanup atomically.
 - `kv_store` stores application key-value records.
 - `tool_calls` stores AgentFS tool-call records.
 
@@ -536,7 +538,7 @@ AiryFS coordinates direct access and FUSE mutations, but it does not yet impleme
 - FUSE writes use a volume-wide lock because Hrana SQL statements do not carry normalized filesystem paths.
 - AiryFS remote mounts use a bounded one-second cache and poll direct-mutation journal rows every 100 milliseconds. Entry invalidations run through FUSE's deferred notification queue on a transport channel independent from ordinary FUSE SQL. Visibility remains asynchronous and the five-second deployed gate includes reconnect and exec overhead.
 - File replacement through the HTTP streaming API is atomic after upload completion.
-- AgentFS currently removes an inode's chunks when its final directory entry is removed or replaced. A FUSE read already in progress can therefore be interrupted by a concurrent direct replacement. Full POSIX unlink semantics require retained open inodes in AgentFS.
+- Open inodes survive concurrent removal. A live remote FUSE handle pins its inode in `fs_open_inode`, so a direct unlink or streaming rename-over drops the pathname immediately but retains the inode and its data until the handle closes or its 120-second lease expires. A heartbeat renews live handles and aborts the mount if renewal fails for too long (kept below the TTL) so a handle never outlasts its lease. Cleanup of a stale lease left by a mount that vanished is lazy: its inode is reaped when a bounded mount next runs its heartbeat reap, not by a proactive alarm. See [`docs/OPEN_INODE_LEASES.md`](docs/OPEN_INODE_LEASES.md).
 - Durable Object SQLite does not support an explicit transaction spanning separate Hrana requests. `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, and `RELEASE` are compatibility no-ops. Batch locking prevents interleaving but does not provide rollback across separate remote requests.
 - Hrana integer bindings are limited to JavaScript's safe integer range because Durable Object SQLite bindings do not accept `bigint`.
 
@@ -623,7 +625,7 @@ npm test
 npm run typecheck
 ```
 
-The 75 Worker tests cover Hrana framing and execution, transport frame limits, schema creation and migration, stored SQL, locking, binary streaming, ranges, atomic replacement, metadata operations, direct truncation, mutation journaling, chunk-size boundaries, and POSIX-style HTTP errors. `npm run test:cloud` covers deployment rendering, account selection, environment validation, production guards, and Docker credential isolation.
+The 82 Worker tests cover Hrana framing and execution, transport frame limits, schema creation and migration, stored SQL, locking, binary streaming, ranges, atomic replacement, metadata operations, direct truncation, mutation journaling, open-handle lease retention, chunk-size boundaries, and POSIX-style HTTP errors. `npm run test:cloud` covers deployment rendering, account selection, environment validation, production guards, and Docker credential isolation.
 
 ### Container Build
 
@@ -643,9 +645,9 @@ The vendored Rust SDK and CLI test suites run in a Linux build environment with 
 AIRYFS_URL=https://your-worker.workers.dev ./e2e/test.sh
 ```
 
-The end-to-end flow covers direct write to FUSE read, direct mutation invalidation, FUSE write to direct read, Git on the same mixed-access volume, and persistence across Container destruction.
+The end-to-end flow covers direct write to FUSE read, direct mutation invalidation, FUSE write to direct read, Git on the same mixed-access volume, open-handle leases (a held FUSE read that survives a direct unlink and a streaming rename-over), and persistence across Container destruction.
 
-Remote mounts use a 1-second entry and attribute TTL plus journal-driven invalidation. See [`docs/FUSE_CACHE_TTL.md`](docs/FUSE_CACHE_TTL.md) and [`docs/MUTATION_INVALIDATION.md`](docs/MUTATION_INVALIDATION.md) for the implementation and deployed measurements.
+Remote mounts use a 1-second entry and attribute TTL plus journal-driven invalidation, and lease open handles so live reads survive concurrent direct removal. See [`docs/FUSE_CACHE_TTL.md`](docs/FUSE_CACHE_TTL.md), [`docs/MUTATION_INVALIDATION.md`](docs/MUTATION_INVALIDATION.md), and [`docs/OPEN_INODE_LEASES.md`](docs/OPEN_INODE_LEASES.md) for the implementation and deployed measurements.
 
 ### Chunk-Size Benchmark
 

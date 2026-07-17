@@ -307,10 +307,11 @@ export class AiryFS extends Container<Env> {
   private async ensureContainer(reconnect = false): Promise<void> {
     this.filesystem();
     if (this.startupPromise) return this.startupPromise;
+    const previousServePromise = reconnect ? this.activeServePromise : null;
     if (reconnect) this.activeServePromise = null;
     if (this.activeServePromise) return;
 
-    const startup = this.startContainer();
+    const startup = this.startContainer(previousServePromise);
     this.startupPromise = startup;
     try {
       await startup;
@@ -319,7 +320,7 @@ export class AiryFS extends Container<Env> {
     }
   }
 
-  private async startContainer(): Promise<void> {
+  private async startContainer(previousServePromise: Promise<void> | null): Promise<void> {
 
     this.entrypoint = ['node', '/app/dist/command-server.js'];
 
@@ -358,6 +359,13 @@ export class AiryFS extends Container<Env> {
       if (this.activeServePromise === servePromise) this.activeServePromise = null;
     };
     void servePromise.then(clearServePromise, clearServePromise);
+
+    if (previousServePromise) {
+      await Promise.race([
+        previousServePromise.catch(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+      ]);
+    }
 
     let newInvalidationSocket: WorkerSocket | null = null;
     if (!this.invalidationServePromise) {

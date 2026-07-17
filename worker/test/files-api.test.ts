@@ -312,3 +312,88 @@ describe('filesystem HTTP API', () => {
     expect(await response?.json()).toMatchObject({ error: { code: 'SYMLINK_NOT_RESOLVED' } });
   });
 });
+
+describe('open-handle lease retention', () => {
+  let db: Database.Database;
+  let leaseFs: AgentFS;
+
+  const now = () => Math.floor(Date.now() / 1000);
+  const inoOf = (name: string): number =>
+    (db.prepare('SELECT ino FROM fs_dentry WHERE parent_ino = 1 AND name = ?').get(name) as { ino: number }).ino;
+  const inodeExists = (ino: number): boolean =>
+    db.prepare('SELECT 1 FROM fs_inode WHERE ino = ?').get(ino) !== undefined;
+  const chunkCount = (ino: number): number =>
+    (db.prepare('SELECT COUNT(*) AS c FROM fs_data WHERE ino = ?').get(ino) as { c: number }).c;
+  const lease = (ino: number, expiresAt: number, openCount = 1) =>
+    db.prepare(
+      'INSERT INTO fs_open_inode (session_id, ino, open_count, expires_at) VALUES (?, ?, ?, ?)'
+    ).run('fuse-session', ino, openCount, expiresAt);
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    leaseFs = AgentFS.create(createTestStorage(db));
+  });
+
+  it('retains an unlinked inode and its data while a lease is unexpired', async () => {
+    await leaseFs.writeFile('/leased.txt', Buffer.from('hello lease'));
+    const ino = inoOf('leased.txt');
+    lease(ino, now() + 120);
+
+    await leaseFs.unlink('/leased.txt');
+
+    // Pathname resolves away immediately, inode and data survive.
+    await expect(leaseFs.stat('/leased.txt')).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(inodeExists(ino)).toBe(true);
+    expect(chunkCount(ino)).toBeGreaterThan(0);
+  });
+
+  it('deletes an unlinked inode when no lease is held', async () => {
+    await leaseFs.writeFile('/plain.txt', Buffer.from('bytes'));
+    const ino = inoOf('plain.txt');
+
+    await leaseFs.unlink('/plain.txt');
+
+    expect(inodeExists(ino)).toBe(false);
+    expect(chunkCount(ino)).toBe(0);
+  });
+
+  it('ignores an expired lease and deletes the inode', async () => {
+    await leaseFs.writeFile('/stale.txt', Buffer.from('bytes'));
+    const ino = inoOf('stale.txt');
+    lease(ino, now() - 10);
+
+    await leaseFs.unlink('/stale.txt');
+
+    expect(inodeExists(ino)).toBe(false);
+  });
+
+  it('retains a replaced inode across a streaming rename-over', async () => {
+    await leaseFs.writeFile('/target.txt', Buffer.from('original'));
+    const victimIno = inoOf('target.txt');
+    lease(victimIno, now() + 120);
+
+    // Mimic writeFileStream: write a temp file and rename it over the target.
+    await leaseFs.writeFile('/target.txt.tmp', Buffer.from('replacement'));
+    const replacementIno = inoOf('target.txt.tmp');
+    await leaseFs.rename('/target.txt.tmp', '/target.txt');
+
+    // Path now resolves to the replacement; the leased victim survives.
+    expect(inoOf('target.txt')).toBe(replacementIno);
+    expect(inodeExists(victimIno)).toBe(true);
+    expect(chunkCount(victimIno)).toBeGreaterThan(0);
+  });
+
+  it('cascades chunk and lease cleanup through the inode delete trigger', async () => {
+    await leaseFs.writeFile('/cascade.txt', Buffer.from('bytes'));
+    const ino = inoOf('cascade.txt');
+    lease(ino, now() - 5); // expired, so unlink deletes the inode
+
+    await leaseFs.unlink('/cascade.txt');
+
+    expect(inodeExists(ino)).toBe(false);
+    expect(chunkCount(ino)).toBe(0);
+    expect(
+      (db.prepare('SELECT COUNT(*) AS c FROM fs_open_inode WHERE ino = ?').get(ino) as { c: number }).c
+    ).toBe(0);
+  });
+});

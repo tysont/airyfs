@@ -112,6 +112,28 @@ const DDL_STATEMENTS = [
     ino INTEGER,
     created_at REAL NOT NULL
   )`,
+
+  // Persistent, expiring open-handle leases. A remote FUSE mount pins the inode
+  // behind a live handle so a direct unlink or streaming rename-over retains the
+  // nlink=0 inode and its data until the handle closes or the lease expires.
+  `CREATE TABLE IF NOT EXISTS fs_open_inode (
+    session_id TEXT NOT NULL,
+    ino INTEGER NOT NULL,
+    open_count INTEGER NOT NULL DEFAULT 0,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, ino)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_fs_open_inode_expires ON fs_open_inode(expires_at)`,
+
+  // Deleting an inode is the single authoritative point at which its chunks,
+  // symlink target, and any residual leases are removed together.
+  `CREATE TRIGGER IF NOT EXISTS trg_fs_inode_delete_cleanup
+    AFTER DELETE ON fs_inode
+    BEGIN
+      DELETE FROM fs_data WHERE ino = OLD.ino;
+      DELETE FROM fs_symlink WHERE ino = OLD.ino;
+      DELETE FROM fs_open_inode WHERE ino = OLD.ino;
+    END`,
 ];
 
 const SEED_STATEMENTS = [
@@ -135,6 +157,7 @@ export const SCHEMA_TABLES = [
   'kv_store',
   'tool_calls',
   'fs_mutation_journal',
+  'fs_open_inode',
 ] as const;
 
 /**

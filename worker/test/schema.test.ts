@@ -81,6 +81,37 @@ describe('initSchema', () => {
     expect(indexNames).toContain('idx_kv_store_created_at');
     expect(indexNames).toContain('idx_tool_calls_name');
     expect(indexNames).toContain('idx_tool_calls_started_at');
+    expect(indexNames).toContain('idx_fs_open_inode_expires');
+  });
+
+  it('creates the open-inode lease table with a composite primary key', () => {
+    initSchema(sql);
+
+    const columns = db.prepare("PRAGMA table_info('fs_open_inode')").all() as { name: string; pk: number }[];
+    const columnNames = columns.map((c) => c.name);
+    expect(columnNames).toEqual(expect.arrayContaining(['session_id', 'ino', 'open_count', 'expires_at']));
+    // session_id and ino form the primary key
+    expect(columns.filter((c) => c.pk > 0).map((c) => c.name).sort()).toEqual(['ino', 'session_id']);
+
+    db.prepare('INSERT INTO fs_open_inode (session_id, ino, open_count, expires_at) VALUES (?, ?, 1, ?)').run('s', 2, 100);
+    expect(() => {
+      db.prepare('INSERT INTO fs_open_inode (session_id, ino, open_count, expires_at) VALUES (?, ?, 1, ?)').run('s', 2, 200);
+    }).toThrow();
+  });
+
+  it('cascades chunk, symlink, and lease cleanup when an inode is deleted', () => {
+    initSchema(sql);
+
+    db.prepare('INSERT INTO fs_inode (ino, mode, nlink, size, atime, mtime, ctime) VALUES (2, 33188, 0, 5, 0, 0, 0)').run();
+    db.prepare('INSERT INTO fs_data (ino, chunk_index, data) VALUES (2, 0, ?)').run(Buffer.from('hello'));
+    db.prepare("INSERT INTO fs_symlink (ino, target) VALUES (2, '/target')").run();
+    db.prepare('INSERT INTO fs_open_inode (session_id, ino, open_count, expires_at) VALUES (?, 2, 1, ?)').run('s', 100);
+
+    db.prepare('DELETE FROM fs_inode WHERE ino = 2').run();
+
+    expect((db.prepare('SELECT COUNT(*) AS c FROM fs_data WHERE ino = 2').get() as { c: number }).c).toBe(0);
+    expect((db.prepare('SELECT COUNT(*) AS c FROM fs_symlink WHERE ino = 2').get() as { c: number }).c).toBe(0);
+    expect((db.prepare('SELECT COUNT(*) AS c FROM fs_open_inode WHERE ino = 2').get() as { c: number }).c).toBe(0);
   });
 
   it('configures new volumes with the 256 KiB default', () => {
@@ -140,7 +171,7 @@ describe('initSchema', () => {
   it('creates empty data tables', () => {
     initSchema(sql);
 
-    for (const table of ['fs_dentry', 'fs_data', 'fs_symlink', 'fs_whiteout', 'fs_origin', 'kv_store', 'tool_calls']) {
+    for (const table of ['fs_dentry', 'fs_data', 'fs_symlink', 'fs_whiteout', 'fs_origin', 'kv_store', 'tool_calls', 'fs_open_inode']) {
       const row = db.prepare(`SELECT count(*) as c FROM ${table}`).get() as { c: number };
       expect(row.c).toBe(0);
     }

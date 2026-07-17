@@ -12,7 +12,7 @@ Run:
 
 The script recreates the ignored `agentfs/.build/` tree, verifies and applies every patch, builds and tests the TypeScript SDK, tests both Rust crates, builds the Linux Rust CLI with stable Rust 1.88, and places the binary at `container/bin/agentfs`. Rust artifacts are retained in the ignored `agentfs/.target/` cache so repeated patch verification remains practical.
 
-AiryFS-specific runtime behavior remains isolated in the ordered patch series. `0008-configurable-fuse-cache-ttl.patch` adds bounded remote FUSE caching without changing AgentFS's default local single-writer behavior. `0009-remote-mutation-invalidation-poller.patch` adds journal-driven invalidation with an optional independent remote URL.
+AiryFS-specific runtime behavior remains isolated in the ordered patch series. `0008-configurable-fuse-cache-ttl.patch` adds bounded remote FUSE caching without changing AgentFS's default local single-writer behavior. `0009-remote-mutation-invalidation-poller.patch` adds journal-driven invalidation with an optional independent remote URL. `0010-cross-runtime-open-unlink-leases.patch` adds persistent, expiring `fs_open_inode` leases so a live remote FUSE handle keeps reading a file after a Worker direct unlink or streaming rename-over. See [`OPEN_INODE_LEASES.md`](OPEN_INODE_LEASES.md).
 
 The worker consumes the TypeScript package from `agentfs/.build/sdk/typescript`, so run the AgentFS build before installing worker dependencies from a clean checkout.
 

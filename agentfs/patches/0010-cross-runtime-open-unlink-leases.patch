@@ -1,0 +1,1336 @@
+diff --git a/cli/src/cmd/mount.rs b/cli/src/cmd/mount.rs
+index 3719e3f..71197c5 100644
+--- a/cli/src/cmd/mount.rs
++++ b/cli/src/cmd/mount.rs
+@@ -107,6 +107,11 @@ fn mount_fuse(args: MountArgs) -> Result<()> {
+         if let Some(url) = &args.invalidation_url { options.remote_url = Some(url.clone()); }
+         options
+     });
++    // Open-handle leases apply only to remote bounded mounts, reusing the
++    // primary remote connection so retention stays consistent with the mount's
++    // own reads and writes.
++    let lease_options = (args.remote_url.is_some() && args.cache_ttl != std::time::Duration::MAX)
++        .then(|| opts.clone());
+ 
+     // Check schema version before daemonizing (skip for remote — schema is managed remotely).
+     if args.remote_url.is_none() {
+@@ -202,7 +207,7 @@ fn mount_fuse(args: MountArgs) -> Result<()> {
+             }
+         })?;
+ 
+-        crate::fuse::mount(fs, fuse_opts, rt, invalidation_options)
++        crate::fuse::mount(fs, fuse_opts, rt, invalidation_options, lease_options)
+     };
+ 
+     if args.foreground {
+diff --git a/cli/src/fuse.rs b/cli/src/fuse.rs
+index ef1ae36..4ad3db2 100644
+--- a/cli/src/fuse.rs
++++ b/cli/src/fuse.rs
+@@ -92,10 +92,60 @@ pub struct FuseMountOptions {
+     pub cache_ttl: Duration,
+ }
+ 
++/// Default open-handle lease lifetime for remote bounded mounts.
++const LEASE_TTL: Duration = Duration::from_secs(120);
++/// How often the heartbeat renews active leases and reaps expired orphans.
++const LEASE_HEARTBEAT: Duration = Duration::from_secs(10);
++/// How long lease renewal may fail before the mount aborts itself. Must stay
++/// safely below `LEASE_TTL` so a live handle can never outlast its lease and have
++/// its inode reaped from under it.
++const LEASE_FAILURE_ABORT: Duration = Duration::from_secs(60);
++/// Exit code used when the mount aborts because lease renewal failed for too
++/// long. The container command server treats any FUSE exit as unhealthy.
++const LEASE_ABORT_EXIT_CODE: i32 = 87;
++
++/// Read a `Duration` in seconds from an environment variable, falling back to
++/// `default` when unset or unparseable. Lets tests and integration harnesses
++/// shorten lease timings without weakening production defaults.
++fn duration_from_env(var: &str, default: Duration) -> Duration {
++    std::env::var(var)
++        .ok()
++        .and_then(|value| value.parse::<u64>().ok())
++        .filter(|secs| *secs > 0)
++        .map(Duration::from_secs)
++        .unwrap_or(default)
++}
++
++/// Effective lease lifetime, overridable via `AGENTFS_LEASE_TTL_SECS`.
++fn lease_ttl() -> Duration {
++    duration_from_env("AGENTFS_LEASE_TTL_SECS", LEASE_TTL)
++}
++
++/// Effective heartbeat interval, overridable via `AGENTFS_LEASE_HEARTBEAT_SECS`.
++fn lease_heartbeat() -> Duration {
++    duration_from_env("AGENTFS_LEASE_HEARTBEAT_SECS", LEASE_HEARTBEAT)
++}
++
++/// Effective sustained-failure abort window, overridable via
++/// `AGENTFS_LEASE_FAILURE_ABORT_SECS`.
++fn lease_failure_abort() -> Duration {
++    duration_from_env("AGENTFS_LEASE_FAILURE_ABORT_SECS", LEASE_FAILURE_ABORT)
++}
++
++/// Conservative health decision: abort once lease renewal has been failing
++/// continuously for at least `limit`. Pure function so it is unit testable.
++fn lease_should_abort(first_failure: Option<std::time::Instant>, limit: Duration) -> bool {
++    first_failure.is_some_and(|since| since.elapsed() >= limit)
++}
++
+ /// Tracks an open file handle
+ struct OpenFile {
+     /// The file handle from the filesystem layer.
+     file: BoxedFile,
++    /// The stable lease inode key for this handle (from `FileSystem::lease_inode`),
++    /// used to renew and release its lease. `None` when the handle is not leasable
++    /// (non-lease mount, or a read-only base-layer overlay file).
++    lease_ino: Option<i64>,
+ }
+ 
+ struct AgentFSFuse {
+@@ -106,6 +156,12 @@ struct AgentFSFuse {
+     open_files: Arc<Mutex<HashMap<u64, OpenFile>>>,
+     /// Next file handle to allocate
+     next_fh: AtomicU64,
++    /// Persistent mount/session identifier. `Some` only for remote bounded
++    /// mounts, where a live handle must lease its inode against concurrent
++    /// direct unlink and rename-over.
++    session_id: Option<String>,
++    /// Lease lifetime granted on pin and extended on heartbeat.
++    lease_ttl: Duration,
+ }
+ 
+ impl Filesystem for AgentFSFuse {
+@@ -662,19 +718,46 @@ impl Filesystem for AgentFSFuse {
+         let gid = req.gid();
+         let fs = self.fs.clone();
+         let name_owned = name_str.to_string();
++        let name_for_create = name_owned.clone();
+         let result = self.runtime.block_on(async move {
+-            fs.create_file(parent as i64, &name_owned, mode, uid, gid)
++            fs.create_file(parent as i64, &name_for_create, mode, uid, gid)
+                 .await
+         });
+ 
+         match result {
+             Ok((stats, file)) => {
+                 let attr = fillattr(&stats);
++                let ino = stats.ino;
++                let lease_ino = self.fs.lease_inode(ino);
+ 
+                 let fh = self.alloc_fh();
+-                self.open_files.lock().insert(fh, OpenFile { file });
+-
+-                reply.created(&self.cache_ttl, &attr, 0, fh, 0);
++                self.open_files.lock().insert(fh, OpenFile { file, lease_ino });
++                // Pin before replying so a direct unlink racing the reply still
++                // observes the lease and retains the inode. If the lease cannot be
++                // persisted on a lease-enabled mount, drop the handle and fail the
++                // create rather than expose a handle a concurrent unlink could
++                // delete out from under. create_file and pin are NOT a single
++                // transaction, so best-effort roll back the just-created (empty)
++                // file to keep the failure close to atomic.
++                match self.pin_open(lease_ino) {
++                    Ok(()) => reply.created(&self.cache_ttl, &attr, 0, fh, 0),
++                    Err(e) => {
++                        self.open_files.lock().remove(&fh);
++                        let fs = self.fs.clone();
++                        let rollback_name = name_owned.clone();
++                        let rollback = self.runtime.block_on(async move {
++                            fs.unlink(parent as i64, &rollback_name).await
++                        });
++                        if let Err(re) = rollback {
++                            tracing::debug!(
++                                "FUSE create pin rollback unlink failed for {:?}: {}",
++                                name_owned,
++                                re
++                            );
++                        }
++                        reply.error(error_to_errno(&e));
++                    }
++                }
+             }
+             Err(e) => {
+                 reply.error(error_to_errno(&e));
+@@ -870,9 +953,23 @@ impl Filesystem for AgentFSFuse {
+ 
+         match result {
+             Ok(file) => {
++                let lease_ino = self.fs.lease_inode(ino as i64);
+                 let fh = self.alloc_fh();
+-                self.open_files.lock().insert(fh, OpenFile { file });
+-                reply.opened(fh, 0);
++                self.open_files
++                    .lock()
++                    .insert(fh, OpenFile { file, lease_ino });
++                // Pin before replying so a direct unlink racing the reply still
++                // observes the lease and retains the inode. If the lease cannot be
++                // persisted on a lease-enabled mount, drop the handle and fail the
++                // open rather than expose a handle a concurrent unlink could delete
++                // out from under.
++                match self.pin_open(lease_ino) {
++                    Ok(()) => reply.opened(fh, 0),
++                    Err(e) => {
++                        self.open_files.lock().remove(&fh);
++                        reply.error(error_to_errno(&e));
++                    }
++                }
+             }
+             Err(e) => reply.error(error_to_errno(&e)),
+         }
+@@ -1003,7 +1100,12 @@ impl Filesystem for AgentFSFuse {
+         reply: ReplyEmpty,
+     ) {
+         tracing::debug!("FUSE::release: fh={}", fh);
+-        self.open_files.lock().remove(&fh);
++        let removed = self.open_files.lock().remove(&fh);
++        // Release the lease last: dropping the final hold reaps a now-unlinked
++        // inode, so the data must stay reachable until every handle is closed.
++        if let Some(open_file) = removed {
++            self.unpin_open(open_file.lease_ino);
++        }
+         reply.ok();
+     }
+ 
+@@ -1082,13 +1184,22 @@ impl AgentFSFuse {
+     ///
+     /// The provided Tokio runtime is used to execute async FileSystem operations
+     /// from within synchronous FUSE callbacks via `block_on`.
+-    fn new(fs: Arc<dyn FileSystem>, runtime: Runtime, cache_ttl: Duration) -> Self {
++    fn new(
++        fs: Arc<dyn FileSystem>,
++        runtime: Runtime,
++        cache_ttl: Duration,
++        open_files: Arc<Mutex<HashMap<u64, OpenFile>>>,
++        session_id: Option<String>,
++        lease_ttl: Duration,
++    ) -> Self {
+         Self {
+             fs,
+             runtime,
+             cache_ttl,
+-            open_files: Arc::new(Mutex::new(HashMap::new())),
++            open_files,
+             next_fh: AtomicU64::new(1),
++            session_id,
++            lease_ttl,
+         }
+     }
+ 
+@@ -1099,6 +1210,57 @@ impl AgentFSFuse {
+     fn alloc_fh(&self) -> u64 {
+         self.next_fh.fetch_add(1, Ordering::SeqCst)
+     }
++
++    /// Pin a handle's open-handle lease before replying to open/create.
++    ///
++    /// `lease_ino` is the stable lease key resolved via `FileSystem::lease_inode`.
++    /// A no-op returning `Ok` when this is a non-lease mount (no session id) or the
++    /// handle is not leasable (`None`). On a lease-enabled mount it returns the
++    /// persistence result: callers must not report a successful open/create unless
++    /// the lease was persisted, otherwise a concurrent direct unlink could delete
++    /// the inode out from under a handle the caller believes is protected.
++    fn pin_open(&self, lease_ino: Option<i64>) -> Result<(), SdkError> {
++        let Some(session_id) = self.session_id.clone() else {
++            return Ok(());
++        };
++        let Some(ino) = lease_ino else {
++            return Ok(());
++        };
++        let expires_at = lease_expiry(self.lease_ttl);
++        let fs = self.fs.clone();
++        let result = self
++            .runtime
++            .block_on(async move { fs.pin_open_inode(&session_id, ino, expires_at).await });
++        if let Err(ref e) = result {
++            tracing::debug!("FUSE lease pin failed for ino={}: {}", ino, e);
++        }
++        result
++    }
++
++    /// Release one hold on a handle's open-handle lease on file close.
++    fn unpin_open(&self, lease_ino: Option<i64>) {
++        let Some(session_id) = self.session_id.clone() else {
++            return;
++        };
++        let Some(ino) = lease_ino else {
++            return;
++        };
++        let fs = self.fs.clone();
++        let result = self
++            .runtime
++            .block_on(async move { fs.unpin_open_inode(&session_id, ino).await });
++        if let Err(e) = result {
++            tracing::debug!("FUSE lease unpin failed for ino={}: {}", ino, e);
++        }
++    }
++}
++
++/// Compute an absolute lease expiry (Unix seconds) `ttl` from now.
++fn lease_expiry(ttl: Duration) -> i64 {
++    let now = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default();
++    (now + ttl).as_secs() as i64
+ }
+ 
+ // ─────────────────────────────────────────────────────────────
+@@ -1181,12 +1343,43 @@ pub fn mount(
+     opts: FuseMountOptions,
+     runtime: Runtime,
+     invalidation_options: Option<AgentFSOptions>,
++    lease_options: Option<AgentFSOptions>,
+ ) -> anyhow::Result<()> {
+     // Raise fd limit to hard limit to prevent "too many open files" errors
+     // when passthrough filesystems cache O_PATH file descriptors
+     maximize_fd_limit();
+ 
+-    let fs = AgentFSFuse::new(fs, runtime, opts.cache_ttl);
++    // Remote bounded mounts lease their open handles under a persistent session
++    // id so a concurrent direct unlink or rename-over retains a live inode.
++    let session_id = lease_options
++        .as_ref()
++        .map(|_| uuid::Uuid::new_v4().to_string());
++    let open_files: Arc<Mutex<HashMap<u64, OpenFile>>> = Arc::new(Mutex::new(HashMap::new()));
++
++    // Establish the lease heartbeat connection synchronously, before the mount is
++    // reported ready. A lease-enabled mount must not accept traffic unless lease
++    // renewal is actually possible; otherwise a live handle could silently outlast
++    // its lease and have its inode reaped. On failure we return an error so the
++    // process exits and the container command server reports the mount unhealthy.
++    let heartbeat_setup = match (&lease_options, &session_id) {
++        (Some(options), Some(session_id)) => {
++            let hb_runtime = crate::get_runtime();
++            let agentfs = hb_runtime.block_on(AgentFS::open(options.clone())).map_err(|e| {
++                anyhow::anyhow!("FUSE lease heartbeat connection failed: {e}")
++            })?;
++            Some((hb_runtime, agentfs, session_id.clone()))
++        }
++        _ => None,
++    };
++
++    let fs = AgentFSFuse::new(
++        fs,
++        runtime,
++        opts.cache_ttl,
++        open_files.clone(),
++        session_id.clone(),
++        lease_ttl(),
++    );
+ 
+     let mut mount_opts = vec![
+         MountOption::FSName(opts.fsname),
+@@ -1222,16 +1415,126 @@ pub fn mount(
+         thread::spawn(move || poll_invalidations(options, notifier, running))
+     });
+ 
++    // Heartbeat renews active handle leases, lazily reaps expired orphans, and
++    // aborts the mount if renewal fails for too long. Uses the connection opened
++    // synchronously above so readiness already implies a working lease path.
++    let heartbeat = heartbeat_setup.map(|(hb_runtime, agentfs, session_id)| {
++        let running = running.clone();
++        let open_files = open_files.clone();
++        let ttl = lease_ttl();
++        // Clamp the abort window to at most half the TTL so a live handle can
++        // never outlast its lease, regardless of environment overrides.
++        let failure_abort = lease_failure_abort().min(ttl / 2);
++        thread::spawn(move || {
++            run_lease_heartbeat(
++                hb_runtime,
++                agentfs,
++                session_id,
++                open_files,
++                ttl,
++                lease_heartbeat(),
++                failure_abort,
++                running,
++            )
++        })
++    });
++
+     let result = session.run();
+     running.store(false, Ordering::Relaxed);
+     if let Some(poller) = poller {
+         let _ = poller.join();
+     }
++    if let Some(heartbeat) = heartbeat {
++        let _ = heartbeat.join();
++    }
+     result?;
+ 
+     Ok(())
+ }
+ 
++/// Renew active handle leases on a heartbeat and reap expired orphaned inodes.
++///
++/// Runs on its own connection (established synchronously before the mount was
++/// reported ready) so lease traffic never contends with the FUSE session's
++/// request pipeline. If renewal fails continuously for `failure_abort` (kept well
++/// below the lease TTL), the process aborts so a live handle can never outlast its
++/// lease and have its inode reaped from under it; the container command server
++/// then reports the mount unhealthy. On a clean shutdown it releases the whole
++/// session so no retained inodes leak.
++#[allow(clippy::too_many_arguments)]
++fn run_lease_heartbeat(
++    runtime: Runtime,
++    agentfs: AgentFS,
++    session_id: String,
++    open_files: Arc<Mutex<HashMap<u64, OpenFile>>>,
++    lease_ttl: Duration,
++    heartbeat_interval: Duration,
++    failure_abort: Duration,
++    running: Arc<AtomicBool>,
++) {
++    let mut first_failure: Option<std::time::Instant> = None;
++
++    while running.load(Ordering::Relaxed) {
++        // Sleep in short ticks so shutdown stays responsive.
++        let mut waited = Duration::ZERO;
++        while waited < heartbeat_interval && running.load(Ordering::Relaxed) {
++            let tick = Duration::from_millis(500);
++            thread::sleep(tick);
++            waited += tick;
++        }
++        if !running.load(Ordering::Relaxed) {
++            break;
++        }
++
++        let inos: Vec<i64> = {
++            let open_files = open_files.lock();
++            open_files
++                .values()
++                .filter_map(|open_file| open_file.lease_ino)
++                .collect()
++        };
++        let expires_at = lease_expiry(lease_ttl);
++
++        let result = runtime.block_on(async {
++            agentfs
++                .fs
++                .renew_open_leases(&session_id, &inos, expires_at)
++                .await?;
++            agentfs.fs.reap_expired_open_inodes().await?;
++            Ok::<(), SdkError>(())
++        });
++        match result {
++            Ok(()) => first_failure = None,
++            Err(error) => {
++                let since = *first_failure.get_or_insert_with(std::time::Instant::now);
++                tracing::warn!(
++                    "FUSE lease heartbeat failed (failing for {:?}): {error}",
++                    since.elapsed()
++                );
++                if lease_should_abort(first_failure, failure_abort) {
++                    tracing::error!(
++                        "FUSE lease renewal has failed for {:?} (>= {:?}); aborting mount to \
++                         avoid serving handles whose leases may have expired",
++                        since.elapsed(),
++                        failure_abort
++                    );
++                    // Terminate the whole process so the mount tears down and the
++                    // command server detects the dead FUSE daemon. This is the
++                    // conservative choice: kill the mount rather than risk reading
++                    // an inode another mount may reap once the lease expires.
++                    std::process::exit(LEASE_ABORT_EXIT_CODE);
++                }
++            }
++        }
++    }
++
++    // Graceful shutdown: drop every lease this session held and reap anything it
++    // was keeping alive.
++    if let Err(error) = runtime.block_on(agentfs.fs.cleanup_open_session(&session_id)) {
++        tracing::debug!("FUSE lease session cleanup failed: {error}");
++    }
++}
++
+ fn poll_invalidations(options: AgentFSOptions, notifier: DeferredNotifier, running: Arc<AtomicBool>) {
+     let runtime = crate::get_runtime();
+     let agentfs = match runtime.block_on(AgentFS::open(options)) {
+@@ -1287,3 +1590,38 @@ fn poll_invalidations(options: AgentFSOptions, notifier: DeferredNotifier, runni
+         thread::sleep(Duration::from_millis(100));
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::time::Instant;
++
++    #[test]
++    fn lease_should_abort_only_after_sustained_failure() {
++        let limit = Duration::from_millis(50);
++        // No failure recorded yet: never abort.
++        assert!(!lease_should_abort(None, limit));
++        // A failure that just started has not yet exceeded the limit.
++        assert!(!lease_should_abort(Some(Instant::now()), limit));
++        // A failure that began before the limit window elapsed must abort.
++        let old = Instant::now() - Duration::from_millis(100);
++        assert!(lease_should_abort(Some(old), limit));
++    }
++
++    #[test]
++    fn duration_from_env_prefers_valid_override() {
++        let var = "AGENTFS_TEST_LEASE_DURATION_OVERRIDE";
++        // Unset -> default.
++        std::env::remove_var(var);
++        assert_eq!(duration_from_env(var, Duration::from_secs(120)), Duration::from_secs(120));
++        // Valid override -> parsed value.
++        std::env::set_var(var, "30");
++        assert_eq!(duration_from_env(var, Duration::from_secs(120)), Duration::from_secs(30));
++        // Zero and garbage fall back to the default (never weaker than intended).
++        std::env::set_var(var, "0");
++        assert_eq!(duration_from_env(var, Duration::from_secs(120)), Duration::from_secs(120));
++        std::env::set_var(var, "not-a-number");
++        assert_eq!(duration_from_env(var, Duration::from_secs(120)), Duration::from_secs(120));
++        std::env::remove_var(var);
++    }
++}
+diff --git a/cli/src/mount/fuse.rs b/cli/src/mount/fuse.rs
+index 6317572..82d8c6d 100644
+--- a/cli/src/mount/fuse.rs
++++ b/cli/src/mount/fuse.rs
+@@ -60,7 +60,7 @@ pub(super) fn mount_fuse(
+ 
+     let fuse_handle = std::thread::spawn(move || {
+         let rt = crate::get_runtime();
+-        crate::fuse::mount(fs_arc, fuse_opts, rt, None)
++        crate::fuse::mount(fs_arc, fuse_opts, rt, None, None)
+     });
+ 
+     if !wait_for_mount(&mountpoint, timeout) {
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+index 2718799..bb8dca4 100644
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -566,6 +566,42 @@ impl AgentFS {
+         )
+         .await?;
+ 
++        // Persistent, expiring open-handle leases. A live remote FUSE handle
++        // pins its inode here so a concurrent direct unlink or rename-over
++        // retains the nlink=0 inode and its data until every handle closes or
++        // its lease expires.
++        conn.execute(
++            "CREATE TABLE IF NOT EXISTS fs_open_inode (
++                session_id TEXT NOT NULL,
++                ino INTEGER NOT NULL,
++                open_count INTEGER NOT NULL DEFAULT 0,
++                expires_at INTEGER NOT NULL,
++                PRIMARY KEY (session_id, ino)
++            )",
++            (),
++        )
++        .await?;
++        conn.execute(
++            "CREATE INDEX IF NOT EXISTS idx_fs_open_inode_expires
++            ON fs_open_inode(expires_at)",
++            (),
++        )
++        .await?;
++
++        // Deleting an inode is the single authoritative point at which its
++        // chunks, symlink target, and any residual leases are removed together.
++        conn.execute(
++            "CREATE TRIGGER IF NOT EXISTS trg_fs_inode_delete_cleanup
++            AFTER DELETE ON fs_inode
++            BEGIN
++                DELETE FROM fs_data WHERE ino = OLD.ino;
++                DELETE FROM fs_symlink WHERE ino = OLD.ino;
++                DELETE FROM fs_open_inode WHERE ino = OLD.ino;
++            END",
++            (),
++        )
++        .await?;
++
+         // Ensure chunk_size config exists
+         {
+             let mut rows = conn
+@@ -750,6 +786,41 @@ impl AgentFS {
+         }
+     }
+ 
++    /// Report whether any unexpired lease still pins an inode.
++    ///
++    /// Used by `unlink` and rename-over to decide between deleting an inode that
++    /// dropped to nlink=0 and retaining it (with its data) for a live remote
++    /// handle. Favors retention: only a lease that has both a positive open
++    /// count and an expiry in the future keeps the inode alive.
++    async fn has_active_lease(&self, conn: &Connection, ino: i64) -> Result<bool> {
++        let now = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap_or_default()
++            .as_secs() as i64;
++        let mut rows = conn
++            .query(
++                "SELECT 1 FROM fs_open_inode WHERE ino = ? AND open_count > 0 AND expires_at > ? LIMIT 1",
++                (ino, now),
++            )
++            .await?;
++        Ok(rows.next().await?.is_some())
++    }
++
++    /// Delete inodes that dropped to nlink=0 and are no longer pinned by any
++    /// lease. Inode deletion cascades to chunks, symlink targets, and leases
++    /// through `trg_fs_inode_delete_cleanup`.
++    async fn reap_orphan_inodes(&self, conn: &Connection) -> Result<()> {
++        conn.execute(
++            "DELETE FROM fs_inode
++             WHERE nlink = 0
++               AND ino != ?
++               AND ino NOT IN (SELECT ino FROM fs_open_inode)",
++            [ROOT_INO],
++        )
++        .await?;
++        Ok(())
++    }
++
+     /// Get file attributes by inode using an existing connection
+     async fn getattr_with_conn(&self, conn: &Connection, ino: i64) -> Result<Option<Stats>> {
+         let stmt = conn
+@@ -3398,22 +3469,13 @@ impl FileSystem for AgentFS {
+             .await?;
+         stmt.execute((now_secs, now_nsec, ino)).await?;
+ 
+-        // Check if this was the last link to the inode
++        // Check if this was the last link to the inode. When it was, delete the
++        // inode only if no live handle still leases it; otherwise retain the
++        // nlink=0 inode and its data so open remote handles keep reading. The
++        // delete cascades to chunks, symlink target, and any residual lease via
++        // trg_fs_inode_delete_cleanup.
+         let link_count = self.get_link_count(&conn, ino).await?;
+-        if link_count == 0 {
+-            // Delete data blocks
+-            let stmt = conn
+-                .prepare("DELETE FROM fs_data WHERE ino = ?")
+-                .await?;
+-            stmt.execute([ino]).await?;
+-
+-            // Delete symlink if exists
+-            let stmt = conn
+-                .prepare("DELETE FROM fs_symlink WHERE ino = ?")
+-                .await?;
+-            stmt.execute([ino]).await?;
+-
+-            // Delete inode
++        if link_count == 0 && !self.has_active_lease(&conn, ino).await? {
+             let stmt = conn
+                 .prepare("DELETE FROM fs_inode WHERE ino = ?")
+                 .await?;
+@@ -3667,17 +3729,13 @@ impl FileSystem for AgentFS {
+                     .await?;
+                 stmt.execute((now_dec, now_dec_nsec, dst_ino)).await?;
+ 
+-                // Clean up destination inode if no more links
++                // Clean up the replaced destination inode if it has no more
++                // links and no live handle leases it. A leased destination is
++                // retained (with its data) so remote handles opened before the
++                // rename keep reading the original file. Deletion cascades to
++                // chunks, symlink target, and leases via the delete trigger.
+                 let link_count = self.get_link_count(&conn, dst_ino).await?;
+-                if link_count == 0 {
+-                    let stmt = conn
+-                        .prepare("DELETE FROM fs_data WHERE ino = ?")
+-                        .await?;
+-                    stmt.execute([dst_ino]).await?;
+-                    let stmt = conn
+-                        .prepare("DELETE FROM fs_symlink WHERE ino = ?")
+-                        .await?;
+-                    stmt.execute([dst_ino]).await?;
++                if link_count == 0 && !self.has_active_lease(&conn, dst_ino).await? {
+                     let stmt = conn
+                         .prepare("DELETE FROM fs_inode WHERE ino = ?")
+                         .await?;
+@@ -3761,6 +3819,120 @@ impl FileSystem for AgentFS {
+     async fn statfs(&self) -> Result<FilesystemStats> {
+         AgentFS::statfs(self).await
+     }
++
++    async fn pin_open_inode(&self, session_id: &str, ino: i64, expires_at: i64) -> Result<()> {
++        let conn = self.pool.get_connection().await?;
++        // A single atomic upsert that inserts only when the inode still exists:
++        // the SELECT yields a row (and thus a write) exactly when fs_inode has
++        // the ino, so no BEGIN/COMMIT is needed and the statement is safe over a
++        // single Hrana round trip. The SELECT's WHERE clause also disambiguates
++        // the ON CONFLICT parse. affected == 0 means the inode is gone, which the
++        // FUSE layer maps to ENOENT; any other failure surfaces as EIO.
++        let affected = conn
++            .execute(
++                "INSERT INTO fs_open_inode (session_id, ino, open_count, expires_at)
++                 SELECT ?, ?, 1, ? FROM fs_inode WHERE ino = ?
++                 ON CONFLICT(session_id, ino)
++                 DO UPDATE SET open_count = open_count + 1, expires_at = excluded.expires_at",
++                (session_id, ino, expires_at, ino),
++            )
++            .await?;
++        if affected == 0 {
++            return Err(FsError::NotFound.into());
++        }
++        Ok(())
++    }
++
++    async fn unpin_open_inode(&self, session_id: &str, ino: i64) -> Result<()> {
++        let conn = self.pool.get_connection().await?;
++        let now = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap_or_default()
++            .as_secs() as i64;
++        // Three independently safe statements, no transaction. Each is correct on
++        // its own and a mid-sequence failure only delays reaping (the heartbeat
++        // reaper catches leftovers); it never deletes live data. Ordering matters
++        // only for promptness, not correctness.
++        conn.execute(
++            "UPDATE fs_open_inode SET open_count = open_count - 1
++             WHERE session_id = ? AND ino = ?",
++            (session_id, ino),
++        )
++        .await?;
++        conn.execute(
++            "DELETE FROM fs_open_inode WHERE session_id = ? AND ino = ? AND open_count <= 0",
++            (session_id, ino),
++        )
++        .await?;
++        // Reap the inode only if it is unlinked (nlink=0) and no live lease
++        // remains for it anywhere. The NOT EXISTS guard is evaluated inside the
++        // same statement, so a concurrent live lease can never be raced past.
++        // Deletion cascades to chunks, symlink target, and leases via the trigger.
++        conn.execute(
++            "DELETE FROM fs_inode
++             WHERE ino = ? AND nlink = 0 AND ino != ?
++               AND NOT EXISTS (
++                 SELECT 1 FROM fs_open_inode
++                 WHERE ino = ? AND open_count > 0 AND expires_at > ?
++               )",
++            (ino, ROOT_INO, ino, now),
++        )
++        .await?;
++        Ok(())
++    }
++
++    async fn renew_open_leases(&self, session_id: &str, inos: &[i64], expires_at: i64) -> Result<()> {
++        if inos.is_empty() {
++            return Ok(());
++        }
++        let conn = self.pool.get_connection().await?;
++        // Renew only existing rows; never resurrect a released lease. Single
++        // statement, no transaction.
++        let placeholders = std::iter::repeat_n("?", inos.len())
++            .collect::<Vec<_>>()
++            .join(", ");
++        let sql = format!(
++            "UPDATE fs_open_inode SET expires_at = ? WHERE session_id = ? AND ino IN ({})",
++            placeholders
++        );
++        let mut values: Vec<Value> = Vec::with_capacity(inos.len() + 2);
++        values.push(Value::Integer(expires_at));
++        values.push(Value::Text(session_id.to_string()));
++        for ino in inos {
++            values.push(Value::Integer(*ino));
++        }
++        conn.execute(&sql, values).await?;
++        Ok(())
++    }
++
++    async fn cleanup_open_session(&self, session_id: &str) -> Result<()> {
++        let conn = self.pool.get_connection().await?;
++        // Two independently safe statements. If the second fails, orphaned inodes
++        // are reaped by a later reap_expired_open_inodes pass, never leaving live
++        // data deleted.
++        conn.execute("DELETE FROM fs_open_inode WHERE session_id = ?", [session_id])
++            .await?;
++        self.reap_orphan_inodes(&conn).await?;
++        Ok(())
++    }
++
++    async fn reap_expired_open_inodes(&self) -> Result<()> {
++        let conn = self.pool.get_connection().await?;
++        let now = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap_or_default()
++            .as_secs() as i64;
++        // Two independently safe statements. Expired/released lease rows are
++        // dropped first; then unreferenced nlink=0 inodes are reaped. A failure
++        // between them only defers reaping to the next pass.
++        conn.execute(
++            "DELETE FROM fs_open_inode WHERE expires_at <= ? OR open_count <= 0",
++            [now],
++        )
++        .await?;
++        self.reap_orphan_inodes(&conn).await?;
++        Ok(())
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -4921,4 +5093,274 @@ mod tests {
+ 
+         Ok(())
+     }
++
++    // ==================== Open Inode Lease Tests ====================
++
++    /// Absolute Unix-second expiry `secs` from now (negative for the past).
++    fn lease_ts(secs: i64) -> i64 {
++        (SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap()
++            .as_secs() as i64)
++            + secs
++    }
++
++    async fn chunk_rows(fs: &AgentFS, ino: i64) -> Result<i64> {
++        let conn = fs.get_connection().await?;
++        let mut rows = conn
++            .query("SELECT COUNT(*) FROM fs_data WHERE ino = ?", [ino])
++            .await?;
++        let count = rows
++            .next()
++            .await?
++            .and_then(|row| row.get_value(0i32).ok())
++            .and_then(|v| v.as_integer().copied())
++            .unwrap_or(0);
++        Ok(count)
++    }
++
++    async fn lease_rows(fs: &AgentFS, ino: i64) -> Result<i64> {
++        let conn = fs.get_connection().await?;
++        let mut rows = conn
++            .query("SELECT COUNT(*) FROM fs_open_inode WHERE ino = ?", [ino])
++            .await?;
++        let count = rows
++            .next()
++            .await?
++            .and_then(|row| row.get_value(0i32).ok())
++            .and_then(|v| v.as_integer().copied())
++            .unwrap_or(0);
++        Ok(count)
++    }
++
++    async fn open_count(fs: &AgentFS, ino: i64) -> Result<i64> {
++        let conn = fs.get_connection().await?;
++        let mut rows = conn
++            .query("SELECT open_count FROM fs_open_inode WHERE ino = ?", [ino])
++            .await?;
++        let count = rows
++            .next()
++            .await?
++            .and_then(|row| row.get_value(0i32).ok())
++            .and_then(|v| v.as_integer().copied())
++            .unwrap_or(0);
++        Ok(count)
++    }
++
++    #[tokio::test]
++    async fn test_open_inode_lease_retains_through_unlink() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let session = "session-unlink";
++
++        let (stats, handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "leased.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++        let ino = stats.ino;
++        handle.pwrite(0, b"hello lease").await?;
++
++        // A live remote handle pins the inode before the direct unlink races in.
++        fs.pin_open_inode(session, ino, lease_ts(120)).await?;
++        FileSystem::unlink(&fs, ROOT_INO, "leased.txt").await?;
++
++        // The pathname is gone immediately, but the inode and its data survive.
++        assert!(FileSystem::lookup(&fs, ROOT_INO, "leased.txt")
++            .await?
++            .is_none());
++        assert!(FileSystem::getattr(&fs, ino).await?.is_some());
++        assert_eq!(&handle.pread(0, 11).await?, b"hello lease");
++
++        // Closing the last handle reaps the orphan and cascades chunk cleanup.
++        fs.unpin_open_inode(session, ino).await?;
++        assert!(FileSystem::getattr(&fs, ino).await?.is_none());
++        assert_eq!(chunk_rows(&fs, ino).await?, 0);
++        assert_eq!(lease_rows(&fs, ino).await?, 0);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn test_open_inode_lease_retains_through_rename_over() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let session = "session-rename";
++
++        let (old_stats, old_handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "target.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++        let old_ino = old_stats.ino;
++        old_handle.pwrite(0, b"original").await?;
++
++        let (new_stats, new_handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "replacement.txt", DEFAULT_FILE_MODE, 0, 0)
++                .await?;
++        new_handle.pwrite(0, b"replacement-data").await?;
++
++        // Pin the victim inode, then replace its name via rename-over.
++        fs.pin_open_inode(session, old_ino, lease_ts(120)).await?;
++        FileSystem::rename(&fs, ROOT_INO, "replacement.txt", ROOT_INO, "target.txt").await?;
++
++        // The path now resolves to the replacement inode immediately.
++        let resolved = FileSystem::lookup(&fs, ROOT_INO, "target.txt")
++            .await?
++            .unwrap();
++        assert_eq!(resolved.ino, new_stats.ino);
++
++        // The old handle keeps reading the original bytes.
++        assert!(FileSystem::getattr(&fs, old_ino).await?.is_some());
++        assert_eq!(&old_handle.pread(0, 8).await?, b"original");
++
++        // Releasing the handle reaps the replaced inode.
++        fs.unpin_open_inode(session, old_ino).await?;
++        assert!(FileSystem::getattr(&fs, old_ino).await?.is_none());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn test_unlink_without_lease_deletes_immediately() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++
++        let (stats, handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "plain.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++        let ino = stats.ino;
++        handle.pwrite(0, b"bytes").await?;
++
++        FileSystem::unlink(&fs, ROOT_INO, "plain.txt").await?;
++        assert!(FileSystem::getattr(&fs, ino).await?.is_none());
++        assert_eq!(chunk_rows(&fs, ino).await?, 0);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn test_expired_lease_does_not_retain() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let session = "session-expired";
++
++        let (stats, _handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "stale.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++        let ino = stats.ino;
++
++        // A lease that already expired must not keep the inode alive.
++        fs.pin_open_inode(session, ino, lease_ts(-10)).await?;
++        FileSystem::unlink(&fs, ROOT_INO, "stale.txt").await?;
++        assert!(FileSystem::getattr(&fs, ino).await?.is_none());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn test_reap_expired_open_inodes_collects_orphan() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let session = "session-lazy";
++
++        let (stats, _handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "lazy.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++        let ino = stats.ino;
++
++        fs.pin_open_inode(session, ino, lease_ts(120)).await?;
++        FileSystem::unlink(&fs, ROOT_INO, "lazy.txt").await?;
++        assert!(FileSystem::getattr(&fs, ino).await?.is_some());
++
++        // Simulate the mount vanishing without cleanup: the lease expires.
++        {
++            let conn = fs.get_connection().await?;
++            conn.execute("UPDATE fs_open_inode SET expires_at = 0 WHERE ino = ?", [ino])
++                .await?;
++        }
++        fs.reap_expired_open_inodes().await?;
++        assert!(FileSystem::getattr(&fs, ino).await?.is_none());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn test_cleanup_open_session_reaps_orphan() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let session = "session-clean";
++
++        let (stats, _handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "graceful.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++        let ino = stats.ino;
++
++        fs.pin_open_inode(session, ino, lease_ts(120)).await?;
++        FileSystem::unlink(&fs, ROOT_INO, "graceful.txt").await?;
++        assert!(FileSystem::getattr(&fs, ino).await?.is_some());
++
++        fs.cleanup_open_session(session).await?;
++        assert!(FileSystem::getattr(&fs, ino).await?.is_none());
++        assert_eq!(lease_rows(&fs, ino).await?, 0);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn test_lease_open_count_tracks_multiple_handles() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let session = "session-multi";
++
++        let (stats, handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "shared.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++        let ino = stats.ino;
++        handle.pwrite(0, b"shared").await?;
++
++        // Two concurrent handles pin the same inode.
++        fs.pin_open_inode(session, ino, lease_ts(120)).await?;
++        fs.pin_open_inode(session, ino, lease_ts(120)).await?;
++        FileSystem::unlink(&fs, ROOT_INO, "shared.txt").await?;
++
++        // First close still leaves one hold, so the inode survives.
++        fs.unpin_open_inode(session, ino).await?;
++        assert!(FileSystem::getattr(&fs, ino).await?.is_some());
++
++        // Second close drops the last hold and reaps the inode.
++        fs.unpin_open_inode(session, ino).await?;
++        assert!(FileSystem::getattr(&fs, ino).await?.is_none());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn test_pin_open_inode_persists_lease() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let session = "session-persist";
++
++        let (stats, _handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "pinned.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++        let ino = stats.ino;
++
++        // A successful pin means the lease is durably recorded, which is the
++        // precondition the FUSE layer requires before reporting an open success.
++        fs.pin_open_inode(session, ino, lease_ts(120)).await?;
++        assert_eq!(lease_rows(&fs, ino).await?, 1);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn test_pin_open_inode_rejects_missing_inode() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let session = "session-missing";
++
++        // Pinning an inode that does not exist must fail cleanly with NotFound so
++        // the FUSE layer can map it to ENOENT and refuse the open, and must not
++        // leave a dangling lease row behind.
++        let missing_ino = 999_999;
++        let result = fs.pin_open_inode(session, missing_ino, lease_ts(120)).await;
++        assert!(matches!(result, Err(Error::Fs(FsError::NotFound))));
++        assert_eq!(lease_rows(&fs, missing_ino).await?, 0);
++        Ok(())
++    }
++
++    /// Protocol-shaped check of the single atomic upsert: the first pin inserts a
++    /// row (one affected row), and a second pin for the same (session, ino) takes
++    /// the ON CONFLICT path and increments open_count instead of inserting a
++    /// duplicate or erroring. This exercises the exact statement sent over Hrana.
++    #[tokio::test]
++    async fn test_pin_open_inode_upsert_increments_open_count() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let session = "session-upsert";
++
++        let (stats, _handle) =
++            FileSystem::create_file(&fs, ROOT_INO, "upsert.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++        let ino = stats.ino;
++
++        fs.pin_open_inode(session, ino, lease_ts(120)).await?;
++        assert_eq!(lease_rows(&fs, ino).await?, 1);
++        assert_eq!(open_count(&fs, ino).await?, 1);
++
++        fs.pin_open_inode(session, ino, lease_ts(120)).await?;
++        assert_eq!(lease_rows(&fs, ino).await?, 1, "upsert must not duplicate the row");
++        assert_eq!(open_count(&fs, ino).await?, 2, "second pin must increment open_count");
++        Ok(())
++    }
+ }
+diff --git a/sdk/rust/src/filesystem/mod.rs b/sdk/rust/src/filesystem/mod.rs
+index 5bb4c50..0c3a6e9 100644
+--- a/sdk/rust/src/filesystem/mod.rs
++++ b/sdk/rust/src/filesystem/mod.rs
+@@ -318,4 +318,74 @@ pub trait FileSystem: Send + Sync {
+     async fn forget(&self, _ino: i64, _nlookup: u64) {
+         // Default: no-op
+     }
++
++    /// Resolve the inode key used for open-handle leases.
++    ///
++    /// Ordinary filesystems use the identity mapping and return `Some(ino)`.
++    /// Layered filesystems translate their synthetic FUSE inode into the stable
++    /// underlying inode that actually backs the lease table, and return `None`
++    /// for inodes that cannot be leased (for example a read-only base-layer
++    /// overlay file). Callers resolve this once at open/create time and store the
++    /// result, so later pin, renew, and unpin operate on a stable key that does
++    /// not depend on a synthetic namespace that could be rebuilt or evicted.
++    fn lease_inode(&self, ino: i64) -> Option<i64> {
++        Some(ino)
++    }
++
++    /// Pin an open inode with a lease so it survives unlink/rename-over while a
++    /// remote client holds a live handle.
++    ///
++    /// `ino` is the lease inode key from [`FileSystem::lease_inode`]. Records or
++    /// refreshes a `(session_id, ino)` lease in `fs_open_inode`, incrementing the
++    /// open count and extending expiry to `expires_at` (Unix seconds), only if the
++    /// inode still exists. Callers pin before replying to a FUSE open/create so a
++    /// concurrent direct unlink retains the inode and its data.
++    ///
++    /// The default implementation is a no-op for backends that never delete an
++    /// inode out from under a live handle.
++    async fn pin_open_inode(&self, _session_id: &str, _ino: i64, _expires_at: i64) -> Result<()> {
++        Ok(())
++    }
++
++    /// Release one hold on an open inode lease.
++    ///
++    /// Decrements the open count for `(session_id, ino)`; when it reaches zero
++    /// the lease row is removed and an orphaned inode (nlink=0 with no other
++    /// live lease) is reaped, cascading its chunks and symlink target.
++    ///
++    /// The default implementation is a no-op.
++    async fn unpin_open_inode(&self, _session_id: &str, _ino: i64) -> Result<()> {
++        Ok(())
++    }
++
++    /// Extend the expiry of existing leases for a session's live handles.
++    ///
++    /// Renews only rows that already exist for `session_id` and one of `inos`;
++    /// it never resurrects a released lease. Called on a heartbeat so long-lived
++    /// handles keep their inodes alive.
++    ///
++    /// The default implementation is a no-op.
++    async fn renew_open_leases(&self, _session_id: &str, _inos: &[i64], _expires_at: i64) -> Result<()> {
++        Ok(())
++    }
++
++    /// Drop every lease for a session and reap any inode it was keeping alive.
++    ///
++    /// Called on graceful mount shutdown so a clean unmount does not leak
++    /// nlink=0 inodes.
++    ///
++    /// The default implementation is a no-op.
++    async fn cleanup_open_session(&self, _session_id: &str) -> Result<()> {
++        Ok(())
++    }
++
++    /// Remove expired leases and reap the orphaned inodes they were retaining.
++    ///
++    /// Called lazily (on a heartbeat) so inodes held by a mount that vanished
++    /// without cleanup are eventually deleted once their leases expire.
++    ///
++    /// The default implementation is a no-op.
++    async fn reap_expired_open_inodes(&self) -> Result<()> {
++        Ok(())
++    }
+ }
+diff --git a/sdk/rust/src/filesystem/overlayfs.rs b/sdk/rust/src/filesystem/overlayfs.rs
+index ae3f5db..5d3960a 100644
+--- a/sdk/rust/src/filesystem/overlayfs.rs
++++ b/sdk/rust/src/filesystem/overlayfs.rs
+@@ -1320,6 +1320,40 @@ impl FileSystem for OverlayFS {
+         // inode mapping is relatively lightweight (no fd). The base layer's
+         // forget handles the actual fd cleanup.
+     }
++
++    fn lease_inode(&self, ino: i64) -> Option<i64> {
++        // Translate the synthetic overlay inode into the stable delta inode that
++        // actually backs the lease table. Base-layer files are read-only and
++        // cannot be deleted out from under a handle, so they are not leasable.
++        match self.get_inode_info(ino) {
++            Some(info) if info.layer == Layer::Delta => Some(info.underlying_ino),
++            _ => None,
++        }
++    }
++
++    async fn pin_open_inode(&self, session_id: &str, ino: i64, expires_at: i64) -> Result<()> {
++        // `ino` is already the delta lease inode resolved via `lease_inode`, so
++        // forward it directly with no further namespace translation.
++        self.delta.pin_open_inode(session_id, ino, expires_at).await
++    }
++
++    async fn unpin_open_inode(&self, session_id: &str, ino: i64) -> Result<()> {
++        self.delta.unpin_open_inode(session_id, ino).await
++    }
++
++    async fn renew_open_leases(&self, session_id: &str, inos: &[i64], expires_at: i64) -> Result<()> {
++        self.delta
++            .renew_open_leases(session_id, inos, expires_at)
++            .await
++    }
++
++    async fn cleanup_open_session(&self, session_id: &str) -> Result<()> {
++        self.delta.cleanup_open_session(session_id).await
++    }
++
++    async fn reap_expired_open_inodes(&self) -> Result<()> {
++        self.delta.reap_expired_open_inodes().await
++    }
+ }
+ 
+ #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+@@ -2831,4 +2865,83 @@ mod tests {
+ 
+         Ok(())
+     }
++
++    #[tokio::test]
++    async fn test_overlay_lease_inode_maps_to_delta_and_pins() -> Result<()> {
++        let (overlay, _base_dir, _delta_dir) = create_test_overlay().await?;
++        let session = "overlay-session";
++
++        // A read-only base-layer file is not leasable.
++        let base_stats = overlay.lookup(ROOT_INO, "base.txt").await?.unwrap();
++        assert_eq!(
++            overlay.lease_inode(base_stats.ino),
++            None,
++            "base-layer files must not be leasable"
++        );
++
++        // Create a file in the delta layer through the overlay.
++        let (created, _file) = overlay
++            .create_file(ROOT_INO, "leased.txt", DEFAULT_FILE_MODE, 0, 0)
++            .await?;
++        let overlay_ino = created.ino;
++
++        // The stable lease key must be the underlying delta inode, not the
++        // synthetic overlay inode.
++        let delta_ino = FileSystem::lookup(overlay.delta(), 1, "leased.txt")
++            .await?
++            .unwrap()
++            .ino;
++        assert_eq!(
++            overlay.lease_inode(overlay_ino),
++            Some(delta_ino),
++            "lease_inode must resolve to the underlying delta inode"
++        );
++
++        // Pinning with the resolved delta key records the lease in the delta DB
++        // keyed by the delta inode.
++        let expires_at = (SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap()
++            .as_secs() as i64)
++            + 120;
++        overlay
++            .pin_open_inode(session, delta_ino, expires_at)
++            .await?;
++
++        let lease_count = {
++            let conn = overlay.delta().get_connection().await?;
++            let mut rows = conn
++                .query(
++                    "SELECT COUNT(*) FROM fs_open_inode WHERE ino = ?",
++                    [delta_ino],
++                )
++                .await?;
++            rows.next()
++                .await?
++                .and_then(|row| row.get_value(0i32).ok())
++                .and_then(|v| v.as_integer().copied())
++                .unwrap_or(0)
++        };
++        assert_eq!(lease_count, 1, "pin must persist a lease on the delta inode");
++
++        // Unpin forwards to the delta with the same key and clears the lease.
++        overlay.unpin_open_inode(session, delta_ino).await?;
++        let lease_count_after = {
++            let conn = overlay.delta().get_connection().await?;
++            let mut rows = conn
++                .query(
++                    "SELECT COUNT(*) FROM fs_open_inode WHERE ino = ?",
++                    [delta_ino],
++                )
++                .await?;
++            rows.next()
++                .await?
++                .and_then(|row| row.get_value(0i32).ok())
++                .and_then(|v| v.as_integer().copied())
++                .unwrap_or(0)
++        };
++        assert_eq!(lease_count_after, 0, "unpin must clear the delta lease");
++
++        Ok(())
++    }
+ }
+diff --git a/sdk/typescript/src/integrations/cloudflare/agentfs.ts b/sdk/typescript/src/integrations/cloudflare/agentfs.ts
+index c557a8a..7f0fde6 100644
+--- a/sdk/typescript/src/integrations/cloudflare/agentfs.ts
++++ b/sdk/typescript/src/integrations/cloudflare/agentfs.ts
+@@ -370,9 +370,54 @@ export class AgentFS implements FileSystem {
+       )
+     `);
+ 
++    // Persistent, expiring open-handle leases. A remote FUSE mount pins the
++    // inode behind a live handle so a direct unlink or streaming rename-over
++    // from the Worker retains the nlink=0 inode and its data until the handle
++    // closes or the lease expires.
++    this.storage.sql.exec(`
++      CREATE TABLE IF NOT EXISTS fs_open_inode (
++        session_id TEXT NOT NULL,
++        ino INTEGER NOT NULL,
++        open_count INTEGER NOT NULL DEFAULT 0,
++        expires_at INTEGER NOT NULL,
++        PRIMARY KEY (session_id, ino)
++      )
++    `);
++    this.storage.sql.exec(`
++      CREATE INDEX IF NOT EXISTS idx_fs_open_inode_expires
++      ON fs_open_inode(expires_at)
++    `);
++
++    // Deleting an inode is the single authoritative point at which its chunks,
++    // symlink target, and any residual leases are removed together.
++    this.storage.sql.exec(`
++      CREATE TRIGGER IF NOT EXISTS trg_fs_inode_delete_cleanup
++      AFTER DELETE ON fs_inode
++      BEGIN
++        DELETE FROM fs_data WHERE ino = OLD.ino;
++        DELETE FROM fs_symlink WHERE ino = OLD.ino;
++        DELETE FROM fs_open_inode WHERE ino = OLD.ino;
++      END
++    `);
++
+     this.chunkSize = this.ensureRoot();
+   }
+ 
++  /**
++   * Report whether any unexpired lease still pins an inode. Used by unlink and
++   * rename-over to retain a file that a live remote handle is still reading.
++   * Favors retention: only a lease with a positive open count and a
++   * future expiry keeps the inode alive.
++   */
++  private hasActiveLease(ino: number): boolean {
++    const now = Math.floor(Date.now() / 1000);
++    const rows = this.storage.sql.exec<{ one: number }>(
++      'SELECT 1 as one FROM fs_open_inode WHERE ino = ? AND open_count > 0 AND expires_at > ? LIMIT 1',
++      ino, now
++    ).toArray();
++    return rows.length > 0;
++  }
++
+   private ensureRoot(): number {
+     const configRows = this.storage.sql.exec<{ value: string }>(
+       "SELECT value FROM fs_config WHERE key = 'chunk_size'"
+@@ -917,9 +962,12 @@ export class AgentFS implements FileSystem {
+       );
+ 
+       const linkCount = this.getLinkCount(ino);
+-      if (linkCount === 0) {
++      // Delete only when nothing links the inode and no live handle leases it;
++      // otherwise retain the nlink=0 inode and its data for open remote handles.
++      // The delete cascades to chunks, symlink target, and leases via the
++      // fs_inode delete trigger.
++      if (linkCount === 0 && !this.hasActiveLease(ino)) {
+         this.storage.sql.exec('DELETE FROM fs_inode WHERE ino = ?', ino);
+-        this.storage.sql.exec('DELETE FROM fs_data WHERE ino = ?', ino);
+       }
+     });
+   }
+@@ -1030,10 +1078,11 @@ export class AgentFS implements FileSystem {
+     );
+ 
+     const linkCount = this.getLinkCount(ino);
+-    if (linkCount === 0) {
++    // Retain a leased inode (with its data) so remote handles opened before this
++    // unlink or rename-over keep reading it. The delete cascades to chunks,
++    // symlink target, and leases via the fs_inode delete trigger.
++    if (linkCount === 0 && !this.hasActiveLease(ino)) {
+       this.storage.sql.exec('DELETE FROM fs_inode WHERE ino = ?', ino);
+-      this.storage.sql.exec('DELETE FROM fs_data WHERE ino = ?', ino);
+-      this.storage.sql.exec('DELETE FROM fs_symlink WHERE ino = ?', ino);
+     }
+   }
+ 

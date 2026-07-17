@@ -13,6 +13,11 @@ VOL="e2e-$(date +%s)"
 PASS=0
 FAIL=0
 
+cleanup() {
+  curl -s -X POST "$BASE/destroy?volume=$VOL" > /dev/null || true
+}
+trap cleanup EXIT
+
 check() {
   local desc="$1" expected="$2" actual="$3"
   if [ "$expected" = "$actual" ]; then
@@ -187,8 +192,84 @@ check_contains "DO sees main.py" "main.py" "$LS2"
 
 echo ""
 
-# -- 6. Persistence across container eviction --
-echo "6. Persistence"
+# -- 6. Open-handle leases (open-unlink and open-replace) --
+echo "6. Open-handle leases"
+
+# 6a. Open-unlink: a live FUSE read handle must keep reading after the Worker
+# unlinks the pathname directly. The exec holds fd 3 open across a direct DELETE.
+curl -sf -X PUT "$BASE/v1/volumes/$VOL/files/leased.txt" \
+  --data-binary "leased-content" > /dev/null
+
+LEASE_ONE_FILE=$(mktemp)
+curl -sf --max-time 30 -X POST "$BASE/exec?volume=$VOL" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"exec 3< /volume/leased.txt; printf ready > /volume/leased-open; sleep 8; head -c 200 <&3"}' \
+  > "$LEASE_ONE_FILE" &
+LEASE_ONE_PID=$!
+LEASE_ONE_READY=""
+for _ in $(seq 1 80); do
+  if [ "$(curl -s "$BASE/fs/read?volume=$VOL&path=/leased-open")" = "ready" ]; then
+    LEASE_ONE_READY=1
+    break
+  fi
+  sleep 0.1
+done
+# The test is only meaningful if the reader actually opened the handle before we
+# unlink; fail loudly rather than silently pass on a file that was never held open.
+check "open-unlink reader signaled ready before unlink" "1" "$LEASE_ONE_READY"
+if [ "$LEASE_ONE_READY" = "1" ]; then
+  # Direct unlink from the Worker while the FUSE handle is open.
+  curl -sf -X DELETE "$BASE/v1/volumes/$VOL/files/leased.txt" > /dev/null
+  UNLINK_PATH_STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/volumes/$VOL/files/leased.txt")
+  wait "$LEASE_ONE_PID"
+  LEASE_ONE=$(python3 -c "import sys,json; print(json.load(open('$LEASE_ONE_FILE')).get('stdout','').strip())" 2>/dev/null)
+  check "held FUSE handle reads after direct unlink" "leased-content" "$LEASE_ONE"
+  check "unlinked pathname is gone immediately" "404" "$UNLINK_PATH_STATUS"
+else
+  kill "$LEASE_ONE_PID" 2>/dev/null || true
+  wait "$LEASE_ONE_PID" 2>/dev/null || true
+fi
+rm -f "$LEASE_ONE_FILE"
+
+# 6b. Open-replace: a live FUSE read handle must keep reading the original inode
+# after a streaming PUT replaces the pathname via rename-over.
+curl -sf -X PUT "$BASE/v1/volumes/$VOL/files/replace.txt" \
+  --data-binary "v1-content" > /dev/null
+
+LEASE_TWO_FILE=$(mktemp)
+curl -sf --max-time 30 -X POST "$BASE/exec?volume=$VOL" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"exec 3< /volume/replace.txt; printf ready > /volume/replace-open; sleep 8; head -c 200 <&3"}' \
+  > "$LEASE_TWO_FILE" &
+LEASE_TWO_PID=$!
+LEASE_TWO_READY=""
+for _ in $(seq 1 80); do
+  if [ "$(curl -s "$BASE/fs/read?volume=$VOL&path=/replace-open")" = "ready" ]; then
+    LEASE_TWO_READY=1
+    break
+  fi
+  sleep 0.1
+done
+check "open-replace reader signaled ready before replace" "1" "$LEASE_TWO_READY"
+if [ "$LEASE_TWO_READY" = "1" ]; then
+  # Streaming replacement from the Worker: temp write + rename-over the open path.
+  curl -sf -X PUT "$BASE/v1/volumes/$VOL/files/replace.txt" \
+    --data-binary "v2-content" > /dev/null
+  REPLACED_PATH=$(curl -sf "$BASE/v1/volumes/$VOL/files/replace.txt")
+  wait "$LEASE_TWO_PID"
+  LEASE_TWO=$(python3 -c "import sys,json; print(json.load(open('$LEASE_TWO_FILE')).get('stdout','').strip())" 2>/dev/null)
+  check "held FUSE handle reads original after rename-over" "v1-content" "$LEASE_TWO"
+  check "pathname resolves to the replacement immediately" "v2-content" "$REPLACED_PATH"
+else
+  kill "$LEASE_TWO_PID" 2>/dev/null || true
+  wait "$LEASE_TWO_PID" 2>/dev/null || true
+fi
+rm -f "$LEASE_TWO_FILE"
+
+echo ""
+
+# -- 7. Persistence across container eviction --
+echo "7. Persistence"
 
 curl -sf -X POST "$BASE/destroy?volume=$GIT_VOL" > /dev/null
 sleep 3
