@@ -37,15 +37,41 @@ interface WorkerSocket {
   close(): Promise<void>;
 }
 
+const STARTUP_TIMEOUT_MS = 60_000;
+const CONTAINER_EXEC_TIMEOUT_MS = 310_000;
+const DESTROY_TIMEOUT_MS = 10_000;
+
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
 export class AiryFS extends Container<Env> {
   defaultPort = 8080;
   sleepAfter = '30m';
 
   private fs: AgentFS | null = null;
   private startupPromise: Promise<void> | null = null;
+  private startupAbort: AbortController | null = null;
+  private destroyPromise: Promise<void> | null = null;
   private activeServePromise: Promise<void> | null = null;
   private invalidationServePromise: Promise<void> | null = null;
-  private execActive = false;
+  private activeExec: symbol | null = null;
+  private dataSocket: WorkerSocket | null = null;
+  private invalidationSocket: WorkerSocket | null = null;
   private hranaServer: HranaServer | null = null;
   private readonly access = new VolumeAccessCoordinator();
   private readonly mutations: MutationJournal;
@@ -84,10 +110,8 @@ export class AiryFS extends Container<Env> {
   }
 
   override onStop() {
-    this.startupPromise = null;
-    this.activeServePromise = null;
-    this.invalidationServePromise = null;
-    this.execActive = false;
+    // Socket and request completion own cleanup. A delayed lifecycle callback
+    // must not clear state belonging to a replacement Container generation.
   }
 
   // ---------------------------------------------------------------------------
@@ -95,29 +119,54 @@ export class AiryFS extends Container<Env> {
   // ---------------------------------------------------------------------------
 
   /** Execute a shell command in the Container against the FUSE-mounted volume. */
-  async exec(command: string): Promise<unknown> {
-    if (this.execActive) throw new HttpError(503, 'EXEC_BUSY', 'Another command is already running');
-    this.execActive = true;
+  async exec(command: string, signal?: AbortSignal): Promise<unknown> {
+    if (this.activeExec || this.destroyPromise) {
+      throw new HttpError(503, 'EXEC_BUSY', 'Another command or Container lifecycle operation is already running');
+    }
+    const execution = Symbol('exec');
+    this.activeExec = execution;
     try {
-      await this.ensureContainer(true);
+      await this.ensureContainer(signal);
+      signal?.throwIfAborted();
 
-      const resp = await this.containerFetch(
-        new Request('http://localhost/exec', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command }),
-        }),
-        4000
-      );
+      const commandSignals = [AbortSignal.timeout(
+        command === ':' ? STARTUP_TIMEOUT_MS : CONTAINER_EXEC_TIMEOUT_MS
+      )];
+      if (command === ':' && signal) commandSignals.push(signal);
+      let resp: Response;
+      try {
+        resp = await this.containerFetch(
+          new Request('http://localhost/exec', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command }),
+            signal: AbortSignal.any(commandSignals),
+          }),
+          4000
+        );
+      } catch (error) {
+        if (command !== ':') throw error;
+        this.clearRuntimeConnections();
+        await this.destroyBounded();
+        throw new HttpError(503, 'CONTAINER_UNAVAILABLE', 'Container preflight timed out; retry startup');
+      }
 
       if (!resp.ok) {
-        if (resp.status === 503) this.activeServePromise = null;
-        throw new Error(`Container exec failed (${resp.status}): ${await resp.text()}`);
+        const message = await resp.text();
+        if (resp.status === 503 && message.includes('FUSE unavailable')) {
+          this.clearRuntimeConnections();
+          await this.destroyBounded();
+          throw new HttpError(503, 'CONTAINER_UNAVAILABLE', message);
+        }
+        if (resp.status === 503) {
+          throw new HttpError(503, 'EXEC_BUSY', 'Another command is already running');
+        }
+        throw new Error(`Container exec failed (${resp.status}): ${message}`);
       }
 
       return resp.json();
     } finally {
-      this.execActive = false;
+      if (this.activeExec === execution) this.activeExec = null;
     }
   }
 
@@ -254,17 +303,27 @@ export class AiryFS extends Container<Env> {
   /** Return logical filesystem usage, physical SQLite size, and runtime health. */
   async usage(): Promise<Record<string, unknown>> {
     const filesystem = await this.filesystem().statfs();
+    const runtimeState = await this.getState();
     let container: Record<string, unknown> = {
-      state: this.activeServePromise ? 'connected' : 'stopped',
+      state: runtimeState.status,
+      hranaConnected: Boolean(this.activeServePromise),
     };
 
-    if (this.activeServePromise) {
+    if (runtimeState.status === 'healthy' && this.activeServePromise && !this.destroyPromise) {
       try {
-        const response = await this.containerFetch('http://localhost/health', 4000);
-        container = { state: 'connected', ...await response.json<Record<string, unknown>>() };
+        const response = await this.ctx.container!.getTcpPort(4000).fetch(
+          new Request('http://localhost/health', { signal: AbortSignal.timeout(5_000) }),
+        );
+        container = {
+          state: runtimeState.status,
+          hranaConnected: true,
+          ...await response.json<Record<string, unknown>>(),
+        };
       } catch (error) {
         container = {
-          state: 'unhealthy',
+          state: runtimeState.status,
+          hranaConnected: Boolean(this.activeServePromise),
+          health: 'unhealthy',
           error: error instanceof Error ? error.message : String(error),
         };
       }
@@ -283,9 +342,19 @@ export class AiryFS extends Container<Env> {
 
   /** Destroy the Container. Volume data persists in DO SQLite. */
   async destroyContainer(): Promise<void> {
-    await this.destroy();
-    this.startupPromise = null;
-    this.activeServePromise = null;
+    if (this.destroyPromise) return this.destroyPromise;
+    const operation = (async (): Promise<void> => {
+      this.startupAbort?.abort();
+      await this.startupPromise?.catch(() => undefined);
+      await this.destroyBounded();
+      this.clearRuntimeState();
+    })();
+    this.destroyPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.destroyPromise === operation) this.destroyPromise = null;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -304,92 +373,97 @@ export class AiryFS extends Container<Env> {
    * If the Hrana TCP connection drops (container eviction, crash),
    * activeServePromise resets to null so the next call reconnects.
    */
-  private async ensureContainer(reconnect = false): Promise<void> {
+  private async ensureContainer(requestSignal?: AbortSignal): Promise<void> {
     this.filesystem();
     if (this.startupPromise) return this.startupPromise;
-    const previousServePromise = reconnect ? this.activeServePromise : null;
-    if (reconnect) this.activeServePromise = null;
-    if (this.activeServePromise) return;
 
-    const startup = this.startContainer(previousServePromise);
+    const startupAbort = new AbortController();
+    const signals = [startupAbort.signal, AbortSignal.timeout(STARTUP_TIMEOUT_MS)];
+    if (requestSignal) signals.push(requestSignal);
+    const signal = AbortSignal.any(signals);
+    const startup = this.prepareContainer(signal);
+    this.startupAbort = startupAbort;
     this.startupPromise = startup;
     try {
       await startup;
+    } catch (error) {
+      startupAbort.abort();
+      this.closeRuntimeSockets();
+      // An explicit destroy owns cleanup after it has waited for this startup.
+      const alreadyRecycled = error instanceof HttpError && error.code === 'CONTAINER_RECYCLED';
+      if (!alreadyRecycled && !this.destroyPromise) await this.destroyBounded();
+      throw error;
     } finally {
       if (this.startupPromise === startup) this.startupPromise = null;
+      if (this.startupAbort === startupAbort) this.startupAbort = null;
     }
   }
 
-  private async startContainer(previousServePromise: Promise<void> | null): Promise<void> {
+  private async prepareContainer(signal: AbortSignal): Promise<void> {
+    const state = await this.getState();
+    if (state.status === 'stopped' || state.status === 'stopped_with_code') {
+      await this.startContainer(signal);
+      return;
+    }
+    if (state.status === 'stopping') {
+      await this.destroyBounded();
+      this.clearRuntimeConnections();
+      throw new HttpError(
+        503,
+        'CONTAINER_RECYCLED',
+        'Recycled an orphaned Container; retry startup',
+        { 'Retry-After': '1' }
+      );
+    }
+
+    await this.setupBridge(signal);
+    await this.connectData(signal);
+    await this.connectInvalidation(signal);
+    try {
+      const response = await this.containerFetch(
+        new Request('http://localhost/health', { signal }),
+        4000
+      );
+      const health = await response.json<{ fuseMounted?: boolean }>();
+      if (health.fuseMounted) return;
+    } catch {
+      // Recycle below. A healthy Container without a usable mount cannot serve exec.
+    }
+    this.clearRuntimeConnections();
+    await this.destroyBounded();
+    throw new HttpError(
+      503,
+      'CONTAINER_RECYCLED',
+      'Recycled a Container with an unavailable FUSE mount; retry startup',
+      { 'Retry-After': '1' }
+    );
+  }
+
+  private async startContainer(signal: AbortSignal): Promise<void> {
 
     this.entrypoint = ['node', '/app/dist/command-server.js'];
 
     // 1. Wait for command server
-    await this.startAndWaitForPorts({ ports: [4000] });
-
-    // 2. Start bridge in-process
-    const setupResp = await this.containerFetch(
-      new Request('http://localhost/setup', { method: 'POST' }),
-      4000
-    );
-    if (!setupResp.ok) {
-      throw new Error(`Bridge setup failed (${setupResp.status}): ${await setupResp.text()}`);
-    }
-    const setupResult = (await setupResp.json()) as { ok: boolean; error?: string };
-    if (!setupResult.ok) {
-      throw new Error(`Bridge setup failed: ${setupResult.error}`);
-    }
-
-    // 3. Reconnect FUSE data traffic for this exec. Keep the independent
-    // invalidation channel alive so journal polling is never interrupted by exec.
-    const socket = this.ctx.container!.getTcpPort(9000).connect('0.0.0.0:9000');
-    await socket.opened;
-
-    this.hranaServer = new HranaServer({
-      readable: socket.readable,
-      writable: socket.writable,
-      sql: wrapSqlStorage(this.ctx.storage.sql),
-      writeLock: () => this.access.acquireWrite('*'),
+    await this.startAndWaitForPorts({
+      ports: [4000],
+      cancellationOptions: {
+        abort: signal,
+        instanceGetTimeoutMS: STARTUP_TIMEOUT_MS,
+        portReadyTimeoutMS: STARTUP_TIMEOUT_MS,
+      },
     });
 
-    const servePromise = this.hranaServer.serve();
-    this.activeServePromise = servePromise;
-    this.ctx.waitUntil(servePromise);
-    const clearServePromise = (): void => {
-      if (this.activeServePromise === servePromise) this.activeServePromise = null;
-    };
-    void servePromise.then(clearServePromise, clearServePromise);
+    // 2. Start bridge in-process
+    await this.setupBridge(signal);
 
-    if (previousServePromise) {
-      await Promise.race([
-        previousServePromise.catch(() => undefined),
-        new Promise<void>((resolve) => setTimeout(resolve, 1000)),
-      ]);
-    }
-
-    let newInvalidationSocket: WorkerSocket | null = null;
-    if (!this.invalidationServePromise) {
-      const invalidationSocket = this.ctx.container!.getTcpPort(9001).connect('0.0.0.0:9001');
-      newInvalidationSocket = invalidationSocket;
-      await invalidationSocket.opened;
-      const invalidationServer = new HranaServer({
-        readable: invalidationSocket.readable,
-        writable: invalidationSocket.writable,
-        sql: wrapSqlStorage(this.ctx.storage.sql),
-      });
-      const invalidationServePromise = invalidationServer.serve();
-      this.invalidationServePromise = invalidationServePromise;
-      this.ctx.waitUntil(invalidationServePromise);
-      const clearInvalidationPromise = (): void => {
-        if (this.invalidationServePromise === invalidationServePromise) this.invalidationServePromise = null;
-      };
-      void invalidationServePromise.then(clearInvalidationPromise, clearInvalidationPromise);
-    }
+    // 3. Connect FUSE data and invalidation traffic.
+    const { socket, servePromise } = await this.connectData(signal);
+    await this.connectInvalidation(signal);
 
     // 4. Mount FUSE — fire-and-forget, then poll for readiness.
     // Can't await because the mount blocks while FUSE queries flow through serve().
     this.containerFetch(
-      new Request('http://localhost/mount', { method: 'POST' }),
+      new Request('http://localhost/mount', { method: 'POST', signal }),
       4000
     ).catch(() => {
       // Mount request itself failing is not fatal — the health poll below
@@ -401,9 +475,12 @@ export class AiryFS extends Container<Env> {
     let mounted = false;
     let mountError: Error | null = null;
     for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
+      await abortable(new Promise<void>((resolve) => setTimeout(resolve, 1000)), signal);
       try {
-        const healthResp = await this.containerFetch('http://localhost/health', 4000);
+        const healthResp = await this.containerFetch(
+          new Request('http://localhost/health', { signal }),
+          4000
+        );
         const health = (await healthResp.json()) as {
           fuseMounted?: boolean;
           fuseExitCode?: number | null;
@@ -424,9 +501,118 @@ export class AiryFS extends Container<Env> {
 
     if (!mounted) {
       await socket.close().catch(() => undefined);
-      if (newInvalidationSocket) await newInvalidationSocket.close().catch(() => undefined);
+      await this.invalidationSocket?.close().catch(() => undefined);
       if (this.activeServePromise === servePromise) this.activeServePromise = null;
       throw mountError ?? new Error('FUSE mount did not complete within 30 seconds');
+    }
+  }
+
+  private async setupBridge(signal: AbortSignal): Promise<void> {
+    const setupResp = await this.containerFetch(
+      new Request('http://localhost/setup', { method: 'POST', signal }),
+      4000
+    );
+    if (!setupResp.ok) {
+      throw new Error(`Bridge setup failed (${setupResp.status}): ${await setupResp.text()}`);
+    }
+    const setupResult = (await setupResp.json()) as { ok: boolean; error?: string };
+    if (!setupResult.ok) {
+      throw new Error(`Bridge setup failed: ${setupResult.error}`);
+    }
+  }
+
+  private async connectData(signal: AbortSignal): Promise<{
+    socket: WorkerSocket;
+    servePromise: Promise<void>;
+  }> {
+    const previousSocket = this.dataSocket;
+    const socket = this.ctx.container!.getTcpPort(9000).connect('0.0.0.0:9000');
+    this.dataSocket = socket;
+    try {
+      await abortable(socket.opened, signal);
+    } catch (error) {
+      if (this.dataSocket === socket) this.dataSocket = null;
+      await socket.close().catch(() => undefined);
+      throw error;
+    }
+    await previousSocket?.close().catch(() => undefined);
+
+    this.hranaServer = new HranaServer({
+      readable: socket.readable,
+      writable: socket.writable,
+      sql: wrapSqlStorage(this.ctx.storage.sql),
+      writeLock: () => this.access.acquireWrite('*'),
+    });
+
+    const servePromise = this.hranaServer.serve();
+    this.activeServePromise = servePromise;
+    this.ctx.waitUntil(servePromise);
+    const clearServePromise = (): void => {
+      if (this.activeServePromise === servePromise) {
+        this.activeServePromise = null;
+        if (this.dataSocket === socket) this.dataSocket = null;
+      }
+    };
+    void servePromise.then(clearServePromise, clearServePromise);
+    return { socket, servePromise };
+  }
+
+  private async connectInvalidation(signal: AbortSignal): Promise<void> {
+    if (this.invalidationServePromise) return;
+    const socket = this.ctx.container!.getTcpPort(9001).connect('0.0.0.0:9001');
+    this.invalidationSocket = socket;
+    try {
+      await abortable(socket.opened, signal);
+    } catch (error) {
+      if (this.invalidationSocket === socket) this.invalidationSocket = null;
+      await socket.close().catch(() => undefined);
+      throw error;
+    }
+    const server = new HranaServer({
+      readable: socket.readable,
+      writable: socket.writable,
+      sql: wrapSqlStorage(this.ctx.storage.sql),
+    });
+    const servePromise = server.serve();
+    this.invalidationServePromise = servePromise;
+    this.ctx.waitUntil(servePromise);
+    const clear = (): void => {
+      if (this.invalidationServePromise === servePromise) {
+        this.invalidationServePromise = null;
+        if (this.invalidationSocket === socket) this.invalidationSocket = null;
+      }
+    };
+    void servePromise.then(clear, clear);
+  }
+
+  private closeRuntimeSockets(): void {
+    const sockets = [this.dataSocket, this.invalidationSocket];
+    this.dataSocket = null;
+    this.invalidationSocket = null;
+    for (const socket of sockets) void socket?.close().catch(() => undefined);
+  }
+
+  private clearRuntimeConnections(): void {
+    this.activeServePromise = null;
+    this.invalidationServePromise = null;
+    this.hranaServer = null;
+    this.closeRuntimeSockets();
+  }
+
+  private clearRuntimeState(): void {
+    this.startupAbort?.abort();
+    this.startupAbort = null;
+    this.startupPromise = null;
+    this.activeExec = null;
+    this.clearRuntimeConnections();
+  }
+
+  private async destroyBounded(): Promise<void> {
+    try {
+      await abortable(this.destroy(), AbortSignal.timeout(DESTROY_TIMEOUT_MS));
+    } catch (error) {
+      this.ctx.abort('Container destruction did not complete before its deadline');
+      throw error;
     }
   }
 
@@ -461,7 +647,7 @@ export class AiryFS extends Container<Env> {
         if (filesystemResponse) return filesystemResponse;
 
         if (v1Route.resource === 'exec' && request.method === 'POST') {
-          return Response.json(await this.exec(await readCommandRequest(request)));
+          return Response.json(await this.exec(await readCommandRequest(request), request.signal));
         }
 
         if (v1Route.resource === 'usage' && request.method === 'GET') {
@@ -473,7 +659,7 @@ export class AiryFS extends Container<Env> {
       }
 
       if (url.pathname === '/exec' && request.method === 'POST') {
-        return Response.json(await this.exec(await readCommandRequest(request)));
+        return Response.json(await this.exec(await readCommandRequest(request), request.signal));
       }
 
       if (url.pathname === '/destroy' && request.method === 'POST') {
