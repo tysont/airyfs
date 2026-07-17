@@ -115,6 +115,7 @@ export interface PipelineResponse {
   results: StreamResult[];
 }
 
+
 // ---------------------------------------------------------------------------
 // TCP frame serialization: 4-byte big-endian length prefix + JSON
 // ---------------------------------------------------------------------------

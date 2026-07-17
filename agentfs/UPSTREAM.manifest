@@ -1,0 +1,7 @@
+repository=https://github.com/tursodatabase/agentfs.git
+tag=v0.6.4
+commit=3a5ed2b88e5d5a5f9b2c7fe02d012b50fd19e3c0
+default_branch_commit_at_pin=0a014ebd4918615baff589ed17486e557e7c6a23
+
+# Refresh discovery:
+# git ls-remote --tags --sort=-v:refname https://github.com/tursodatabase/agentfs.git

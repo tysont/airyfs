@@ -37,7 +37,7 @@ class TestClient {
   private frameBuffer = new FrameBuffer();
   public serverDone: Promise<void>;
 
-  constructor(sql: SqlBackend) {
+  constructor(sql: SqlBackend, writeLock?: () => Promise<() => void>) {
     const toServer = new TransformStream<Uint8Array, Uint8Array>();
     const fromServer = new TransformStream<Uint8Array, Uint8Array>();
     this.toServerWriter = toServer.writable.getWriter();
@@ -47,6 +47,7 @@ class TestClient {
       readable: toServer.readable,
       writable: fromServer.writable,
       sql,
+      writeLock,
     });
     this.serverDone = server.serve();
   }
@@ -97,6 +98,42 @@ describe('HranaServer pipeline', () => {
       expect(result.rows).toHaveLength(1);
       expect(result.rows[0].values[0]).toEqual({ type: 'integer', value: '1' });
     }
+    await client.close();
+  });
+
+  it('takes the write lock for mutations but not reads', async () => {
+    let lockRequests = 0;
+    let allowWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { allowWrite = resolve; });
+    const client = new TestClient(sql, async () => {
+      lockRequests++;
+      await writeGate;
+      return () => undefined;
+    });
+
+    await client.send({
+      baton: null,
+      requests: [{ type: 'execute', stmt: { sql: 'SELECT 1' } }],
+    });
+    expect(lockRequests).toBe(0);
+
+    const mutation = client.send({
+      baton: null,
+      requests: [{ type: 'execute', stmt: { sql: 'CREATE TABLE locked (id INTEGER)' } }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lockRequests).toBe(1);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name='locked'").get()).toBeUndefined();
+
+    allowWrite();
+    await mutation;
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name='locked'").get()).toBeDefined();
+
+    await client.send({
+      baton: null,
+      requests: [{ type: 'execute', stmt: { sql: 'SELECT 1; DELETE FROM locked' } }],
+    });
+    expect(lockRequests).toBe(2);
     await client.close();
   });
 
@@ -204,6 +241,31 @@ describe('HranaServer pipeline', () => {
     await client.close();
   });
 
+  it('holds one write lock for an entire mutating batch', async () => {
+    let lockRequests = 0;
+    let releases = 0;
+    const client = new TestClient(sql, async () => {
+      lockRequests++;
+      return () => { releases++; };
+    });
+    await client.send({
+      baton: null,
+      requests: [{
+        type: 'batch',
+        batch: {
+          steps: [
+            { stmt: { sql: 'CREATE TABLE batch_locked (x INTEGER)' } },
+            { stmt: { sql: 'INSERT INTO batch_locked VALUES (1)' } },
+          ],
+        },
+      }],
+    });
+
+    expect(lockRequests).toBe(1);
+    expect(releases).toBe(1);
+    await client.close();
+  });
+
   it('returns error for bad SQL', async () => {
     const client = new TestClient(sql);
     const resp = await client.send({
@@ -256,6 +318,23 @@ describe('HranaServer pipeline', () => {
       if (val.type === 'blob') {
         expect(atob(val.base64)).toBe('hello');
       }
+    }
+    await client.close();
+  });
+
+  it('rejects integer bindings outside the DO SQLite safe range', async () => {
+    const client = new TestClient(sql);
+    const resp = await client.send({
+      baton: null,
+      requests: [{
+        type: 'execute',
+        stmt: { sql: 'SELECT ?', args: [{ type: 'integer', value: '9007199254740992' }] },
+      }],
+    });
+
+    expect(resp.results[0].type).toBe('error');
+    if (resp.results[0].type === 'error') {
+      expect(resp.results[0].error.message).toContain('outside the supported safe range');
     }
     await client.close();
   });
@@ -313,13 +392,14 @@ describe('HranaServer pipeline', () => {
       const result = resp.results[0].response.result;
       expect(result.cols.map(c => c.name)).toEqual(['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk']);
       expect(result.rows.length).toBe(3);
-      // Check column names (index 1 in each row)
+      // Check column names and metadata from SQLite (indexes 1, 3, 4, and 5).
       const colNames = result.rows.map(r => r.values[1]);
       expect(colNames).toEqual([
         { type: 'text', value: 'id' },
         { type: 'text', value: 'name' },
         { type: 'text', value: 'data' },
       ]);
+      expect(result.rows[0].values[5]).toEqual({ type: 'integer', value: '0' });
     }
     await client.close();
   });
@@ -378,17 +458,27 @@ describe('HranaServer pipeline', () => {
     await client.close();
   });
 
-  it('handles store_sql and close_sql', async () => {
+  it('executes stored SQL and rejects it after close_sql', async () => {
     const client = new TestClient(sql);
-    const resp = await client.send({
+    let resp = await client.send({
       baton: null,
       requests: [
         { type: 'store_sql', sql: 'SELECT 1', sql_id: 1 },
-        { type: 'close_sql', sql_id: 1 },
+        { type: 'execute', stmt: { sql_id: 1 } },
       ],
     });
     expect(resp.results[0].type).toBe('ok');
     expect(resp.results[1].type).toBe('ok');
+
+    resp = await client.send({
+      baton: resp.baton,
+      requests: [
+        { type: 'close_sql', sql_id: 1 },
+        { type: 'execute', stmt: { sql_id: 1 } },
+      ],
+    });
+    expect(resp.results[0].type).toBe('ok');
+    expect(resp.results[1].type).toBe('error');
     await client.close();
   });
 

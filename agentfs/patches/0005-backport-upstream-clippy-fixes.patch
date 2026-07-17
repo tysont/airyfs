@@ -1,0 +1,26 @@
+diff --git a/cli/src/cmd/init.rs b/cli/src/cmd/init.rs
+index cad7063..59950a7 100644
+--- a/cli/src/cmd/init.rs
++++ b/cli/src/cmd/init.rs
+@@ -55,7 +55,7 @@ pub async fn init_database(
+     }
+ 
+     // Check if agent already exists
+-    let db_path = agentfs_dir().join(format!("{}.db", &id));
++    let db_path = agentfs_dir().join(format!("{}.db", id));
+     if db_path.exists() {
+         if force {
+             for entry in std::fs::read_dir(agentfs_dir())? {
+diff --git a/cli/src/cmd/ps.rs b/cli/src/cmd/ps.rs
+index 25772c3..752bef9 100644
+--- a/cli/src/cmd/ps.rs
++++ b/cli/src/cmd/ps.rs
+@@ -216,7 +216,7 @@ pub fn list_ps<W: Write>(out: &mut W) -> Result<()> {
+             writeln!(
+                 out,
+                 "{:<COL_SESSION$} {:>COL_PID$} {:^COL_OWNER$} {:<COL_COMMAND$} {:>COL_STARTED$}",
+-                &session.session_id,
++                session.session_id,
+                 proc.pid,
+                 owner_marker,
+                 truncate(&proc.command, COL_COMMAND),

@@ -571,12 +571,12 @@ Length-prefixed JSON: 4-byte big-endian uint32 length prefix, followed by that m
 
 **Goal:** Mount the AgentFS filesystem via FUSE so real POSIX operations work.
 
-**Resolved approach:** The `tysont/agentfs` fork replaces the proprietary `turso` crate with `libsql` and adds `--remote-url` support to the CLI. The AgentFS FUSE daemon connects directly to the DO's Hrana server through the bridge via `libsql::Builder::new_remote()`. Every filesystem operation is a real-time SQL query over the network — no local file, no sync, no replica.
+**Resolved approach:** The vendored AgentFS patch series replaces the proprietary `turso` crate with `libsql` and adds `--remote-url` support to the CLI. The AgentFS FUSE daemon connects directly to the DO's Hrana server through the bridge via `libsql::Builder::new_remote()`. Every filesystem operation is a real-time SQL query over the network — no local file, no sync, no replica.
 
 **FUSE is confirmed to work in CF Containers** (proven by the `fuse-on-r2` example which uses tigrisfs with Alpine + fuse3).
 
 **Build:**
-- Build the `agentfs` binary from the `tysont/agentfs` fork (cross-compile for linux/amd64)
+- Build the `agentfs` binary from the pinned snapshot and patch series under `agentfs/` (cross-compile for linux/amd64)
 - Install `fuse3` in the Container Dockerfile
 - `entrypoint.sh`: start bridge, then `agentfs mount --remote-url ws://localhost:8080 --auth-token "" agent /agent -f`
 - The `-f` (foreground) flag keeps the mount process alive in the Container
@@ -584,7 +584,7 @@ Length-prefixed JSON: 4-byte big-endian uint32 length prefix, followed by that m
 **Dockerfile additions:**
 ```dockerfile
 RUN apt-get update && apt-get install -y fuse3
-# Copy pre-built agentfs binary from fork
+# Copy the pre-built patched agentfs binary
 COPY agentfs /usr/local/bin/agentfs
 ```
 
@@ -659,7 +659,7 @@ This proves DO SQLite is the durable source of truth — Container is purely eph
 - StmtResult may need optional fields (`rows_read`, `rows_written`, `query_duration_ms`) that the client expects
 
 ### Risk 2: AgentFS Rust CLI Remote URL Support
-**Status: RESOLVED.** The `tysont/agentfs` fork replaces the proprietary `turso` crate with `libsql` and adds `--remote-url` to the CLI mount command. `libsql::Builder::new_remote()` provides pure network connections — every query goes over WebSocket/HTTP to the remote server, no local file needed. The FUSE daemon uses this to connect through the Container's bridge to the DO's Hrana server.
+**Status: RESOLVED.** The vendored AgentFS patch series replaces the proprietary `turso` crate with `libsql` and adds `--remote-url` to the CLI mount command. `libsql::Builder::new_remote()` provides pure network connections — every query goes over WebSocket/HTTP to the remote server, no local file needed. The FUSE daemon uses this to connect through the Container's bridge to the DO's Hrana server.
 
 ### Risk 3: FUSE Latency for Metadata-Heavy Operations
 **Impact:** `git status`, `find`, etc. issue many sequential stat/readdir calls, each a round trip.

@@ -62,7 +62,13 @@ function hranaToJs(val: HranaValue): unknown {
     case 'null':
       return null;
     case 'integer':
-      return Number(val.value);
+      {
+        const integer = BigInt(val.value);
+        if (integer < BigInt(Number.MIN_SAFE_INTEGER) || integer > BigInt(Number.MAX_SAFE_INTEGER)) {
+          throw new Error(`Integer is outside the supported safe range: ${val.value}`);
+        }
+        return Number(integer);
+      }
     case 'float':
       return val.value;
     case 'text':
@@ -125,32 +131,17 @@ function isPragma(sql: string): boolean {
 }
 
 /**
- * Simulate PRAGMA table_info(table) by parsing the CREATE TABLE DDL from
- * sqlite_master. Returns column metadata in the same format as the real PRAGMA.
+ * Simulate PRAGMA table_info(table) through SQLite's table-valued function,
+ * which DO SQLite permits in a regular SELECT.
  */
 function simulateTableInfo(backend: SqlBackend, tableName: string): StmtResult {
   const result = backend.exec(
-    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+    'SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(?)',
     tableName
   );
-  const createSql = result.rows[0]?.['sql'] as string | undefined;
-  if (!createSql) return EMPTY_RESULT;
-
-  const colsMatch = createSql.match(/\(([^)]+)\)/);
-  if (!colsMatch) return EMPTY_RESULT;
-
-  const colDefs = colsMatch[1].split(',').map(c => c.trim());
-  const rows: Row[] = colDefs.map((def, i) => {
-    const parts = def.split(/\s+/);
-    return { values: [
-      { type: 'integer' as const, value: String(i) },
-      { type: 'text' as const, value: parts[0] },
-      { type: 'text' as const, value: parts[1] || '' },
-      { type: 'integer' as const, value: '0' },
-      { type: 'null' as const },
-      { type: 'integer' as const, value: '0' },
-    ]};
-  });
+  const rows: Row[] = result.rows.map((row) => ({
+    values: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'].map((column) => jsToHrana(row[column])),
+  }));
 
   return {
     cols: [
@@ -160,7 +151,7 @@ function simulateTableInfo(backend: SqlBackend, tableName: string): StmtResult {
     ],
     rows,
     affected_row_count: 0, last_insert_rowid: null,
-    replication_index: null, rows_read: rows.length, rows_written: 0, query_duration_ms: 0,
+    replication_index: null, rows_read: result.rowsRead, rows_written: 0, query_duration_ms: 0,
   };
 }
 
@@ -168,7 +159,19 @@ function simulateTableInfo(backend: SqlBackend, tableName: string): StmtResult {
 // Statement execution
 // ---------------------------------------------------------------------------
 
-function executeStmt(backend: SqlBackend, stmt: Stmt): StmtResult {
+function isReadOnlyStatement(sql: string): boolean {
+  const trimmed = sql.trim();
+  const withoutTrailingSemicolons = trimmed.replace(/;+\s*$/, '');
+  if (withoutTrailingSemicolons.includes(';')) return false;
+  const upper = withoutTrailingSemicolons.toUpperCase();
+  return upper.startsWith('SELECT') || upper.startsWith('EXPLAIN');
+}
+
+async function executeStmt(
+  backend: SqlBackend,
+  stmt: Stmt,
+  writeLock?: () => Promise<() => void>
+): Promise<StmtResult> {
   const query = stmt.sql ?? '';
 
   if (isBlockedStatement(query)) return EMPTY_RESULT;
@@ -187,7 +190,15 @@ function executeStmt(backend: SqlBackend, stmt: Stmt): StmtResult {
     for (const na of stmt.named_args) bindings.push(hranaToJs(na.value));
   }
 
-  const cursor = backend.exec(query, ...bindings);
+  const release = writeLock && !isReadOnlyStatement(query)
+    ? await writeLock()
+    : () => undefined;
+  let cursor: SqlCursorResult;
+  try {
+    cursor = backend.exec(query, ...bindings);
+  } finally {
+    release();
+  }
 
   const cols = cursor.columnNames.map((name) => ({
     name,
@@ -228,7 +239,9 @@ export class HranaServer {
   private sql: SqlBackend;
   private readable: ReadableStream<Uint8Array>;
   private writable: WritableStream<Uint8Array>;
+  private writeLock?: () => Promise<() => void>;
   private baton: string | null = null;
+  private storedSql = new Map<number, string>();
 
   /** Count of pipeline requests processed (for performance measurement). */
   pipelineCount = 0;
@@ -239,10 +252,12 @@ export class HranaServer {
     readable: ReadableStream<Uint8Array>;
     writable: WritableStream<Uint8Array>;
     sql: SqlBackend;
+    writeLock?: () => Promise<() => void>;
   }) {
     this.readable = opts.readable;
     this.writable = opts.writable;
     this.sql = opts.sql;
+    this.writeLock = opts.writeLock;
   }
 
   async serve(): Promise<void> {
@@ -257,7 +272,7 @@ export class HranaServer {
 
         buffer.push(value);
         for (const msg of buffer.drain()) {
-          const response = this.handlePipeline(msg as PipelineRequest);
+          const response = await this.handlePipeline(msg as PipelineRequest);
           await writer.write(serializeFrame(response));
         }
       }
@@ -267,18 +282,19 @@ export class HranaServer {
     }
   }
 
-  private handlePipeline(req: PipelineRequest): PipelineResponse {
+  private async handlePipeline(req: PipelineRequest): Promise<PipelineResponse> {
     this.pipelineCount++;
-    const results: StreamResult[] = req.requests.map((streamReq) => {
+    const results: StreamResult[] = [];
+    for (const streamReq of req.requests) {
       try {
-        return { type: 'ok' as const, response: this.handleStreamRequest(streamReq) };
+        results.push({ type: 'ok' as const, response: await this.handleStreamRequest(streamReq) });
       } catch (err) {
-        return {
+        results.push({
           type: 'error' as const,
           error: { message: err instanceof Error ? err.message : String(err) },
-        };
+        });
       }
-    });
+    }
 
     const hasClose = req.requests.some(r => r.type === 'close');
     if (!hasClose && !this.baton) this.baton = 'airyfs-1';
@@ -286,39 +302,46 @@ export class HranaServer {
     return { baton: this.baton, base_url: null, results };
   }
 
-  private handleStreamRequest(req: StreamRequest): StreamResponse {
+  private async handleStreamRequest(req: StreamRequest): Promise<StreamResponse> {
     switch (req.type) {
       case 'close':
         this.baton = null;
+        this.storedSql.clear();
         return { type: 'close' };
 
       case 'execute':
         this.statementCount++;
-        return { type: 'execute', result: executeStmt(this.sql, req.stmt) };
+        return { type: 'execute', result: await executeStmt(this.sql, this.resolveStmt(req.stmt), this.writeLock) };
 
       case 'batch':
-        return { type: 'batch', result: this.executeBatch(req.batch.steps) };
+        return { type: 'batch', result: await this.executeBatch(req.batch.steps) };
 
       case 'get_autocommit':
         return { type: 'get_autocommit', is_autocommit: true };
 
       case 'sequence': {
-        const seqSql = req.sql ?? '';
+        const seqSql = this.resolveSql(req.sql, req.sql_id);
         for (const part of seqSql.split(';')) {
           const t = part.trim();
           if (!t || isBlockedStatement(t) || isPragma(t)) continue;
-          this.sql.exec(t);
+          const release = this.writeLock && !isReadOnlyStatement(t)
+            ? await this.writeLock()
+            : () => undefined;
+          try { this.sql.exec(t); } finally { release(); }
         }
         return { type: 'sequence' };
       }
 
       case 'store_sql':
+        this.storedSql.set(req.sql_id, req.sql);
         return { type: 'store_sql' };
 
       case 'close_sql':
+        this.storedSql.delete(req.sql_id);
         return { type: 'close_sql' };
 
       case 'describe':
+        this.resolveSql(req.sql, req.sql_id);
         return { type: 'describe', result: { params: [], cols: [], is_explain: false, is_readonly: false } };
 
       default:
@@ -326,27 +349,54 @@ export class HranaServer {
     }
   }
 
-  private executeBatch(steps: { condition?: unknown; stmt: Stmt }[]): BatchResult {
+  private async executeBatch(steps: { condition?: unknown; stmt: Stmt }[]): Promise<BatchResult> {
     const stepResults: (StmtResult | null)[] = [];
     const stepErrors: ({ message: string } | null)[] = [];
+    const resolvedSteps = steps.map((step) => ({ ...step, stmt: this.resolveStmt(step.stmt) }));
+    const needsWriteLock = resolvedSteps.some((step) => {
+      const query = step.stmt.sql ?? '';
+      return !isBlockedStatement(query) && !isPragma(query) && !isReadOnlyStatement(query);
+    });
+    const release = this.writeLock && needsWriteLock
+      ? await this.writeLock()
+      : () => undefined;
 
-    for (const step of steps) {
-      if (step.condition && !this.evaluateCondition(step.condition, stepResults, stepErrors)) {
-        stepResults.push(null);
-        stepErrors.push(null);
-        continue;
-      }
+    try {
+      for (const step of resolvedSteps) {
+        if (step.condition && !this.evaluateCondition(step.condition, stepResults, stepErrors)) {
+          stepResults.push(null);
+          stepErrors.push(null);
+          continue;
+        }
 
-      try {
-        stepResults.push(executeStmt(this.sql, step.stmt));
-        stepErrors.push(null);
-      } catch (err) {
-        stepResults.push(null);
-        stepErrors.push({ message: err instanceof Error ? err.message : String(err) });
+        this.statementCount++;
+        try {
+          stepResults.push(await executeStmt(this.sql, step.stmt));
+          stepErrors.push(null);
+        } catch (err) {
+          stepResults.push(null);
+          stepErrors.push({ message: err instanceof Error ? err.message : String(err) });
+        }
       }
+    } finally {
+      release();
     }
 
     return { step_results: stepResults, step_errors: stepErrors };
+  }
+
+  private resolveStmt(stmt: Stmt): Stmt {
+    return { ...stmt, sql: this.resolveSql(stmt.sql, stmt.sql_id) };
+  }
+
+  private resolveSql(sql?: string | null, sqlId?: number | null): string {
+    if (sql !== null && sql !== undefined) return sql;
+    if (sqlId !== null && sqlId !== undefined) {
+      const stored = this.storedSql.get(sqlId);
+      if (stored !== undefined) return stored;
+      throw new Error(`Unknown stored SQL id: ${sqlId}`);
+    }
+    throw new Error('SQL text or sql_id is required');
   }
 
   private evaluateCondition(

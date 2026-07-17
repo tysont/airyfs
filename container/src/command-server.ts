@@ -9,7 +9,7 @@ const PORT = 4000;
 const MOUNT_POINT = '/volume';
 const MOUNT_POLL_INTERVAL_MS = 1000;
 const MOUNT_POLL_MAX_ATTEMPTS = 30;
-const EXEC_TIMEOUT_MS = 120_000;
+const EXEC_TIMEOUT_MS = 300_000;
 const EXEC_MAX_BUFFER = 10 * 1024 * 1024;
 
 let cwd = '/tmp';
@@ -72,8 +72,8 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/mount') {
     if (fuseProcess && fuseExitCode === null) {
       const mounted = await isMounted();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, mounted }));
+      res.writeHead(mounted ? 200 : 409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: mounted, mounted, error: mounted ? undefined : 'Mount already in progress' }));
       return;
     }
 
@@ -81,7 +81,7 @@ const server = createServer(async (req, res) => {
 
     fuseExitCode = null;
     const child = exec(
-      `agentfs mount --remote-url http://localhost:8080 --auth-token "" --foreground volume ${MOUNT_POINT}`,
+      `agentfs mount --remote-url http://localhost:8080 --invalidation-url http://localhost:8081 --auth-token "" --cache-ttl-ms 1000 --foreground volume ${MOUNT_POINT}`,
       { env: process.env }
     );
     fuseProcess = child;
@@ -89,7 +89,7 @@ const server = createServer(async (req, res) => {
     child.stdout?.on('data', (d: string) => process.stdout.write(`[fuse] ${d}`));
     child.stderr?.on('data', (d: string) => process.stderr.write(`[fuse] ${d}`));
     child.on('exit', (code) => {
-      fuseExitCode = code ?? 1;
+      if (fuseProcess === child) fuseExitCode = code ?? 1;
     });
 
     let mounted = false;
@@ -104,10 +104,20 @@ const server = createServer(async (req, res) => {
       if (mounted) break;
     }
 
-    if (mounted || fuseExitCode === null) cwd = MOUNT_POINT;
+    if (!mounted) {
+      child.kill('SIGTERM');
+      if (fuseProcess === child) {
+        fuseProcess = null;
+        fuseExitCode ??= 1;
+      }
+      res.writeHead(504, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, mounted: false, error: 'FUSE mount did not complete within 30 seconds' }));
+      return;
+    }
 
+    cwd = MOUNT_POINT;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: mounted || fuseExitCode === null, mounted }));
+    res.end(JSON.stringify({ ok: true, mounted: true }));
     return;
   }
 

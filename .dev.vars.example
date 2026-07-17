@@ -1,0 +1,2 @@
+# Account-scoped deployment configuration. API tokens remain in the shell.
+CLOUDFLARE_ACCOUNT_ID=your-account-id

@@ -1,0 +1,87 @@
+From 3ddb0abf95e0b250f00f95fa67cb0c645e2f2f12 Mon Sep 17 00:00:00 2001
+From: Tyson Trautmann <tysont@gmail.com>
+Date: Sat, 28 Mar 2026 09:09:01 -0700
+Subject: [PATCH] Document fork changes in README
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add fork notice and detailed changelog at the top of the README:
+turso→libsql replacement, remote database support, PRAGMA fix.
+Includes test status and usage example.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ README.md | 56 +++++++++++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 46 insertions(+), 10 deletions(-)
+
+diff --git a/README.md b/README.md
+index dba8245..1843a7e 100644
+--- a/README.md
++++ b/README.md
+@@ -6,16 +6,52 @@
+   The filesystem for agents.
+ </p>
+ 
+-<p align="center">
+-  <a title="Build Status" target="_blank" href="https://github.com/tursodatabase/agentfs/actions/workflows/rust.yml"><img src="https://img.shields.io/github/actions/workflow/status/tursodatabase/agentfs/rust.yml?style=flat-square"></a>
+-  <a title="Rust" target="_blank" href="https://crates.io/crates/agentfs-sdk"><img alt="Crate" src="https://img.shields.io/crates/v/agentfs-sdk"></a>
+-  <a title="JavaScript" target="_blank" href="https://www.npmjs.com/package/agentfs-sdk"><img alt="NPM" src="https://img.shields.io/npm/v/agentfs-sdk"></a>
+-  <a title="Python" target="_blank" href="https://pypi.org/project/agentfs-sdk/"><img alt="PyPI" src="https://img.shields.io/pypi/v/agentfs-sdk"></a>
+-  <a title="MIT" target="_blank" href="https://github.com/tursodatabase/agentfs/blob/main/LICENSE.md"><img src="http://img.shields.io/badge/license-MIT-orange.svg?style=flat-square"></a>
+-</p>
+-<p align="center">
+-  <a title="Users's Discord" target="_blank" href="https://tur.so/discord"><img alt="Chat with other users of Turso (and Turso Cloud) on Discord" src="https://img.shields.io/discord/933071162680958986?label=Discord&logo=Discord&style=social&label=Users"></a>
+-</p>
++---
++
++> **This is a fork of [`tursodatabase/agentfs`](https://github.com/tursodatabase/agentfs).** See [Fork Changes](#fork-changes) below for what was modified and why.
++
++---
++
++## Fork Changes
++
++This fork replaces the proprietary `turso` crate with the open-source `libsql` crate and adds support for pure remote database connections. It was created for the [AiryFS](https://github.com/tysont/airyfs) project, which runs the AgentFS FUSE daemon inside a Cloudflare Container against a database hosted in a Durable Object — requiring network-only database access with no local file.
++
++### Changes from upstream
++
++**1. `turso` replaced with `libsql` (SDK + CLI, 21 files)**
++
++The upstream `turso` crate is Turso's proprietary SDK. It only supports local SQLite files (`Builder::new_local`) and embedded replicas that sync with Turso Cloud (`sync::Builder::new_remote`). The open-source `libsql` crate has a nearly identical API but adds `Builder::new_remote(url, token)` — a pure network connection where every query goes over HTTP via the Hrana protocol. No local file is created.
++
++Mechanical adaptations:
++- `prepare_cached()` → `prepare()` (libsql has no statement cache)
++- `Row::get_value(usize)` → `get_value(i32)` (index type difference)
++- ~30 sites where `Rows` must be dropped before the next connection operation (libsql holds a reference to the SQLite statement; turso copied row data)
++- Turso sync functionality removed (pull/push/checkpoint) — no libsql equivalent, not needed for remote-only use
++
++**2. Remote database support (SDK + CLI, 5 files)**
++
++- `ConnectionPool::new_remote(url, auth_token)` — creates a pool backed by `libsql::Builder::new_remote()`
++- `AgentFSOptions::with_remote(url)` + `.with_auth_token(token)` — constructor for remote mode
++- `AgentFS::open()` — detects `remote_url` and creates the pool via `new_remote()`, skipping local path resolution
++- CLI: `agentfs mount --remote-url <URL> [--auth-token <TOKEN>] <name> <mountpoint>`
++
++**3. PRAGMA fix (SDK, 1 file)**
++
++`execute_batch("PRAGMA synchronous = OFF")` fails because libsql's SQL parser classifies PRAGMAs with values as unsupported statements when sent through the batch code path. Changed to `execute()` which bypasses the parser and sends the SQL directly. Also removed `BEGIN`/`COMMIT` from the `fsync()` batch since transaction control is not applicable to remote connections.
++
++### Test status
++
++100 of 101 upstream tests pass. 1 test is ignored (uses the `aegis256` cipher which is turso-specific and not available in libsql).
++
++### Usage
++
++```bash
++# Mount against a remote Hrana-compatible server
++agentfs mount --remote-url http://localhost:8080 --auth-token "" volume /mnt/volume
++
++# All existing local functionality is unchanged
++agentfs mount myagent /mnt/volume
++```
+ 
+ ---
+ 
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,245 @@
+diff --git a/cli/src/cmd/mount.rs b/cli/src/cmd/mount.rs
+index 2f3e2cc..4c85991 100644
+--- a/cli/src/cmd/mount.rs
++++ b/cli/src/cmd/mount.rs
+@@ -55,6 +55,8 @@ pub struct MountArgs {
+     pub remote_url: Option<String>,
+     /// Authentication token for remote database connections.
+     pub auth_token: Option<String>,
++    /// FUSE kernel entry and attribute cache lifetime.
++    pub cache_ttl: std::time::Duration,
+ }
+ 
+ /// Mount the agent filesystem (Linux).
+@@ -141,6 +143,7 @@ fn mount_fuse(args: MountArgs) -> Result<()> {
+         fsname,
+         uid: args.uid,
+         gid: args.gid,
++        cache_ttl: args.cache_ttl,
+     };
+ 
+     let id_or_path = args.id_or_path.clone();
+diff --git a/cli/src/fuse.rs b/cli/src/fuse.rs
+index 60d2f91..a5a9e2d 100644
+--- a/cli/src/fuse.rs
++++ b/cli/src/fuse.rs
+@@ -68,11 +68,6 @@ fn maximize_fd_limit() {
+     }
+ }
+ 
+-/// Cache entries never expire — we use deferred kernel cache invalidation
+-/// (via Notifier::inval_entry) after mutations to keep the dcache consistent.
+-/// This is safe because we are the only writer to the filesystem.
+-const TTL: Duration = Duration::MAX;
+-
+ /// Options for mounting an agent filesystem via FUSE.
+ #[derive(Debug, Clone)]
+ pub struct FuseMountOptions {
+@@ -91,6 +86,8 @@ pub struct FuseMountOptions {
+     pub uid: Option<u32>,
+     /// Group ID to report for all files (defaults to current group).
+     pub gid: Option<u32>,
++    /// Kernel entry and attribute cache lifetime.
++    pub cache_ttl: Duration,
+ }
+ 
+ /// Tracks an open file handle
+@@ -102,6 +99,7 @@ struct OpenFile {
+ struct AgentFSFuse {
+     fs: Arc<dyn FileSystem>,
+     runtime: Runtime,
++    cache_ttl: Duration,
+     /// Maps file handle -> open file state
+     open_files: Arc<Mutex<HashMap<u64, OpenFile>>>,
+     /// Next file handle to allocate
+@@ -124,12 +122,13 @@ impl Filesystem for AgentFSFuse {
+     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> Result<(), libc::c_int> {
+         tracing::debug!("FUSE::init");
+-        let _ = config.add_capabilities(
+-            FUSE_ASYNC_READ
+-                | FUSE_WRITEBACK_CACHE
+-                | FUSE_PARALLEL_DIROPS
+-                | FUSE_CACHE_SYMLINKS
+-                | FUSE_NO_OPENDIR_SUPPORT,
+-        );
++        let mut capabilities = FUSE_ASYNC_READ
++            | FUSE_PARALLEL_DIROPS
++            | FUSE_CACHE_SYMLINKS
++            | FUSE_NO_OPENDIR_SUPPORT;
++        if self.cache_ttl == Duration::MAX {
++            capabilities |= FUSE_WRITEBACK_CACHE;
++        }
++        let _ = config.add_capabilities(capabilities);
+         Ok(())
+     }
+ 
+@@ -157,7 +155,7 @@ impl Filesystem for AgentFSFuse {
+         match result {
+             Ok(Some(stats)) => {
+                 let attr = fillattr(&stats);
+-                reply.entry(&TTL, &attr, 0);
++                reply.entry(&self.cache_ttl, &attr, 0);
+             }
+             Ok(None) => reply.error(libc::ENOENT),
+             Err(e) => reply.error(error_to_errno(&e)),
+@@ -177,7 +175,7 @@ impl Filesystem for AgentFSFuse {
+             .block_on(async move { fs.getattr(ino as i64).await });
+ 
+         match result {
+-            Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats)),
++            Ok(Some(stats)) => reply.attr(&self.cache_ttl, &fillattr(&stats)),
+             Ok(None) => reply.error(libc::ENOENT),
+             Err(e) => reply.error(error_to_errno(&e)),
+         }
+@@ -325,7 +323,7 @@ impl Filesystem for AgentFSFuse {
+             .block_on(async move { fs.getattr(ino as i64).await });
+ 
+         match result {
+-            Ok(Some(stats)) => reply.attr(&TTL, &fillattr(&stats)),
++            Ok(Some(stats)) => reply.attr(&self.cache_ttl, &fillattr(&stats)),
+             Ok(None) => reply.error(libc::ENOENT),
+             Err(e) => reply.error(error_to_errno(&e)),
+         }
+@@ -465,7 +463,7 @@ impl Filesystem for AgentFSFuse {
+         if offset <= offset_counter {
+             if let Some(ref stats) = dir_stats {
+                 let attr = fillattr(stats);
+-                if reply.add(ino, offset_counter + 1, ".", &TTL, &attr, 0) {
++                if reply.add(ino, offset_counter + 1, ".", &self.cache_ttl, &attr, 0) {
+                     reply.ok();
+                     return;
+                 }
+@@ -477,7 +475,7 @@ impl Filesystem for AgentFSFuse {
+         if offset <= offset_counter {
+             if let Some(ref stats) = parent_stats {
+                 let attr = fillattr(stats);
+-                if reply.add(parent_ino, offset_counter + 1, "..", &TTL, &attr, 0) {
++                if reply.add(parent_ino, offset_counter + 1, "..", &self.cache_ttl, &attr, 0) {
+                     reply.ok();
+                     return;
+                 }
+@@ -494,7 +492,7 @@ impl Filesystem for AgentFSFuse {
+                     entry.stats.ino as u64,
+                     offset_counter + 1,
+                     &entry.name,
+-                    &TTL,
++                    &self.cache_ttl,
+                     &attr,
+                     0,
+                 ) {
+@@ -547,7 +545,7 @@ impl Filesystem for AgentFSFuse {
+         match result {
+             Ok(stats) => {
+                 let attr = fillattr(&stats);
+-                reply.entry(&TTL, &attr, 0);
++                reply.entry(&self.cache_ttl, &attr, 0);
+             }
+             Err(e) => {
+                 reply.error(error_to_errno(&e));
+@@ -591,7 +589,7 @@ impl Filesystem for AgentFSFuse {
+         match result {
+             Ok(stats) => {
+                 let attr = fillattr(&stats);
+-                reply.entry(&TTL, &attr, 0);
++                reply.entry(&self.cache_ttl, &attr, 0);
+             }
+             Err(e) => {
+                 reply.error(error_to_errno(&e));
+@@ -673,7 +671,7 @@ impl Filesystem for AgentFSFuse {
+                 let fh = self.alloc_fh();
+                 self.open_files.lock().insert(fh, OpenFile { file });
+ 
+-                reply.created(&TTL, &attr, 0, fh, 0);
++                reply.created(&self.cache_ttl, &attr, 0, fh, 0);
+             }
+             Err(e) => {
+                 reply.error(error_to_errno(&e));
+@@ -722,7 +720,7 @@ impl Filesystem for AgentFSFuse {
+         match result {
+             Ok(stats) => {
+                 let attr = fillattr(&stats);
+-                reply.entry(&TTL, &attr, 0);
++                reply.entry(&self.cache_ttl, &attr, 0);
+             }
+             Err(e) => {
+                 reply.error(error_to_errno(&e));
+@@ -763,7 +761,7 @@ impl Filesystem for AgentFSFuse {
+         match result {
+             Ok(stats) => {
+                 let attr = fillattr(&stats);
+-                reply.entry(&TTL, &attr, 0);
++                reply.entry(&self.cache_ttl, &attr, 0);
+             }
+             Err(e) => {
+                 reply.error(error_to_errno(&e));
+@@ -1081,10 +1079,11 @@ impl AgentFSFuse {
+     ///
+     /// The provided Tokio runtime is used to execute async FileSystem operations
+     /// from within synchronous FUSE callbacks via `block_on`.
+-    fn new(fs: Arc<dyn FileSystem>, runtime: Runtime) -> Self {
++    fn new(fs: Arc<dyn FileSystem>, runtime: Runtime, cache_ttl: Duration) -> Self {
+         Self {
+             fs,
+             runtime,
++            cache_ttl,
+             open_files: Arc::new(Mutex::new(HashMap::new())),
+             next_fh: AtomicU64::new(1),
+         }
+@@ -1183,7 +1182,7 @@ pub fn mount(
+     // when passthrough filesystems cache O_PATH file descriptors
+     maximize_fd_limit();
+ 
+-    let fs = AgentFSFuse::new(fs, runtime);
++    let fs = AgentFSFuse::new(fs, runtime, opts.cache_ttl);
+ 
+     let mut mount_opts = vec![
+         MountOption::FSName(opts.fsname),
+diff --git a/cli/src/main.rs b/cli/src/main.rs
+index ec6e8e1..3580bce 100644
+--- a/cli/src/main.rs
++++ b/cli/src/main.rs
+@@ -123,6 +123,7 @@ fn main() {
+             backend,
+             remote_url,
+             auth_token,
++            cache_ttl_ms,
+         } => match (id_or_path, mountpoint) {
+             (Some(id_or_path), Some(mountpoint)) => {
+                 if let Err(e) = cmd::mount(cmd::MountArgs {
+@@ -137,6 +138,9 @@ fn main() {
+                     backend,
+                     remote_url,
+                     auth_token,
++                    cache_ttl: cache_ttl_ms
++                        .map(std::time::Duration::from_millis)
++                        .unwrap_or(std::time::Duration::MAX),
+                 }) {
+                     eprintln!("Error: {}", e);
+                     std::process::exit(1);
+diff --git a/cli/src/mount/fuse.rs b/cli/src/mount/fuse.rs
+index 5fb7c6a..a35de09 100644
+--- a/cli/src/mount/fuse.rs
++++ b/cli/src/mount/fuse.rs
+@@ -48,6 +48,7 @@ pub(super) fn mount_fuse(
+         fsname: opts.fsname.clone(),
+         uid: opts.uid,
+         gid: opts.gid,
++        cache_ttl: std::time::Duration::MAX,
+     };
+ 
+     let mountpoint = opts.mountpoint.clone();
+diff --git a/cli/src/opts.rs b/cli/src/opts.rs
+index 73de5ad..81326d9 100644
+--- a/cli/src/opts.rs
++++ b/cli/src/opts.rs
+@@ -234,6 +234,10 @@ pub enum Command {
+         /// Authentication token for remote database connections.
+         #[arg(long, env = "AGENTFS_AUTH_TOKEN")]
+         auth_token: Option<String>,
++
++        /// FUSE kernel entry and attribute cache lifetime in milliseconds.
++        #[arg(long)]
++        cache_ttl_ms: Option<u64>,
+     },
+     /// Show differences between base filesystem and delta (overlay mode only)
+     Diff {

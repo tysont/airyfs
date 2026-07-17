@@ -1,0 +1,290 @@
+From 341b3a7581a65404748bffecce02e3d87a3469d0 Mon Sep 17 00:00:00 2001
+From: Tyson Trautmann <tysont@gmail.com>
+Date: Fri, 27 Mar 2026 13:02:13 -0700
+Subject: [PATCH] Add remote database support via libsql Builder::new_remote
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add pure network-only database connections where all queries are sent
+to a remote server over WebSocket/HTTP with no local file. This
+enables the AgentFS FUSE daemon to operate against a database hosted
+remotely (e.g., in a Cloudflare Durable Object).
+
+SDK changes:
+- ConnectionPool::new_remote(url, auth_token) — creates a pool backed
+  by libsql::Builder::new_remote(), connecting via Hrana protocol
+- AgentFSOptions::with_remote(url) + .with_auth_token(token) — new
+  constructor for remote mode, skips local path resolution
+- AgentFS::open() — detects remote_url in options and creates the
+  pool via new_remote() instead of new_local()
+
+CLI changes:
+- agentfs mount --remote-url <URL> [--auth-token <TOKEN>] <name> <dir>
+  Mounts a remote database via FUSE or NFS. Schema version check is
+  skipped for remote connections (schema managed by remote server).
+- MountArgs carries remote_url and auth_token through to both
+  mount_fuse() and mount_nfs_backend()
+
+All existing local-file functionality unchanged. 100 tests pass.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ cli/src/cmd/mount.rs            | 29 ++++++++++--
+ cli/src/main.rs                 |  4 ++
+ cli/src/opts.rs                 |  9 ++++
+ sdk/rust/src/connection_pool.rs | 16 +++++++
+ sdk/rust/src/lib.rs             | 83 +++++++++++++++++++++------------
+ 5 files changed, 107 insertions(+), 34 deletions(-)
+
+diff --git a/cli/src/cmd/mount.rs b/cli/src/cmd/mount.rs
+index a0a157f..2f3e2cc 100644
+--- a/cli/src/cmd/mount.rs
++++ b/cli/src/cmd/mount.rs
+@@ -51,6 +51,10 @@ pub struct MountArgs {
+     pub gid: Option<u32>,
+     /// The mount backend to use (fuse or nfs).
+     pub backend: MountBackend,
++    /// Remote database URL for network-only connections.
++    pub remote_url: Option<String>,
++    /// Authentication token for remote database connections.
++    pub auth_token: Option<String>,
+ }
+ 
+ /// Mount the agent filesystem (Linux).
+@@ -85,11 +89,18 @@ pub fn mount(args: MountArgs) -> Result<()> {
+ /// Mount the agent filesystem using FUSE (Linux only).
+ #[cfg(target_os = "linux")]
+ fn mount_fuse(args: MountArgs) -> Result<()> {
+-    let opts = AgentFSOptions::resolve(&args.id_or_path)?;
++    let opts = if let Some(ref remote_url) = args.remote_url {
++        let mut opts = AgentFSOptions::with_remote(remote_url);
++        if let Some(ref token) = args.auth_token {
++            opts = opts.with_auth_token(token);
++        }
++        opts
++    } else {
++        AgentFSOptions::resolve(&args.id_or_path)?
++    };
+ 
+-    // Check schema version before daemonizing. This allows us to show the error
+-    // message to the user directly, rather than having it appear in daemon logs.
+-    {
++    // Check schema version before daemonizing (skip for remote — schema is managed remotely).
++    if args.remote_url.is_none() {
+         let rt = crate::get_runtime();
+         let db_path = opts.db_path()?;
+         let result: Result<(), SdkError> = rt.block_on(async {
+@@ -199,7 +210,15 @@ fn mount_fuse(args: MountArgs) -> Result<()> {
+ async fn mount_nfs_backend(args: MountArgs) -> Result<()> {
+     use crate::cmd::init::open_agentfs;
+ 
+-    let opts = AgentFSOptions::resolve(&args.id_or_path)?;
++    let opts = if let Some(ref remote_url) = args.remote_url {
++        let mut opts = AgentFSOptions::with_remote(remote_url);
++        if let Some(ref token) = args.auth_token {
++            opts = opts.with_auth_token(token);
++        }
++        opts
++    } else {
++        AgentFSOptions::resolve(&args.id_or_path)?
++    };
+ 
+     if !args.mountpoint.exists() {
+         anyhow::bail!("Mountpoint does not exist: {}", args.mountpoint.display());
+diff --git a/cli/src/main.rs b/cli/src/main.rs
+index 4fcf60a..ec6e8e1 100644
+--- a/cli/src/main.rs
++++ b/cli/src/main.rs
+@@ -121,6 +121,8 @@ fn main() {
+             uid,
+             gid,
+             backend,
++            remote_url,
++            auth_token,
+         } => match (id_or_path, mountpoint) {
+             (Some(id_or_path), Some(mountpoint)) => {
+                 if let Err(e) = cmd::mount(cmd::MountArgs {
+@@ -133,6 +135,8 @@ fn main() {
+                     uid,
+                     gid,
+                     backend,
++                    remote_url,
++                    auth_token,
+                 }) {
+                     eprintln!("Error: {}", e);
+                     std::process::exit(1);
+diff --git a/cli/src/opts.rs b/cli/src/opts.rs
+index 317d94b..bfd801b 100644
+--- a/cli/src/opts.rs
++++ b/cli/src/opts.rs
+@@ -225,6 +225,15 @@ pub enum Command {
+         /// Backend to use for mounting
+         #[arg(long, default_value_t = MountBackend::default())]
+         backend: MountBackend,
++
++        /// Remote database URL for network-only connections (e.g., ws://host:port).
++        /// When set, queries are sent over the network instead of using a local file.
++        #[arg(long)]
++        remote_url: Option<String>,
++
++        /// Authentication token for remote database connections.
++        #[arg(long, env = "AGENTFS_AUTH_TOKEN")]
++        auth_token: Option<String>,
+     },
+     /// Show differences between base filesystem and delta (overlay mode only)
+     Diff {
+diff --git a/sdk/rust/src/connection_pool.rs b/sdk/rust/src/connection_pool.rs
+index 58cbb42..3f14a3c 100644
+--- a/sdk/rust/src/connection_pool.rs
++++ b/sdk/rust/src/connection_pool.rs
+@@ -39,6 +39,22 @@ impl ConnectionPool {
+         Self::with_timeout(db, DEFAULT_TIMEOUT)
+     }
+ 
++    /// Create a new connection pool for a remote database.
++    ///
++    /// Connects to a remote libsql server (e.g., via Hrana protocol over WebSocket).
++    /// All queries are executed on the remote server — no local file is created.
++    ///
++    /// # Arguments
++    /// * `url` - Remote database URL (e.g., `ws://host:port`, `https://host`)
++    /// * `auth_token` - Authentication token for the remote server
++    pub async fn new_remote(url: &str, auth_token: &str) -> Result<Self> {
++        let db = libsql::Builder::new_remote(url.to_string(), auth_token.to_string())
++            .build()
++            .await
++            .map_err(|e| Error::Internal(format!("failed to connect to remote database: {e}")))?;
++        Ok(Self::with_timeout(db, DEFAULT_TIMEOUT))
++    }
++
+     /// Create a connection pool with a custom timeout.
+     fn with_timeout(db: Database, timeout: Duration) -> Self {
+         Self {
+diff --git a/sdk/rust/src/lib.rs b/sdk/rust/src/lib.rs
+index e7a0f09..5433764 100644
+--- a/sdk/rust/src/lib.rs
++++ b/sdk/rust/src/lib.rs
+@@ -100,6 +100,13 @@ pub struct AgentFSOptions {
+     pub base: Option<PathBuf>,
+     /// Encryption configuration for database at rest
+     pub encryption: Option<EncryptionConfig>,
++    /// Remote database URL for pure network-only connections.
++    /// When set, all queries are sent to the remote server over the network.
++    /// No local file is created. Mutually exclusive with `id` and `path`.
++    pub remote_url: Option<String>,
++    /// Authentication token for remote database connections.
++    /// Only used when `remote_url` is set.
++    pub auth_token: Option<String>,
+ }
+ 
+ impl AgentFSOptions {
+@@ -137,32 +144,43 @@ impl AgentFSOptions {
+     pub fn with_id(id: impl Into<String>) -> Self {
+         Self {
+             id: Some(id.into()),
+-            path: None,
+-            base: None,
+-            encryption: None,
++            ..Default::default()
+         }
+     }
+ 
+     /// Create options for an ephemeral in-memory agent
+     pub fn ephemeral() -> Self {
+-        Self {
+-            id: None,
+-            path: None,
+-            base: None,
+-            encryption: None,
+-        }
++        Self::default()
+     }
+ 
+     /// Create options with a custom database path
+     pub fn with_path(path: impl Into<String>) -> Self {
+         Self {
+-            id: None,
+             path: Some(path.into()),
+-            base: None,
+-            encryption: None,
++            ..Default::default()
++        }
++    }
++
++    /// Create options for a remote database connection.
++    ///
++    /// All queries are sent to the remote server over the network.
++    /// No local file is created.
++    ///
++    /// # Arguments
++    /// * `url` - Remote database URL (e.g., `ws://host:port`, `https://host`)
++    pub fn with_remote(url: impl Into<String>) -> Self {
++        Self {
++            remote_url: Some(url.into()),
++            ..Default::default()
+         }
+     }
+ 
++    /// Set the authentication token for a remote database connection.
++    pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
++        self.auth_token = Some(token.into());
++        self
++    }
++
+     /// Set the base directory for overlay filesystem (copy-on-write)
+     pub fn with_base(mut self, base: impl Into<PathBuf>) -> Self {
+         self.base = Some(base.into());
+@@ -273,25 +291,32 @@ impl AgentFS {
+             }
+         }
+ 
+-        let db_path = options.db_path()?;
+-
+-        let db = if let Some(ref enc_config) = options.encryption {
+-            Builder::new_local(&db_path)
+-                .encryption_config(libsql::EncryptionConfig::new(
+-                    enc_config.cipher.parse().map_err(|_| {
+-                        Error::EncryptionNotSupported(format!(
+-                            "unsupported cipher: {}",
+-                            enc_config.cipher
+-                        ))
+-                    })?,
+-                    bytes::Bytes::from(enc_config.hex_key.clone().into_bytes()),
+-                ))
+-                .build()
+-                .await?
++        // Create connection pool based on connection mode
++        let pool = if let Some(ref remote_url) = options.remote_url {
++            // Remote mode: all queries go over the network, no local file
++            let auth_token = options.auth_token.as_deref().unwrap_or("");
++            connection_pool::ConnectionPool::new_remote(remote_url, auth_token).await?
+         } else {
+-            Builder::new_local(&db_path).build().await?
++            // Local mode: SQLite file on disk (or :memory:)
++            let db_path = options.db_path()?;
++            let db = if let Some(ref enc_config) = options.encryption {
++                Builder::new_local(&db_path)
++                    .encryption_config(libsql::EncryptionConfig::new(
++                        enc_config.cipher.parse().map_err(|_| {
++                            Error::EncryptionNotSupported(format!(
++                                "unsupported cipher: {}",
++                                enc_config.cipher
++                            ))
++                        })?,
++                        bytes::Bytes::from(enc_config.hex_key.clone().into_bytes()),
++                    ))
++                    .build()
++                    .await?
++            } else {
++                Builder::new_local(&db_path).build().await?
++            };
++            connection_pool::ConnectionPool::new(db)
+         };
+-        let pool = connection_pool::ConnectionPool::new(db);
+ 
+         // Check schema version for existing databases
+         let conn = pool.get_connection().await?;
+-- 
+2.50.1 (Apple Git-155)
+

@@ -18,4 +18,6 @@ RUN npx tsc
 COPY bin/agentfs /usr/local/bin/agentfs
 RUN chmod +x /usr/local/bin/agentfs
 
+EXPOSE 4000
+
 CMD ["node", "dist/command-server.js"]

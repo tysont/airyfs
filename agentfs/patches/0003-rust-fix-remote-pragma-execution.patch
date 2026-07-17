@@ -1,0 +1,75 @@
+From b564eed184a94641629da2e5baa9bb88de89ac8f Mon Sep 17 00:00:00 2001
+From: Tyson Trautmann <tysont@gmail.com>
+Date: Sat, 28 Mar 2026 07:47:54 -0700
+Subject: [PATCH] Replace execute_batch with execute for PRAGMAs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The libsql SQL parser rejects PRAGMA statements with values (e.g.,
+PRAGMA synchronous = OFF) when sent through execute_batch(), returning
+Sqlite3UnsupportedStatement. This is because the parser classifies
+"PRAGMA name = value" as None in pragma_kind().
+
+Use conn.execute() instead, which bypasses the parser and sends the
+SQL directly through the Hrana pipeline. Ignore errors since these
+PRAGMAs are local SQLite optimizations that don't apply to remote
+database connections.
+
+Also remove BEGIN/COMMIT from fsync() — transaction control statements
+are handled by the DO runtime and don't apply to remote connections.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ sdk/rust/src/filesystem/agentfs.rs | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+index c65f85a..2718799 100644
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -322,7 +322,11 @@ impl File for AgentFSFile {
+ 
+     async fn fsync(&self) -> Result<()> {
+         let conn = self.pool.get_connection().await?;
+-        conn.execute_batch("PRAGMA synchronous = FULL; BEGIN; COMMIT; PRAGMA synchronous = OFF").await?;
++        // Use individual execute() calls instead of execute_batch() because the
++        // libsql SQL parser rejects PRAGMAs with values via execute_batch().
++        // Ignore errors — these are local optimizations that may not apply to remote DBs.
++        let _ = conn.execute("PRAGMA synchronous = FULL", ()).await;
++        let _ = conn.execute("PRAGMA synchronous = OFF", ()).await;
+         Ok(())
+     }
+ 
+@@ -436,11 +440,12 @@ impl AgentFS {
+         Self::initialize_schema(&conn).await?;
+ 
+         // Disable synchronous mode for filesystem fsync() semantics.
+-        conn.execute_batch("PRAGMA synchronous = OFF").await?;
++        // Use execute() instead of execute_batch() because the libsql SQL parser
++        // rejects PRAGMAs with values when sent through execute_batch().
++        let _ = conn.execute("PRAGMA synchronous = OFF", ()).await;
+ 
+         // Set busy timeout to handle concurrent access gracefully.
+-        // Without this, concurrent transactions fail immediately with SQLITE_BUSY.
+-        conn.execute_batch("PRAGMA busy_timeout = 5000").await?;
++        let _ = conn.execute("PRAGMA busy_timeout = 5000", ()).await;
+ 
+         // Get chunk_size from config (or use default)
+         let chunk_size = Self::read_chunk_size(&conn).await?;
+@@ -2478,7 +2483,11 @@ impl AgentFS {
+     /// Note: The path parameter is ignored since all data is in a single database.
+     pub async fn fsync(&self, _path: &str) -> Result<()> {
+         let conn = self.pool.get_connection().await?;
+-        conn.execute_batch("PRAGMA synchronous = FULL; BEGIN; COMMIT; PRAGMA synchronous = OFF").await?;
++        // Use individual execute() calls instead of execute_batch() because the
++        // libsql SQL parser rejects PRAGMAs with values via execute_batch().
++        // Ignore errors — these are local optimizations that may not apply to remote DBs.
++        let _ = conn.execute("PRAGMA synchronous = FULL", ()).await;
++        let _ = conn.execute("PRAGMA synchronous = OFF", ()).await;
+         Ok(())
+     }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

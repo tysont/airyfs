@@ -1,5 +1,13 @@
 node_modules/
 dist/
 .wrangler/
+.airyfs/
+.dev.vars
+.env.*
+!.dev.vars.example
+!.env.example
 container/bin/
+agentfs/.build/
+agentfs/.target/
 .env
+worker/wrangler.generated.*.jsonc

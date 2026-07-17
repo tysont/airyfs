@@ -3,7 +3,15 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { initSchema, SCHEMA_TABLES, type SqlExec } from '../src/schema';
+import {
+  ChunkSizeConflictError,
+  configureChunkSize,
+  DEFAULT_CHUNK_SIZE,
+  initSchema,
+  InvalidChunkSizeError,
+  SCHEMA_TABLES,
+  type SqlExec,
+} from '../src/schema';
 
 /**
  * Wraps better-sqlite3 to satisfy the SqlExec interface that initSchema expects.
@@ -70,21 +78,21 @@ describe('initSchema', () => {
     const indexNames = indexes.map((i) => i.name);
 
     expect(indexNames).toContain('idx_fs_dentry_parent');
-    expect(indexNames).toContain('idx_fs_whiteout_parent');
     expect(indexNames).toContain('idx_kv_store_created_at');
     expect(indexNames).toContain('idx_tool_calls_name');
     expect(indexNames).toContain('idx_tool_calls_started_at');
   });
 
-  it('seeds fs_config with chunk_size=4096', () => {
+  it('configures new volumes with the 256 KiB default', () => {
     initSchema(sql);
+    configureChunkSize(sql);
 
     const row = db
       .prepare("SELECT value FROM fs_config WHERE key='chunk_size'")
       .get() as { value: string } | undefined;
 
     expect(row).toBeDefined();
-    expect(row!.value).toBe('4096');
+    expect(row!.value).toBe(String(DEFAULT_CHUNK_SIZE));
   });
 
   it('seeds root inode (ino=1, directory, mode=16877)', () => {
@@ -119,7 +127,7 @@ describe('initSchema', () => {
     expect(row!.ctime).toBeGreaterThan(now - 10);
   });
 
-  it('creates exactly 1 row in fs_inode (root) and 1 in fs_config', () => {
+  it('creates exactly 1 root inode and defers chunk configuration', () => {
     initSchema(sql);
 
     const inodeCount = db.prepare('SELECT count(*) as c FROM fs_inode').get() as { c: number };
@@ -189,5 +197,83 @@ describe('initSchema', () => {
 
     expect(inodeCount.c).toBe(1);
     expect(configCount.c).toBe(1);
+  });
+
+  it('preserves existing chunk sizes and rejects changes after data exists', () => {
+    initSchema(sql);
+    expect(configureChunkSize(sql, 4096)).toEqual({ chunkSize: 4096, created: true });
+    expect(configureChunkSize(sql, 4096)).toEqual({ chunkSize: 4096, created: false });
+
+    db.prepare('INSERT INTO fs_inode (ino, mode, nlink, size, atime, mtime, ctime) VALUES (2, 33188, 1, 1, 0, 0, 0)').run();
+    db.prepare("INSERT INTO fs_dentry (name, parent_ino, ino) VALUES ('file', 1, 2)").run();
+    expect(configureChunkSize(sql)).toEqual({ chunkSize: 4096, created: false });
+    expect(() => configureChunkSize(sql, DEFAULT_CHUNK_SIZE)).toThrow(ChunkSizeConflictError);
+    expect(db.prepare("SELECT value FROM fs_config WHERE key='chunk_size'").pluck().get()).toBe('4096');
+  });
+
+  it('allows an empty configured volume to select a different valid size', () => {
+    initSchema(sql);
+    configureChunkSize(sql, 4096);
+    expect(configureChunkSize(sql, 64 * 1024)).toEqual({ chunkSize: 64 * 1024, created: false });
+  });
+
+  it('rejects invalid chunk sizes', () => {
+    initSchema(sql);
+    for (const value of [0, 4095, 5000, 2 * 1024 * 1024, 4096.5]) {
+      expect(() => configureChunkSize(sql, value)).toThrow(InvalidChunkSizeError);
+    }
+  });
+
+  it('repairs a partially initialized schema', () => {
+    db.exec('CREATE TABLE fs_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+
+    initSchema(sql);
+
+    for (const table of SCHEMA_TABLES) {
+      const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
+      expect(row).toBeDefined();
+    }
+  });
+
+  it('migrates old inode and tool call schemas without losing records', () => {
+    db.exec(`
+      CREATE TABLE fs_inode (
+        ino INTEGER PRIMARY KEY AUTOINCREMENT,
+        mode INTEGER NOT NULL,
+        uid INTEGER NOT NULL DEFAULT 0,
+        gid INTEGER NOT NULL DEFAULT 0,
+        size INTEGER NOT NULL DEFAULT 0,
+        atime INTEGER NOT NULL,
+        mtime INTEGER NOT NULL,
+        ctime INTEGER NOT NULL
+      );
+      CREATE TABLE tool_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        parameters TEXT,
+        result TEXT,
+        error TEXT,
+        status TEXT,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        duration_ms INTEGER
+      );
+      INSERT INTO tool_calls (name, status, started_at, completed_at, duration_ms)
+      VALUES ('existing', NULL, 1, 2, 1000);
+    `);
+
+    initSchema(sql);
+
+    const inodeColumns = db.prepare('PRAGMA table_info(fs_inode)').all() as { name: string }[];
+    expect(inodeColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      'nlink', 'rdev', 'atime_nsec', 'mtime_nsec', 'ctime_nsec',
+    ]));
+    const toolCall = db.prepare('SELECT name, status FROM tool_calls').get() as { name: string; status: string };
+    expect(toolCall).toEqual({ name: 'existing', status: 'success' });
+
+    const toolColumns = db.prepare('PRAGMA table_info(tool_calls)').all() as { name: string; notnull: number }[];
+    expect(toolColumns.find((column) => column.name === 'status')?.notnull).toBe(1);
+    expect(toolColumns.find((column) => column.name === 'completed_at')?.notnull).toBe(0);
+    expect(toolColumns.find((column) => column.name === 'duration_ms')?.notnull).toBe(0);
   });
 });

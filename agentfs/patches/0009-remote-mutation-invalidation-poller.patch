@@ -1,0 +1,219 @@
+diff --git a/cli/src/cmd/mount.rs b/cli/src/cmd/mount.rs
+index 4c85991..e6e5992 100644
+--- a/cli/src/cmd/mount.rs
++++ b/cli/src/cmd/mount.rs
+@@ -55,6 +55,8 @@ pub struct MountArgs {
+     pub auth_token: Option<String>,
+     /// FUSE kernel entry and attribute cache lifetime.
+     pub cache_ttl: std::time::Duration,
++    /// Optional independent remote URL for mutation journal polling.
++    pub invalidation_url: Option<String>,
+ }
+ 
+ /// Mount the agent filesystem (Linux).
+@@ -100,6 +102,11 @@ fn mount_fuse(args: MountArgs) -> Result<()> {
+     } else {
+         AgentFSOptions::resolve(&args.id_or_path)?
+     };
++    let invalidation_options = (args.remote_url.is_some() && args.cache_ttl != std::time::Duration::MAX).then(|| {
++        let mut options = opts.clone();
++        if let Some(url) = &args.invalidation_url { options.remote_url = Some(url.clone()); }
++        options
++    });
+ 
+     // Check schema version before daemonizing (skip for remote — schema is managed remotely).
+     if args.remote_url.is_none() {
+@@ -195,7 +202,7 @@ fn mount_fuse(args: MountArgs) -> Result<()> {
+             }
+         })?;
+ 
+-        crate::fuse::mount(fs, fuse_opts, rt)
++        crate::fuse::mount(fs, fuse_opts, rt, invalidation_options)
+     };
+ 
+     if args.foreground {
+diff --git a/cli/src/main.rs b/cli/src/main.rs
+index 2dc3b76..cd42c57 100644
+--- a/cli/src/main.rs
++++ b/cli/src/main.rs
+@@ -124,4 +124,5 @@ fn main() {
+             remote_url,
+             auth_token,
+             cache_ttl_ms,
++            invalidation_url,
+         } => match (id_or_path, mountpoint) {
+@@ -141,4 +142,5 @@ fn main() {
+                     cache_ttl: cache_ttl_ms
+                         .map(std::time::Duration::from_millis)
+                         .unwrap_or(std::time::Duration::MAX),
++                    invalidation_url,
+                 }) {
+diff --git a/cli/src/opts.rs b/cli/src/opts.rs
+index 0af45ea..71341b2 100644
+--- a/cli/src/opts.rs
++++ b/cli/src/opts.rs
+@@ -238,4 +238,8 @@ pub enum Command {
+         /// FUSE kernel entry and attribute cache lifetime in milliseconds.
+         #[arg(long)]
+         cache_ttl_ms: Option<u64>,
++
++        /// Independent remote database URL used for mutation journal polling.
++        #[arg(long)]
++        invalidation_url: Option<String>,
+     },
+diff --git a/cli/src/fuse.rs b/cli/src/fuse.rs
+index 3482618..be50dce 100644
+--- a/cli/src/fuse.rs
++++ b/cli/src/fuse.rs
+@@ -3,22 +3,24 @@ use crate::fuser::{
+         FUSE_ASYNC_READ, FUSE_CACHE_SYMLINKS, FUSE_NO_OPENDIR_SUPPORT, FUSE_PARALLEL_DIROPS,
+         FUSE_WRITEBACK_CACHE,
+     },
+-    fuse_forget_one, FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr,
++    fuse_forget_one, DeferredNotifier, FileAttr, FileType, Filesystem, KernelConfig, MountOption,
++    ReplyAttr,
+     ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen,
+-    ReplyStatfs, ReplyWrite, Request,
++    ReplyStatfs, ReplyWrite, Request, Session,
+ };
+ use agentfs_sdk::error::Error as SdkError;
+ use agentfs_sdk::filesystem::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFSOCK};
+-use agentfs_sdk::{BoxedFile, FileSystem, Stats, TimeChange};
++use agentfs_sdk::{AgentFS, AgentFSOptions, BoxedFile, FileSystem, Stats, TimeChange};
+ use parking_lot::Mutex;
+ use std::{
+     collections::HashMap,
+     ffi::OsStr,
+     path::PathBuf,
+     sync::{
+-        atomic::{AtomicU64, Ordering},
++        atomic::{AtomicBool, AtomicU64, Ordering},
+         Arc,
+     },
++    thread,
+     time::{Duration, SystemTime, UNIX_EPOCH},
+ };
+ use tokio::runtime::Runtime;
+@@ -1178,6 +1179,7 @@ pub fn mount(
+     fs: Arc<dyn FileSystem>,
+     opts: FuseMountOptions,
+     runtime: Runtime,
++    invalidation_options: Option<AgentFSOptions>,
+ ) -> anyhow::Result<()> {
+     // Raise fd limit to hard limit to prevent "too many open files" errors
+     // when passthrough filesystems cache O_PATH file descriptors
+@@ -1211,7 +1213,76 @@ pub fn mount(
+         mount_opts.push(MountOption::AllowRoot);
+     }
+ 
+-    crate::fuser::mount2(fs, &opts.mountpoint, &mount_opts)?;
++    let mut session = Session::new(fs, &opts.mountpoint, &mount_opts)?;
++    let running = Arc::new(AtomicBool::new(true));
++    let poller = invalidation_options.map(|options| {
++        let notifier = session.deferred_notifier();
++        let running = running.clone();
++        thread::spawn(move || poll_invalidations(options, notifier, running))
++    });
++
++    let result = session.run();
++    running.store(false, Ordering::Relaxed);
++    if let Some(poller) = poller {
++        let _ = poller.join();
++    }
++    result?;
+ 
+     Ok(())
+ }
++
++fn poll_invalidations(options: AgentFSOptions, notifier: DeferredNotifier, running: Arc<AtomicBool>) {
++    let runtime = crate::get_runtime();
++    let agentfs = match runtime.block_on(AgentFS::open(options)) {
++        Ok(agentfs) => agentfs,
++        Err(error) => {
++            tracing::debug!("FUSE invalidation poll startup failed: {error}");
++            return;
++        }
++    };
++    let mut last_seq: Option<i64> = None;
++
++    while running.load(Ordering::Relaxed) {
++        let result = runtime.block_on(async {
++            let conn = agentfs.get_connection().await?;
++            if last_seq.is_none() {
++                let mut rows = conn
++                    .query("SELECT COALESCE(MAX(seq), 0) FROM fs_mutation_journal", ())
++                    .await?;
++                last_seq = Some(
++                    rows.next()
++                        .await?
++                        .map(|row| row.get(0))
++                        .transpose()?
++                        .unwrap_or(0),
++                );
++                return Ok::<Vec<(i64, i64, String, Option<i64>)>, SdkError>(Vec::new());
++            }
++
++            let mut rows = conn
++                .query(
++                    "SELECT seq, parent_ino, name, ino
++                     FROM fs_mutation_journal WHERE seq > ? ORDER BY seq LIMIT 256",
++                    [last_seq.unwrap()],
++                )
++                .await?;
++            let mut entries = Vec::new();
++            while let Some(row) = rows.next().await? {
++                entries.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
++            }
++            Ok(entries)
++        });
++
++        match result {
++            Ok(entries) => {
++                for (seq, parent_ino, name, _ino) in entries {
++                    notifier.inval_entry(parent_ino as u64, OsStr::new(&name));
++                    last_seq = Some(seq);
++                }
++            }
++            Err(error) => tracing::debug!("FUSE invalidation poll failed: {error}"),
++        }
++
++        thread::sleep(Duration::from_millis(100));
++    }
++}
+diff --git a/cli/src/mount/fuse.rs b/cli/src/mount/fuse.rs
+index a35de09..6317572 100644
+--- a/cli/src/mount/fuse.rs
++++ b/cli/src/mount/fuse.rs
+@@ -60,7 +60,7 @@ pub(super) fn mount_fuse(
+ 
+     let fuse_handle = std::thread::spawn(move || {
+         let rt = crate::get_runtime();
+-        crate::fuse::mount(fs_arc, fuse_opts, rt)
++        crate::fuse::mount(fs_arc, fuse_opts, rt, None)
+     });
+ 
+     if !wait_for_mount(&mountpoint, timeout) {
+diff --git a/cli/src/fuser/mod.rs b/cli/src/fuser/mod.rs
+--- a/cli/src/fuser/mod.rs
++++ b/cli/src/fuser/mod.rs
+@@ -27,6 +27,7 @@ use std::time::SystemTime;
+ 
+ pub use ll::fuse_abi::consts;
+ pub use ll::fuse_abi::fuse_forget_one;
++pub(crate) use deferred_notify::DeferredNotifier;
+ pub use ll::fuse_abi::FUSE_ROOT_ID;
+ pub use ll::TimeOrNow;
+ pub use mnt::mount_options::MountOption;
+diff --git a/cli/src/fuser/session.rs b/cli/src/fuser/session.rs
+--- a/cli/src/fuser/session.rs
++++ b/cli/src/fuser/session.rs
+@@ -237,5 +237,9 @@ impl<FS: Filesystem> Session<FS> {
+     }
+ 
++    pub(crate) fn deferred_notifier(&self) -> DeferredNotifier {
++        DeferredNotifier::new(self.notify_tx.as_ref().expect("notify_tx missing").clone())
++    }
++
+     /// Returns an object that can be used to send notifications to the kernel
+     pub fn notifier(&self) -> Notifier {
+         Notifier::new(self.ch.sender())

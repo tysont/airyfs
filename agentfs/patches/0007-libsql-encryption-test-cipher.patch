@@ -1,0 +1,13 @@
+diff --git a/cli/src/cmd/fs.rs b/cli/src/cmd/fs.rs
+index f1fe156..4106219 100644
+--- a/cli/src/cmd/fs.rs
++++ b/cli/src/cmd/fs.rs
+@@ -277,7 +277,7 @@ mod tests {
+     use crate::cmd::fs::{cat_filesystem, ls_filesystem, write_filesystem};
+ 
+     const TEST_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+-    const TEST_CIPHER: &str = "aes256gcm";
++    const TEST_CIPHER: &str = "aes256cbc";
+ 
+     async fn agentfs() -> (AgentFS, String, NamedTempFile) {
+         let file = NamedTempFile::new().unwrap();

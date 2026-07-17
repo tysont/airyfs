@@ -3,8 +3,28 @@
 
 import { Container, getContainer } from '@cloudflare/containers';
 import { AgentFS, type CloudflareStorage } from 'agentfs-sdk/cloudflare';
-import { initSchema, SCHEMA_TABLES } from './schema';
+import {
+  ChunkSizeConflictError,
+  configureChunkSize,
+  initSchema,
+  InvalidChunkSizeError,
+  SCHEMA_TABLES,
+} from './schema';
 import { HranaServer, wrapSqlStorage } from './hrana-server';
+import { MutationJournal } from './mutation-journal';
+import {
+  errorResponse,
+  fileResponse,
+  handleFilesystemRequest,
+  HttpError,
+  parseV1Route,
+  readCommandRequest,
+  readVolumeCreateRequest,
+  toStatsDto,
+  VolumeAccessCoordinator,
+  writeFileStream,
+  type StatsDto,
+} from './files-api';
 
 interface Env {
   AiryFS: DurableObjectNamespace<AiryFS>;
@@ -14,19 +34,48 @@ export class AiryFS extends Container<Env> {
   defaultPort = 8080;
   sleepAfter = '30m';
 
-  private fs!: AgentFS;
+  private fs: AgentFS | null = null;
+  private startupPromise: Promise<void> | null = null;
   private activeServePromise: Promise<void> | null = null;
   private hranaServer: HranaServer | null = null;
+  private readonly access = new VolumeAccessCoordinator();
+  private readonly mutations: MutationJournal;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx as never, env);
+    this.mutations = new MutationJournal(this.ctx.storage.sql);
     this.ctx.blockConcurrencyWhile(async () => {
-      initSchema(this.ctx.storage.sql);
-      this.fs = AgentFS.create(this.ctx.storage as unknown as CloudflareStorage);
+      initSchema(this.ctx.storage.sql, (callback) => this.ctx.storage.transactionSync(callback));
     });
   }
 
+  private filesystem(requestedChunkSize?: unknown): AgentFS {
+    const configuration = this.ctx.storage.transactionSync(() =>
+      configureChunkSize(this.ctx.storage.sql, requestedChunkSize)
+    );
+    if (!this.fs || this.fs.getChunkSize() !== configuration.chunkSize) {
+      this.fs = AgentFS.create(this.ctx.storage as unknown as CloudflareStorage);
+    }
+    return this.fs;
+  }
+
+  private createVolume(requestedChunkSize: unknown): { chunkSize: number } {
+    try {
+      const fs = this.filesystem(requestedChunkSize);
+      return { chunkSize: fs.getChunkSize() };
+    } catch (error) {
+      if (error instanceof InvalidChunkSizeError) {
+        throw new HttpError(400, 'INVALID_CHUNK_SIZE', error.message);
+      }
+      if (error instanceof ChunkSizeConflictError) {
+        throw new HttpError(409, 'CHUNK_SIZE_IMMUTABLE', error.message);
+      }
+      throw error;
+    }
+  }
+
   override onStop() {
+    this.startupPromise = null;
     this.activeServePromise = null;
   }
 
@@ -36,7 +85,7 @@ export class AiryFS extends Container<Env> {
 
   /** Execute a shell command in the Container against the FUSE-mounted volume. */
   async exec(command: string): Promise<unknown> {
-    await this.ensureContainer();
+    await this.ensureContainer(true);
 
     const resp = await this.containerFetch(
       new Request('http://localhost/exec', {
@@ -47,22 +96,126 @@ export class AiryFS extends Container<Env> {
       4000
     );
 
+    if (!resp.ok) {
+      if (resp.status === 503) this.activeServePromise = null;
+      throw new Error(`Container exec failed (${resp.status}): ${await resp.text()}`);
+    }
+
     return resp.json();
   }
 
   /** Read a file from the volume (direct DO access, no Container needed). */
   async readFile(path: string): Promise<string> {
-    return this.fs.readFile(path, 'utf8');
+    const fs = this.filesystem();
+    const release = await this.access.acquireRead(path);
+    try {
+      return await fs.readFile(path, 'utf8');
+    } finally {
+      release();
+    }
   }
 
   /** Write a file to the volume (direct DO access, no Container needed). */
   async writeFile(path: string, content: string): Promise<void> {
-    await this.fs.writeFile(path, content);
+    const fs = this.filesystem();
+    const release = await this.access.acquireWrite(path);
+    try {
+      await fs.writeFile(path, content);
+      await this.mutations.record(fs, [path]);
+    } finally {
+      release();
+    }
   }
 
   /** List a directory on the volume (direct DO access, no Container needed). */
   async listDir(path: string): Promise<string[]> {
-    return this.fs.readdir(path);
+    return this.filesystem().readdir(path);
+  }
+
+  /** Get serializable metadata for a file, directory, or symlink target. */
+  async statPath(path: string): Promise<StatsDto> {
+    return toStatsDto(await this.filesystem().stat(path));
+  }
+
+  /** List a directory with metadata in one AgentFS query. */
+  async listDirDetailed(path: string): Promise<Array<{ name: string } & StatsDto>> {
+    return (await this.filesystem().readdirPlus(path)).map((entry) => ({
+      name: entry.name,
+      ...toStatsDto(entry.stats),
+    }));
+  }
+
+  async makeDir(path: string): Promise<void> {
+    const fs = this.filesystem();
+    const release = await this.access.acquireWrite(path);
+    try {
+      await fs.mkdir(path);
+      await this.mutations.record(fs, [path]);
+    } finally { release(); }
+  }
+
+  async removePath(path: string, recursive = false): Promise<void> {
+    const fs = this.filesystem();
+    const release = await this.access.acquireWrite(path);
+    try {
+      await fs.rm(path, { recursive });
+      await this.mutations.record(fs, [path]);
+    } finally { release(); }
+  }
+
+  async renamePath(from: string, to: string): Promise<void> {
+    const fs = this.filesystem();
+    const release = await this.access.acquireWrite([from, to]);
+    try {
+      await fs.rename(from, to);
+      await this.mutations.record(fs, [from, to]);
+    } finally { release(); }
+  }
+
+  async copyPath(from: string, to: string): Promise<void> {
+    const fs = this.filesystem();
+    const release = await this.access.acquireWrite([from, to]);
+    try {
+      await fs.copyFile(from, to);
+      await this.mutations.record(fs, [to]);
+    } finally { release(); }
+  }
+
+  async createSymlink(target: string, path: string): Promise<void> {
+    const fs = this.filesystem();
+    const release = await this.access.acquireWrite(path);
+    try {
+      await fs.symlink(target, path);
+      await this.mutations.record(fs, [path]);
+    } finally { release(); }
+  }
+
+  async readSymlink(path: string): Promise<string> {
+    return this.filesystem().readlink(path);
+  }
+
+  /** Stream a binary file over Workers RPC. */
+  async readFileStream(path: string): Promise<ReadableStream<Uint8Array>> {
+    const response = await fileResponse(
+      this.filesystem(),
+      path,
+      new Request('http://localhost', { method: 'GET' }),
+      this.access
+    );
+    if (!response.body) {
+      return new ReadableStream({
+        type: 'bytes',
+        start: (controller) => controller.close(),
+      });
+    }
+    return response.body;
+  }
+
+  /** Atomically replace a file from a byte stream over Workers RPC. */
+  async writeFileStream(path: string, stream: ReadableStream<Uint8Array>): Promise<void> {
+    const fs = this.filesystem();
+    await writeFileStream(fs, path, stream, this.access);
+    await this.mutations.record(fs, [path]);
   }
 
   /** Get volume metadata: table row counts. */
@@ -81,9 +234,40 @@ export class AiryFS extends Container<Env> {
     return result;
   }
 
+  /** Return logical filesystem usage, physical SQLite size, and runtime health. */
+  async usage(): Promise<Record<string, unknown>> {
+    const filesystem = await this.filesystem().statfs();
+    let container: Record<string, unknown> = {
+      state: this.activeServePromise ? 'connected' : 'stopped',
+    };
+
+    if (this.activeServePromise) {
+      try {
+        const response = await this.containerFetch('http://localhost/health', 4000);
+        container = { state: 'connected', ...await response.json<Record<string, unknown>>() };
+      } catch (error) {
+        container = {
+          state: 'unhealthy',
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    return {
+      filesystem,
+      sqliteBytes: this.ctx.storage.sql.databaseSize,
+      container,
+      hrana: {
+        pipelineRequests: this.hranaServer?.pipelineCount ?? 0,
+        sqlStatements: this.hranaServer?.statementCount ?? 0,
+      },
+    };
+  }
+
   /** Destroy the Container. Volume data persists in DO SQLite. */
   async destroyContainer(): Promise<void> {
     await this.destroy();
+    this.startupPromise = null;
     this.activeServePromise = null;
   }
 
@@ -103,8 +287,22 @@ export class AiryFS extends Container<Env> {
    * If the Hrana TCP connection drops (container eviction, crash),
    * activeServePromise resets to null so the next call reconnects.
    */
-  private async ensureContainer(): Promise<void> {
+  private async ensureContainer(reconnect = false): Promise<void> {
+    this.filesystem();
+    if (this.startupPromise) return this.startupPromise;
+    if (reconnect) this.activeServePromise = null;
     if (this.activeServePromise) return;
+
+    const startup = this.startContainer();
+    this.startupPromise = startup;
+    try {
+      await startup;
+    } finally {
+      if (this.startupPromise === startup) this.startupPromise = null;
+    }
+  }
+
+  private async startContainer(): Promise<void> {
 
     this.entrypoint = ['node', '/app/dist/command-server.js'];
 
@@ -116,6 +314,9 @@ export class AiryFS extends Container<Env> {
       new Request('http://localhost/setup', { method: 'POST' }),
       4000
     );
+    if (!setupResp.ok) {
+      throw new Error(`Bridge setup failed (${setupResp.status}): ${await setupResp.text()}`);
+    }
     const setupResult = (await setupResp.json()) as { ok: boolean; error?: string };
     if (!setupResult.ok) {
       throw new Error(`Bridge setup failed: ${setupResult.error}`);
@@ -125,18 +326,31 @@ export class AiryFS extends Container<Env> {
     // On TCP close or error, reset activeServePromise so the next
     // ensureContainer() call reconnects instead of returning early.
     const socket = this.ctx.container!.getTcpPort(9000).connect('0.0.0.0:9000');
-    await socket.opened;
+    const invalidationSocket = this.ctx.container!.getTcpPort(9001).connect('0.0.0.0:9001');
+    await Promise.all([socket.opened, invalidationSocket.opened]);
 
     this.hranaServer = new HranaServer({
       readable: socket.readable,
       writable: socket.writable,
       sql: wrapSqlStorage(this.ctx.storage.sql),
+      writeLock: () => this.access.acquireWrite('*'),
     });
 
-    this.activeServePromise = this.hranaServer.serve().then(
-      () => { this.activeServePromise = null; },
-      () => { this.activeServePromise = null; }
-    );
+    const invalidationServer = new HranaServer({
+      readable: invalidationSocket.readable,
+      writable: invalidationSocket.writable,
+      sql: wrapSqlStorage(this.ctx.storage.sql),
+    });
+    const servePromise = Promise.all([
+      this.hranaServer.serve(),
+      invalidationServer.serve(),
+    ]).then(() => undefined);
+    this.activeServePromise = servePromise;
+    this.ctx.waitUntil(servePromise);
+    const clearServePromise = (): void => {
+      if (this.activeServePromise === servePromise) this.activeServePromise = null;
+    };
+    void servePromise.then(clearServePromise, clearServePromise);
 
     // 4. Mount FUSE — fire-and-forget, then poll for readiness.
     // Can't await because the mount blocks while FUSE queries flow through serve().
@@ -151,6 +365,7 @@ export class AiryFS extends Container<Env> {
     // Poll until FUSE is mounted or we give up. The health endpoint checks
     // mountpoint -q and reports fuseExitCode if the daemon crashed.
     let mounted = false;
+    let mountError: Error | null = null;
     for (let i = 0; i < 30; i++) {
       await new Promise((r) => setTimeout(r, 1000));
       try {
@@ -165,16 +380,19 @@ export class AiryFS extends Container<Env> {
         }
         // If daemon exited, stop polling
         if (health.fuseExitCode !== null && health.fuseExitCode !== undefined) {
-          throw new Error(`FUSE daemon exited with code ${health.fuseExitCode}`);
+          mountError = new Error(`FUSE daemon exited with code ${health.fuseExitCode}`);
+          break;
         }
       } catch (err) {
-        if (err instanceof Error && err.message.startsWith('FUSE daemon')) throw err;
         // Container not ready yet — keep polling
       }
     }
 
     if (!mounted) {
-      throw new Error('FUSE mount did not complete within 30 seconds');
+      await socket.close().catch(() => undefined);
+      await invalidationSocket.close().catch(() => undefined);
+      if (this.activeServePromise === servePromise) this.activeServePromise = null;
+      throw mountError ?? new Error('FUSE mount did not complete within 30 seconds');
     }
   }
 
@@ -186,9 +404,42 @@ export class AiryFS extends Container<Env> {
     const url = new URL(request.url);
 
     try {
+      const v1Route = parseV1Route(url.pathname);
+      if (v1Route) {
+        if (v1Route.resource === 'volume') {
+          if (request.method === 'GET') {
+            return Response.json({ chunkSize: this.filesystem().getChunkSize() });
+          }
+          if (request.method === 'PUT') {
+            return Response.json(this.createVolume(await readVolumeCreateRequest(request)), { status: 201 });
+          }
+          throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, PUT' });
+        }
+
+        const fs = this.filesystem();
+        const filesystemResponse = await handleFilesystemRequest(
+          request,
+          v1Route,
+          fs,
+          this.access,
+          (paths) => this.mutations.record(fs, paths)
+        );
+        if (filesystemResponse) return filesystemResponse;
+
+        if (v1Route.resource === 'exec' && request.method === 'POST') {
+          return Response.json(await this.exec(await readCommandRequest(request)));
+        }
+
+        if (v1Route.resource === 'usage' && request.method === 'GET') {
+          return Response.json(await this.usage());
+        }
+
+        const allow = v1Route.resource === 'exec' ? 'POST' : 'GET';
+        throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: allow });
+      }
+
       if (url.pathname === '/exec' && request.method === 'POST') {
-        const body = (await request.json()) as { command: string };
-        return Response.json(await this.exec(body.command));
+        return Response.json(await this.exec(await readCommandRequest(request)));
       }
 
       if (url.pathname === '/destroy' && request.method === 'POST') {
@@ -199,14 +450,15 @@ export class AiryFS extends Container<Env> {
       if (url.pathname === '/fs/write' && request.method === 'POST') {
         const path = url.searchParams.get('path');
         if (!path) return new Response('Missing ?path=', { status: 400 });
-        await this.writeFile(path, await request.text());
+        await writeFileStream(this.filesystem(), path, request.body, this.access);
+        await this.mutations.record(this.filesystem(), [path]);
         return new Response('ok');
       }
 
       if (url.pathname === '/fs/read') {
         const path = url.searchParams.get('path');
         if (!path) return new Response('Missing ?path=', { status: 400 });
-        return new Response(await this.readFile(path));
+        return fileResponse(this.filesystem(), path, request, this.access);
       }
 
       if (url.pathname === '/fs/ls') {
@@ -247,10 +499,13 @@ export class AiryFS extends Container<Env> {
         return Response.json(this.dbInfo());
       }
 
+      if (url.pathname === '/usage') {
+        return Response.json(await this.usage());
+      }
+
       return new Response('Not found', { status: 404 });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      return new Response(`Error: ${msg}`, { status: 500 });
+      return errorResponse(error);
     }
   }
 }
@@ -258,7 +513,18 @@ export class AiryFS extends Container<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const volume = url.searchParams.get('volume');
+    let volume: string | null;
+    try {
+      volume = parseV1Route(url.pathname)?.volume ?? url.searchParams.get('volume');
+    } catch (error) {
+      if (error instanceof URIError) {
+        return Response.json(
+          { error: { code: 'INVALID_PATH', message: 'Path contains invalid URL encoding' } },
+          { status: 400 }
+        );
+      }
+      return errorResponse(error);
+    }
 
     if (!volume) {
       return new Response('Missing ?volume= parameter', { status: 400 });
