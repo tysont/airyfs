@@ -1,0 +1,61 @@
+cli/package-lock.json
+  s_43a8febd7cdba2::t_f238fada1124e3 1-2027
+cli/src/api/client.ts
+  s_6eb223963c9b75::t_5932574a032e18 1-185
+cli/src/api/errors.ts
+  s_6eb223963c9b75::t_5d73432daf9b63 1-77
+cli/src/commands/index.ts
+  s_6eb223963c9b75::t_003c4cc833ac68 1-737
+cli/src/shell.ts
+  s_6eb223963c9b75::t_ab4d1950e0c4b2 1-317
+cli/test/api-client.test.ts
+  s_6eb223963c9b75::t_c7a0f452125e98 1-123
+cli/test/commands.int.test.ts
+  s_6eb223963c9b75::t_650ad54d829f9e 1-358
+cli/test/sessions.test.ts
+  s_5fc99e73f65ea4::t_dec07687fccf5c 1-154
+cli/test/shell.test.ts
+  s_6eb223963c9b75::t_f0893f5e534055 1-275
+worker/src/index.ts
+  s_fc3665527cd1ad::t_9f7ed8de0da110 40-61,68-69,72-74,113-114,122-127,129-152,155-164,169,306,308-309,312,314-321,324-326,345-357,376,380-385,389-395,398,402-406,408-416,419-440,442,444,446-454,456-461,466,478,480-483,504,510-618,650,662
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "11804763b39aa8c00288e91e35074e5a54c11661",
+  "prompts": {},
+  "sessions": {
+    "s_43a8febd7cdba2": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0943b1590ffe0hfwoCWWSOp3ho",
+        "model": "gpt-5.6"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_5fc99e73f65ea4": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08f1c6091ffetRibPcXFOTcsuu",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_6eb223963c9b75": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08e919641ffeZM7n4gzpx3bD9P",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_fc3665527cd1ad": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08e3ffd92ffe7uG2aessE28zIc",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
