@@ -7,6 +7,7 @@ import { mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { createExecutionSlot, type ExecutionSlot } from './execution-slot.js';
 import { createPtyServer, PTY_PORT } from './pty-server.js';
+import { createServiceServer, SERVICE_CONTROL_PORT } from './service-server.js';
 
 const PORT = 4000;
 const MOUNT_POINT = '/volume';
@@ -397,4 +398,5 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const server = createCommandServer(slot);
   server.listen(PORT, '0.0.0.0');
   createPtyServer(slot, () => MOUNT_POINT).listen(PTY_PORT, '0.0.0.0');
+  createServiceServer().listen(SERVICE_CONTROL_PORT, '0.0.0.0');
 }
