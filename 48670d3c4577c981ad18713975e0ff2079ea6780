@@ -1,0 +1,29 @@
+README.md
+  s_fbe3496601a9fa::t_42dd07b171a147 323,392,394,396,626,633
+container/package.json
+  s_0e08240248c09e::t_b7c71d1c96c12e 6-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "74f1fd28e3eca98927fc7f434b0f9d6a2d7169c5",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_fbe3496601a9fa": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_09142360cffesABFqIDqBELGAH",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
