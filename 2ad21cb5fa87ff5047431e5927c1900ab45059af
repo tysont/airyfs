@@ -1,0 +1,39 @@
+README.md
+  s_ddc7b410c6208b::t_c719a46d4d15ca 139,141,507,541,628,648,650
+agentfs/patches/0010-cross-runtime-open-unlink-leases.patch
+  s_43a8febd7cdba2::t_21e1cc9979b8d3 1-1336
+worker/test/schema.test.ts
+  s_f26cda7f783b70::t_8d198c54e50b23 84-114,174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "61d39f8ce3203d22ca0918ad2bd054d3b39d10b1",
+  "prompts": {},
+  "sessions": {
+    "s_43a8febd7cdba2": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0943b1590ffe0hfwoCWWSOp3ho",
+        "model": "gpt-5.6"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_ddc7b410c6208b": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_090e8e695ffeBbv31Xa2ZdP71X",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_f26cda7f783b70": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0911055baffek5x8uP7GCZd5LC",
+        "model": "gpt-5.6"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
