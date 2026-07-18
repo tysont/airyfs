@@ -43,7 +43,7 @@ const MIME_TYPES: Record<string, string> = {
 /** Extract the volume for a site, share, or WebDAV request. */
 export function parsePublicVolume(pathname: string): string | null {
   const segments = pathname.split('/').filter(Boolean);
-  if ((segments[0] === 's' || segments[0] === 'd' || segments[0] === 'dav') && segments[1]) {
+  if ((segments[0] === 's' || segments[0] === 'd' || segments[0] === 'dav' || segments[0] === 'p') && segments[1]) {
     return decodeURIComponent(segments[1]);
   }
   return null;

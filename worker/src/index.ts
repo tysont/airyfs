@@ -142,6 +142,7 @@ import { listTrash, moveToTrash, purgeTrash, restoreTrash, undoTrash } from './t
 import { handleWebDav, parseWebDavDestination } from './webdav';
 import { consumePtyTicket, createPtyTicket } from './pty-tickets';
 import { relayPty } from './pty-relay';
+import { createService, deleteService, listServices, readService, setServiceEnabled, type ServiceRecord } from './services';
 
 interface Env {
   AiryFS: DurableObjectNamespace<AiryFS>;
@@ -1480,6 +1481,74 @@ export class AiryFS extends Container<Env> {
     });
   }
 
+  private async ensureServiceRunning(service: ServiceRecord): Promise<void> {
+    if (!service.enabled) throw new HttpError(409, 'SERVICE_STOPPED', `Preview service is stopped: ${service.name}`);
+    await this.ensureContainer();
+    const response = await this.containerFetch(new Request('http://localhost/services/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        name: service.name, command: service.command, port: service.port,
+        cwd: service.cwd === '/' ? '/volume' : `/volume${service.cwd}`, env: service.env,
+      }),
+    }), 4002);
+    if (!response.ok) throw new HttpError(503, 'SERVICE_START_FAILED', await response.text());
+  }
+
+  private async proxyService(service: ServiceRecord, path: string, request: Request): Promise<Response> {
+    await this.ensureServiceRunning(service);
+    const target = new URL(request.url);
+    target.protocol = 'http:';
+    target.hostname = 'localhost';
+    target.port = String(service.port);
+    target.pathname = path;
+    try {
+      return await this.ctx.container!.getTcpPort(service.port).fetch(new Request(target, request));
+    } catch (error) {
+      throw new HttpError(503, 'SERVICE_WARMING', error instanceof Error ? error.message : String(error), { 'Retry-After': '1' });
+    }
+  }
+
+  private async handlePublicService(url: URL, request: Request): Promise<Response> {
+    const segments = url.pathname.split('/').filter(Boolean);
+    const name = segments[2] ? decodeURIComponent(segments[2]) : '';
+    const service = name ? readService(this.ctx.storage.sql, name) : null;
+    if (!service || !service.public) throw new HttpError(404, 'NOT_PUBLISHED', 'Preview service is not public');
+    const path = `/${segments.slice(3).map(decodeURIComponent).join('/')}`;
+    return this.proxyService(service, path, request);
+  }
+
+  private async handleServices(request: Request, route: V1Route): Promise<Response> {
+    const segments = route.path.split('/').filter(Boolean);
+    if (segments.length === 0) {
+      if (request.method === 'GET') return Response.json(listServices(this.ctx.storage.sql));
+      if (request.method === 'POST') return Response.json(createService(this.ctx.storage.sql, await readJsonObject(request)), { status: 201 });
+    }
+    const name = segments[0];
+    if (segments.length === 1) {
+      if (request.method === 'GET') return Response.json(readService(this.ctx.storage.sql, name));
+      if (request.method === 'DELETE') {
+        const service = deleteService(this.ctx.storage.sql, name);
+        await this.containerFetch(new Request('http://localhost/services/stop', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+        }), 4002).catch(() => undefined);
+        return Response.json(service);
+      }
+    }
+    if (segments.length === 2 && (segments[1] === 'start' || segments[1] === 'stop') && request.method === 'POST') {
+      const enabled = segments[1] === 'start';
+      const service = setServiceEnabled(this.ctx.storage.sql, name, enabled);
+      if (enabled) await this.ensureServiceRunning(service);
+      else await this.containerFetch(new Request('http://localhost/services/stop', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+      }), 4002).catch(() => undefined);
+      return Response.json(service);
+    }
+    if (segments[1] === 'proxy') {
+      const path = `/${segments.slice(2).map(decodeURIComponent).join('/')}`;
+      return this.proxyService(readService(this.ctx.storage.sql, name), path, request);
+    }
+    throw new HttpError(404, 'INVALID_ROUTE', 'Invalid preview service route');
+  }
+
   private async authorizeWebDav(request: Request, volume: string, path: string): Promise<void> {
     const secret = this.env.AIRYFS_AUTH_SECRET;
     if (!secret) return;
@@ -1845,6 +1914,9 @@ export class AiryFS extends Container<Env> {
       if (url.pathname.startsWith('/dav/')) {
         return await this.handleWebDavRequest(url, request);
       }
+      if (url.pathname.startsWith('/p/')) {
+        return await this.handlePublicService(url, request);
+      }
 
       const v1Route = parseV1Route(url.pathname);
 
@@ -2038,6 +2110,8 @@ export class AiryFS extends Container<Env> {
           }
           throw new HttpError(404, 'INVALID_ROUTE', 'Invalid trash route');
         }
+
+        if (v1Route.resource === 'services') return this.handleServices(request, v1Route);
 
         if (v1Route.resource === 'exec') {
           if (v1Route.path === '/pty-ticket') {
@@ -2245,6 +2319,9 @@ async function requiredAccess(
         return method === 'GET'
           ? { operation: 'read', paths: ['/'] }
           : { operation: 'admin', paths: [] };
+      case 'services':
+        if (route.path.includes('/proxy')) return { operation: 'exec', paths: ['/'] };
+        return method === 'GET' ? { operation: 'read', paths: ['/'] } : { operation: 'admin', paths: [] };
       case 'capabilities':
         return method === 'GET'
           ? { operation: null, paths: [] }

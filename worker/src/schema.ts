@@ -9,6 +9,7 @@ import { initWebhookSchema, WEBHOOK_TABLES } from './webhooks';
 import { initScheduleSchema, SCHEDULE_TABLES } from './schedules';
 import { initTrashSchema, TRASH_TABLES } from './trash';
 import { initPtyTicketSchema, PTY_TICKET_TABLES } from './pty-tickets';
+import { initServiceSchema, SERVICE_TABLES } from './services';
 
 // Minimal interface matching the subset of SqlStorage that initSchema needs.
 // DO SqlStorage satisfies this; tests can provide a lightweight adapter.
@@ -241,6 +242,7 @@ export const SCHEMA_TABLES = [
   ...SCHEDULE_TABLES,
   ...TRASH_TABLES,
   ...PTY_TICKET_TABLES,
+  ...SERVICE_TABLES,
 ] as const;
 
 /**
@@ -279,6 +281,7 @@ export function initSchema(sql: SqlExec, transactionSync?: TransactionSync): voi
     initScheduleSchema(sql);
     initTrashSchema(sql);
     initPtyTicketSchema(sql);
+    initServiceSchema(sql);
 
     for (const stmt of SEED_STATEMENTS) {
       sql.exec(stmt);
