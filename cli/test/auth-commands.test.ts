@@ -87,6 +87,52 @@ describe('auth commands', () => {
     expect(result.code).toBe(0);
     expect((await sessions.resolve('test')).session.token).toBeUndefined();
   });
+
+  it('logs in with a volume password and stores the minted token', async () => {
+    const result = await invoke(['auth', 'login', '--password', 'hunter2pass']);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('password-scoped token');
+    expect((await sessions.resolve('test')).session.token).toBe('password-token');
+
+    const login = requests.slice().reverse().find((r) => r.path === '/v1/volumes/vol/auth/login');
+    expect(JSON.parse(login?.body || '{}')).toMatchObject({ password: 'hunter2pass' });
+  });
+
+  it('sets the volume password via passwd', async () => {
+    await sessions.setToken('test', 'root-secret');
+    const result = await invoke(['auth', 'passwd', 'a-strong-password']);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('Set the volume password');
+    const set = requests.slice().reverse().find((r) => r.path === '/v1/volumes/vol/auth/password');
+    expect(set?.auth).toBe('Bearer root-secret');
+    expect(JSON.parse(set?.body || '{}')).toMatchObject({ password: 'a-strong-password' });
+  });
+
+  it('rejects a short password before contacting the server', async () => {
+    const result = await invoke(['auth', 'passwd', 'short']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('at least 8 characters');
+  });
+});
+
+describe('session portability', () => {
+  it('exports and re-imports a session with its token', async () => {
+    await sessions.setToken('test', 'portable-token');
+    const exported = await invoke(['session', 'export', 'test']);
+    expect(exported.code).toBe(0);
+    const blob = exported.stdout.trim();
+    expect(blob.startsWith('airyfs1:')).toBe(true);
+
+    const imported = await invoke(['session', 'import', blob, 'copied']);
+    expect(imported.code).toBe(0);
+    const copied = await sessions.resolve('copied');
+    expect(copied.session.endpoint).toBe(endpoint);
+    expect(copied.session.volume).toBe('vol');
+    expect(copied.session.token).toBe('portable-token');
+    await sessions.use('test');
+  });
 });
 
 describe('capability commands', () => {
@@ -166,6 +212,15 @@ async function route(request: IncomingMessage, response: ServerResponse, url: UR
   }
   if (request.method === 'DELETE' && url.pathname.startsWith('/v1/volumes/vol/capabilities/')) {
     return json(response, 200, { id: url.pathname.split('/').pop(), revoked: true });
+  }
+  if (request.method === 'POST' && url.pathname === '/v1/volumes/vol/auth/login') {
+    return json(response, 201, {
+      token: 'password-token', id: 'pw-cap', volume: 'vol',
+      operations: ['read', 'write', 'exec'], pathPrefixes: [], expires: 9999999999,
+    });
+  }
+  if (request.method === 'POST' && url.pathname === '/v1/volumes/vol/auth/password') {
+    return json(response, 201, { volume: 'vol', authEnabled: true, passwordSet: true });
   }
   json(response, 404, { error: { code: 'ENOENT', message: `Unhandled ${request.method} ${url.pathname}` } });
 }

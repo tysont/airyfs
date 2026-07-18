@@ -18,6 +18,12 @@ import type {
   JobStatus,
   MintCapabilityInput,
   MintedCapability,
+  PasswordStatus,
+  PublishSiteInput,
+  CreateShareInput,
+  SiteInfo,
+  SiteStatus,
+  ShareInfo,
   PerfInfo,
   SnapshotDiffEntry,
   SnapshotInfo,
@@ -300,6 +306,74 @@ export class AiryFSClient {
 
   async authStatus(): Promise<AuthStatus> {
     return this.json<AuthStatus>(`${this.volumeBase}/capabilities`);
+  }
+
+  /** Report whether deployment auth is enabled and a volume password is set. */
+  async passwordStatus(): Promise<PasswordStatus> {
+    return this.json<PasswordStatus>(`${this.volumeBase}/auth`);
+  }
+
+  /** Return the published-site status for the volume. */
+  async getSite(): Promise<SiteStatus> {
+    return this.json<SiteStatus>(`${this.volumeBase}/sites`);
+  }
+
+  /** Publish or update the volume's web root. */
+  async publishSite(input: PublishSiteInput): Promise<SiteInfo> {
+    return this.json<SiteInfo>(`${this.volumeBase}/sites`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Remove the volume's published site. */
+  async unpublishSite(): Promise<{ removed: boolean }> {
+    return this.json<{ removed: boolean }>(`${this.volumeBase}/sites`, { method: 'DELETE' });
+  }
+
+  /** List share links for the volume. */
+  async listShares(): Promise<ShareInfo[]> {
+    return this.json<ShareInfo[]>(`${this.volumeBase}/shares`);
+  }
+
+  /** Create a share link for a single file, with optional expiry. */
+  async createShare(input: CreateShareInput): Promise<ShareInfo> {
+    return this.json<ShareInfo>(`${this.volumeBase}/shares`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Delete a share link by id. */
+  async deleteShare(id: string): Promise<{ id: string; removed: boolean }> {
+    return this.json<{ id: string; removed: boolean }>(
+      `${this.volumeBase}/shares/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  /** Set or rotate the volume password. Authorized by root, admin, or currentPassword. */
+  async setVolumePassword(password: string, currentPassword?: string): Promise<PasswordStatus> {
+    const body: Record<string, string> = { password };
+    if (currentPassword !== undefined) body.currentPassword = currentPassword;
+    return this.json<PasswordStatus>(`${this.volumeBase}/auth/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Exchange the volume password for a scoped capability token. */
+  async loginWithPassword(password: string, expiresInSeconds?: number): Promise<MintedCapability> {
+    const body: Record<string, unknown> = { password };
+    if (expiresInSeconds !== undefined) body.expiresInSeconds = expiresInSeconds;
+    return this.json<MintedCapability>(`${this.volumeBase}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
   }
 
   async createCapability(input: MintCapabilityInput): Promise<MintedCapability> {

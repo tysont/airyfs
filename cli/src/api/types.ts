@@ -187,6 +187,46 @@ export interface AuthStatus {
   capability?: CapabilityInfo;
 }
 
+export interface PasswordStatus {
+  volume: string;
+  authEnabled: boolean;
+  passwordSet: boolean;
+}
+
+export interface SiteInfo {
+  pathPrefix: string;
+  indexDocument: string;
+  spa: boolean;
+  cacheControl: string | null;
+  createdAt: number;
+}
+
+export interface SiteStatus {
+  published: boolean;
+  site: SiteInfo | null;
+}
+
+export interface PublishSiteInput {
+  path: string;
+  indexDocument?: string;
+  spa?: boolean;
+  cacheControl?: string;
+}
+
+export interface ShareInfo {
+  id: string;
+  path: string;
+  expiresAt: number | null;
+  cacheControl: string | null;
+  createdAt: number;
+}
+
+export interface CreateShareInput {
+  path: string;
+  expiresInSeconds?: number;
+  cacheControl?: string;
+}
+
 export interface MintCapabilityInput {
   operations: Operation[];
   pathPrefixes: string[];

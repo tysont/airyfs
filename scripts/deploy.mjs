@@ -140,7 +140,9 @@ export function deploy(env, opts = {}) {
   });
   const run = () => withIsolatedDockerConfig((dockerConfig, dockerHost) => {
     const args = wranglerArgs(env, opts);
-    execFileSync('npx', args, {
+    // Capture mode streams progress on stderr while capturing stdout so the
+    // deployed workers.dev URL can be parsed back; otherwise inherit all streams.
+    const stdout = execFileSync('npx', args, {
       cwd: opts.workerDir ?? WORKER_DIR,
       env: {
         ...process.env,
@@ -148,11 +150,19 @@ export function deploy(env, opts = {}) {
         DOCKER_CONFIG: dockerConfig,
         DOCKER_HOST: dockerHost,
       },
-      stdio: 'inherit',
+      stdio: opts.capture ? ['inherit', 'pipe', 'inherit'] : 'inherit',
+      encoding: opts.capture ? 'utf8' : undefined,
     });
-    return { accountId, env };
+    if (opts.capture && stdout) process.stdout.write(stdout);
+    return { accountId, env, url: opts.capture ? parseDeployedUrl(stdout || '') : undefined };
   });
   return opts.dryRun ? run() : withEnvLock(env, run);
+}
+
+/** Extract the first deployed workers.dev URL from captured `wrangler deploy` output. */
+export function parseDeployedUrl(text) {
+  const match = /https:\/\/[a-z0-9][a-z0-9.-]*\.workers\.dev/i.exec(String(text));
+  return match ? match[0] : null;
 }
 
 export function wranglerArgs(env, opts = {}) {

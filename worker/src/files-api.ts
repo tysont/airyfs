@@ -23,7 +23,7 @@ export interface StatsDto {
 
 export interface V1Route {
   volume: string;
-  resource: 'volume' | 'files' | 'directories' | 'trees' | 'operations' | 'exec' | 'usage' | 'capabilities' | 'snapshots' | 'uploads' | 'jobs' | 'changes';
+  resource: 'volume' | 'files' | 'directories' | 'trees' | 'operations' | 'exec' | 'usage' | 'capabilities' | 'snapshots' | 'uploads' | 'jobs' | 'changes' | 'auth' | 'sites' | 'shares';
   path: string;
 }
 
@@ -135,7 +135,7 @@ export function parseV1Route(pathname: string): V1Route | null {
   }
 
   const resource = parts[4];
-  if (!['files', 'directories', 'trees', 'operations', 'exec', 'usage', 'capabilities', 'snapshots', 'uploads', 'jobs', 'changes'].includes(resource)) {
+  if (!['files', 'directories', 'trees', 'operations', 'exec', 'usage', 'capabilities', 'snapshots', 'uploads', 'jobs', 'changes', 'auth', 'sites', 'shares'].includes(resource)) {
     throw new HttpError(404, 'INVALID_ROUTE', `Unknown volume resource: ${resource}`);
   }
 

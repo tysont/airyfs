@@ -6,6 +6,14 @@ The AiryFS CLI provides local, stateful access to a remote AiryFS volume. It sen
 
 Node.js 22 or newer is required.
 
+From the repository root, one command builds the SDK and CLI and links both binaries:
+
+```bash
+./install.sh
+```
+
+This installs two equivalent executables: `airyfs` and the short alias `airy`. To install manually:
+
 ```bash
 cd cli
 npm install
@@ -13,7 +21,7 @@ npm run build
 npm link
 ```
 
-`npm link` adds the `airyfs` executable to the active Node installation. For development without linking, use `npm run dev -- <arguments>`.
+`npm link` adds the `airyfs` and `airy` executables to the active Node installation. For development without linking, use `npm run dev -- <arguments>`.
 
 ## Quick Start
 
@@ -81,6 +89,30 @@ AIRYFS_SESSION=prod airyfs status
 
 The CLI remembers volume names in sessions because Durable Object namespaces do not provide an API for enumerating named volumes.
 
+To move a session to another computer, export it to a portable blob and import it there:
+
+```bash
+airyfs session export prod            # prints an `airyfs1:...` blob (contains the token)
+airyfs session import airyfs1:... home # recreates and selects the session as `home`
+```
+
+The blob embeds the session's bearer token, so treat it as a credential and share it only over a trusted channel. Alternatively, recreate the session from scratch and authenticate with the volume password (see Authentication).
+
+## Authentication
+
+A volume can require a password without redeploying the Worker. The deployment must have `AIRYFS_AUTH_SECRET` set for password auth to function; the secret stays the root/admin credential and the capability signing key.
+
+```bash
+airyfs volume create --password           # create the volume, set a password, and log in with a scoped token
+airyfs auth passwd <new-password>         # set or rotate the password (root, admin, or --current <password>)
+airyfs auth login --password              # exchange the password for a token on this machine
+airyfs auth login <token>                 # or store a bearer token (root secret or capability) directly
+airyfs auth status                        # show the session's authentication state
+airyfs auth logout                        # clear the stored token
+```
+
+`volume create --password` stores only the resulting scoped token in the session, not the password, so day-to-day use is least-privilege. From a second computer, create a session pointing at the same endpoint and volume, then run `airyfs auth login --password` to obtain your own token.
+
 ## Navigation
 
 Remote paths use POSIX semantics and resolve relative to the active session's current directory.
@@ -100,8 +132,10 @@ airyfs ls ../tests
 |---|---|
 | `ls [path]` | List a directory; use `-l`, `-a`, or global `--json` |
 | `cat <path>` | Stream raw file bytes to stdout |
-| `get <remote> [local]` | Download without overwriting unless `--force` is used |
+| `get <remote> [local]` | Download a file without overwriting unless `--force` is used |
 | `put <local> [remote]` | Stream a local file into the volume |
+| `download <remote> [local]` | Download a file or (with `-r`) a directory tree, auto-detecting which |
+| `upload <local> [remote]` | Upload a file or (with `-r`) a directory tree, auto-detecting which |
 | `write <remote>` | Stream stdin into a remote file |
 | `mkdir [-p] <path>` | Create a directory or parent chain |
 | `rm [-r] <path>` | Remove a file, link, or directory |
@@ -113,6 +147,8 @@ airyfs ls ../tests
 | `stat <path>` | Show path metadata |
 
 `cat` emits raw bytes and therefore cannot be combined with `--json` or `--quiet`. Use `get` for binary files that should not be written directly to the terminal.
+
+`upload` and `download` are the ergonomic unified verbs. `upload` inspects the local path and streams a single file (like `put`, with `--resume`) or, with `-r/--recursive`, pushes a directory tree as a transactional archive (like `push`, with `--replace`). `download` inspects the remote path and retrieves a single file (like `get`, with `--resume`) or, with `-r/--recursive`, pulls a directory tree (like `pull`). The lower-level `put`/`get` and `push`/`pull` commands remain available.
 
 ## Execution
 
@@ -179,6 +215,35 @@ The shell can start without an active session. Its prompt shows `airyfs:no-sessi
 | `destroy [--force]` | Destroy the Container while preserving volume data |
 | `warm` / `wake` | Start and mount the Container with a no-op command |
 | `kv set/get` | Access the volume's key-value table |
+
+## Web Hosting
+
+Serve a volume publicly without a token. Nothing is exposed until you publish a site or create a share.
+
+```bash
+airyfs upload -r ./dist /site
+airyfs site publish /site --spa --cache "public, max-age=300"
+airyfs site status
+airyfs site unpublish
+
+airyfs share /reports/q3.pdf --expires 24h   # prints a /d/<volume>/<id> URL
+airyfs share list
+airyfs share rm <id>
+```
+
+Sites are served at `<endpoint>/s/<volume>/` and shares at `<endpoint>/d/<volume>/<id>` on any deployment. If the Worker sets `SITES_ZONE` and has a matching wildcard route, `<volume>.<zone>` also serves the published site.
+
+## Deployment
+
+Run from within the AiryFS repository to deploy the Worker to your Cloudflare account and get a ready session:
+
+```bash
+export CLOUDFLARE_API_TOKEN=your-api-token
+airyfs deploy int --allow-dirty              # deploy, set the auth secret, create a session
+airyfs init int --volume myproject --password # deploy + session + a secured volume in one step
+```
+
+`deploy` and `init` wrap `scripts/provision.mjs`, so they build the Worker and Container from source and must run inside the repo. `deploy` stores the deployment's root secret in the created session; `init` additionally creates a volume and downgrades the session to a password-scoped token.
 
 ## Global Options
 

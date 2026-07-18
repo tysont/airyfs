@@ -10,3 +10,4 @@ container/bin/
 agentfs/.build/
 agentfs/.target/
 .env
+opencode.json

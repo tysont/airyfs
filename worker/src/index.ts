@@ -89,19 +89,38 @@ import {
   authenticate,
   buildCapability,
   capabilityAllows,
+  hashPassword,
   isCapabilityRevoked,
   OPERATIONS,
+  readPasswordRecord,
   revokeCapability,
   signCapability,
+  verifyPassword,
+  writePasswordRecord,
   type AccessRequirement,
   type Identity,
   type Operation,
 } from './auth';
+import {
+  createShare,
+  deleteShare,
+  deleteSite,
+  listShares,
+  parsePublicVolume,
+  readShare,
+  readSite,
+  serveShare,
+  serveSite,
+  subdomainVolume,
+  writeSite,
+} from './sites';
 
 interface Env {
   AiryFS: DurableObjectNamespace<AiryFS>;
   /** When set, HTTP access requires a root or capability bearer credential. */
   AIRYFS_AUTH_SECRET?: string;
+  /** When set, `<volume>.<SITES_ZONE>` hostnames serve that volume's published site. */
+  SITES_ZONE?: string;
 }
 
 interface WorkerSocket {
@@ -1202,6 +1221,183 @@ export class AiryFS extends Container<Env> {
   }
 
   /**
+   * Route the per-volume `auth` resource. This runs before the normal bearer
+   * check so `/login` is reachable without a token: it exchanges the volume
+   * password for a scoped capability. `GET /` reports whether a password is set,
+   * and `POST /password` sets or rotates it (root credential, an admin
+   * capability, or the current password authorizes the change).
+   */
+  private async handleAuth(request: Request, route: V1Route): Promise<Response> {
+    const secret = this.env.AIRYFS_AUTH_SECRET;
+    const sql = this.ctx.storage.sql;
+    const path = route.path;
+    const method = request.method;
+
+    if (method === 'GET' && path === '/') {
+      return Response.json({
+        volume: route.volume,
+        authEnabled: Boolean(secret),
+        passwordSet: readPasswordRecord(sql) !== null,
+      });
+    }
+
+    if (method === 'POST' && path === '/login') {
+      if (!secret) {
+        throw new HttpError(409, 'AUTH_DISABLED', 'Set AIRYFS_AUTH_SECRET to enable password login');
+      }
+      const record = readPasswordRecord(sql);
+      const body = await readJsonObject(request);
+      const password = typeof body.password === 'string' ? body.password : '';
+      // Verify even when no password is set so timing does not disclose that fact.
+      const ok = record ? await verifyPassword(password, record) : false;
+      if (!record || !password || !ok) {
+        throw new HttpError(401, 'INVALID_PASSWORD', 'Incorrect volume password');
+      }
+      const expiresInSeconds = body.expiresInSeconds === undefined
+        ? DEFAULT_LOGIN_TTL_SECONDS
+        : parseExpiry(body.expiresInSeconds);
+      const capability = buildCapability(route.volume, ['read', 'write', 'exec'], [], expiresInSeconds);
+      const token = await signCapability(secret, capability);
+      return Response.json({ token, ...capability }, { status: 201 });
+    }
+
+    if (method === 'POST' && path === '/password') {
+      if (!secret) {
+        throw new HttpError(409, 'AUTH_DISABLED', 'Set AIRYFS_AUTH_SECRET to manage volume passwords');
+      }
+      const body = await readJsonObject(request);
+      const newPassword = typeof body.password === 'string' ? body.password : '';
+      if (newPassword.length < 8) {
+        throw new HttpError(400, 'WEAK_PASSWORD', 'Password must be at least 8 characters');
+      }
+      const existing = readPasswordRecord(sql);
+      const authorized = await this.authorizePasswordChange(request, route.volume, secret, existing, body);
+      if (!authorized) {
+        throw new HttpError(
+          403,
+          'FORBIDDEN',
+          existing
+            ? 'Root credential, admin capability, or current password required'
+            : 'Root credential or admin capability required to set the initial password'
+        );
+      }
+      writePasswordRecord(sql, await hashPassword(newPassword));
+      return Response.json({ volume: route.volume, passwordSet: true }, { status: existing ? 200 : 201 });
+    }
+
+    throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, POST' });
+  }
+
+  /** True when the caller may set/rotate the volume password: root, admin capability, or current password. */
+  private async authorizePasswordChange(
+    request: Request,
+    volume: string,
+    secret: string,
+    existing: ReturnType<typeof readPasswordRecord>,
+    body: Record<string, unknown>
+  ): Promise<boolean> {
+    try {
+      const identity = await authenticate(secret, request.headers.get('Authorization'), volume);
+      if (identity.kind === 'root') return true;
+      if (
+        identity.kind === 'capability' &&
+        identity.capability.operations.includes('admin') &&
+        !isCapabilityRevoked(this.ctx.storage.sql, identity.capability.id)
+      ) {
+        return true;
+      }
+    } catch {
+      // No usable bearer credential; fall back to the current-password path.
+    }
+    if (existing && typeof body.currentPassword === 'string' && body.currentPassword) {
+      return verifyPassword(body.currentPassword, existing);
+    }
+    return false;
+  }
+
+  /**
+   * Serve a public site request (`/s/<volume>/<path...>`). Unauthenticated and
+   * read-only; the volume's published web root resolves index documents and,
+   * when enabled, falls back to the index for single-page-app routes.
+   */
+  private async handleSiteRequest(url: URL, request: Request): Promise<Response> {
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, HEAD' });
+    }
+    const site = readSite(this.ctx.storage.sql);
+    if (!site) throw new HttpError(404, 'NOT_PUBLISHED', 'This volume has no published site');
+    const segments = url.pathname.split('/').filter(Boolean); // ['s', volume, ...rest]
+    const subPath = `/${segments.slice(2).map(decodeURIComponent).join('/')}`;
+    return serveSite(this.filesystem(), this.access, site, subPath, request);
+  }
+
+  /**
+   * Serve a share link (`/d/<volume>/<id>`). Unauthenticated and read-only;
+   * enforces the share's expiry before streaming its single file.
+   */
+  private async handleShareRequest(url: URL, request: Request): Promise<Response> {
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, HEAD' });
+    }
+    const segments = url.pathname.split('/').filter(Boolean); // ['d', volume, id]
+    const id = segments[2] ? decodeURIComponent(segments[2]) : '';
+    const share = id ? readShare(this.ctx.storage.sql, id) : null;
+    if (!share) throw new HttpError(404, 'NOT_FOUND', 'Unknown share link');
+    return serveShare(this.filesystem(), this.access, share, request);
+  }
+
+  /** Manage the published site: GET status, PUT publish/update, DELETE unpublish. */
+  private async handleSites(request: Request, route: V1Route): Promise<Response> {
+    const sql = this.ctx.storage.sql;
+    if (route.path !== '/') throw new HttpError(404, 'INVALID_ROUTE', 'Invalid sites route');
+    if (request.method === 'GET') {
+      const site = readSite(sql);
+      return Response.json({ published: site !== null, site });
+    }
+    if (request.method === 'PUT') {
+      const body = await readOptionalJsonObject(request);
+      const pathPrefix = typeof body.path === 'string' && body.path ? body.path : '/';
+      const indexDocument = typeof body.indexDocument === 'string' && body.indexDocument
+        ? body.indexDocument
+        : 'index.html';
+      const spa = body.spa === true;
+      const cacheControl = typeof body.cacheControl === 'string' ? body.cacheControl : null;
+      const site = writeSite(sql, { pathPrefix, indexDocument, spa, cacheControl });
+      return Response.json(site);
+    }
+    if (request.method === 'DELETE') {
+      return Response.json({ removed: deleteSite(sql) });
+    }
+    throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, PUT, DELETE' });
+  }
+
+  /** Manage share links: GET list, POST create, DELETE by id. */
+  private async handleShares(request: Request, route: V1Route): Promise<Response> {
+    const sql = this.ctx.storage.sql;
+    const segments = route.path.split('/').filter(Boolean);
+    if (segments.length === 0) {
+      if (request.method === 'GET') return Response.json(listShares(sql));
+      if (request.method === 'POST') {
+        const body = await readJsonObject(request);
+        if (typeof body.path !== 'string' || !body.path) {
+          throw new HttpError(400, 'INVALID_ARGUMENT', 'Missing "path" string');
+        }
+        const expiresAt = body.expiresInSeconds === undefined
+          ? null
+          : Math.floor(Date.now() / 1000) + parseExpiry(body.expiresInSeconds);
+        const cacheControl = typeof body.cacheControl === 'string' ? body.cacheControl : null;
+        const share = createShare(sql, body.path, expiresAt, cacheControl);
+        return Response.json(share, { status: 201 });
+      }
+      throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, POST' });
+    }
+    if (segments.length === 1 && request.method === 'DELETE') {
+      return Response.json({ id: segments[0], removed: deleteShare(sql, segments[0]) });
+    }
+    throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, POST, DELETE' });
+  }
+
+  /**
    * Route the `snapshots` resource. Collection: GET (list), POST (create).
    * Item: DELETE. Item sub-actions: GET `/:id/diff`, POST `/:id/restore`,
    * POST `/:id/clone`. SnapshotError codes are mapped to stable HTTP statuses.
@@ -1386,7 +1582,22 @@ export class AiryFS extends Container<Env> {
     const url = new URL(request.url);
 
     try {
+      // Public web hosting is served before any bearer check.
+      if (url.pathname === '/s' || url.pathname.startsWith('/s/')) {
+        return await this.handleSiteRequest(url, request);
+      }
+      if (url.pathname.startsWith('/d/')) {
+        return await this.handleShareRequest(url, request);
+      }
+
       const v1Route = parseV1Route(url.pathname);
+
+      // The per-volume auth resource is handled before the bearer check so that
+      // `/auth/login` can exchange the volume password for a token unauthenticated.
+      if (v1Route?.resource === 'auth') {
+        return await this.handleAuth(request, v1Route);
+      }
+
       const routeVolume = v1Route?.volume ?? url.searchParams.get('volume') ?? '';
       const identity = await this.authorize(request, url, v1Route, routeVolume);
 
@@ -1466,6 +1677,14 @@ export class AiryFS extends Container<Env> {
 
         if (v1Route.resource === 'jobs') {
           return await this.handleJobs(request, url, v1Route);
+        }
+
+        if (v1Route.resource === 'sites') {
+          return await this.handleSites(request, v1Route);
+        }
+
+        if (v1Route.resource === 'shares') {
+          return await this.handleShares(request, v1Route);
         }
 
         if (v1Route.resource === 'exec') {
@@ -1616,6 +1835,15 @@ async function requiredAccess(
         return method === 'GET'
           ? { operation: null, paths: [] }
           : { operation: 'admin', paths: [] };
+      case 'auth':
+        // Handled before the bearer check; never authorized through this path.
+        return { operation: null, paths: [] };
+      case 'sites':
+      case 'shares':
+        // Publishing exposes volume content publicly: reads status, admin mutates.
+        return method === 'GET'
+          ? { operation: 'read', paths: ['/'] }
+          : { operation: 'admin', paths: ['/'] };
     }
   }
 
@@ -1737,6 +1965,9 @@ function parseOptionalInteger(value: string | null, name: string): number | unde
   return parsed;
 }
 
+/** Default lifetime of a token minted by password login: 24 hours. */
+const DEFAULT_LOGIN_TTL_SECONDS = 24 * 60 * 60;
+
 function parseExpiry(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
     throw new HttpError(400, 'INVALID_ARGUMENT', 'expiresInSeconds must be a positive integer');
@@ -1747,9 +1978,20 @@ function parseExpiry(value: unknown): number {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // Subdomain hosting: rewrite `<volume>.<zone>/<path>` to the volume's site route.
+    const label = subdomainVolume(request.headers.get('Host') ?? url.hostname, env.SITES_ZONE);
+    if (label) {
+      const target = new URL(url);
+      target.pathname = `/s/${encodeURIComponent(label)}${url.pathname === '/' ? '' : url.pathname}`;
+      return getContainer<AiryFS>(env.AiryFS, label).fetch(new Request(target, request));
+    }
+
     let volume: string | null;
     try {
-      volume = parseV1Route(url.pathname)?.volume ?? url.searchParams.get('volume');
+      volume = parsePublicVolume(url.pathname)
+        ?? parseV1Route(url.pathname)?.volume
+        ?? url.searchParams.get('volume');
     } catch (error) {
       if (error instanceof URIError) {
         return Response.json(

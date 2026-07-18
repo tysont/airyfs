@@ -137,6 +137,33 @@ const DDL_STATEMENTS = [
     revoked_at INTEGER NOT NULL DEFAULT (unixepoch())
   )`,
 
+  // Optional per-volume password verifier (PBKDF2). A single row (id=1) holds the
+  // salt/hash/iterations; the plaintext password is never stored. Presence lets a
+  // caller self-service a volume-scoped token via /auth/login without the root secret.
+  `CREATE TABLE IF NOT EXISTS volume_auth (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    salt TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    iterations INTEGER NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+  )`,
+
+  // Public web hosting config. A single kind='site' row (id='web') defines the
+  // published web root; kind='share' rows are random-id links to individual files
+  // with optional expiry. Both are served unauthenticated through /s and /d.
+  `CREATE TABLE IF NOT EXISTS site_config (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    path TEXT NOT NULL,
+    index_document TEXT NOT NULL DEFAULT 'index.html',
+    spa INTEGER NOT NULL DEFAULT 0,
+    cache_control TEXT,
+    expires_at INTEGER,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_site_config_kind ON site_config(kind)`,
+
   // Deleting an inode is the single authoritative point at which its chunks,
   // symlink target, and any residual leases are removed together.
   `CREATE TRIGGER IF NOT EXISTS trg_fs_inode_delete_cleanup
@@ -173,6 +200,8 @@ export const SCHEMA_TABLES = [
   'fs_mutation_journal',
   'fs_open_inode',
   'capability_revocations',
+  'volume_auth',
+  'site_config',
   ...UPLOAD_TABLES,
   ...SNAPSHOT_TABLES,
   ...JOB_TABLES,

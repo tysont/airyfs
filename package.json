@@ -1,0 +1,14 @@
+{
+  "name": "airyfs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A durable, programmable filesystem for Cloudflare Durable Objects",
+  "type": "module",
+  "scripts": {
+    "install-cli": "node scripts/install.mjs",
+    "test:scripts": "node --test scripts/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

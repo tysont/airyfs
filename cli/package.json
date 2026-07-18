@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "airyfs": "dist/bin/airyfs.js"
+    "airyfs": "dist/bin/airyfs.js",
+    "airy": "dist/bin/airyfs.js"
   },
   "scripts": {
     "build": "tsc",

@@ -90,6 +90,61 @@ describe('commands', () => {
     expect(await readFile(destination, 'utf8')).toBe('download-body');
   });
 
+  it('upload dispatches a file to a streaming put', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'airyfs-upload-'));
+    temporaryPaths.push(directory);
+    const source = join(directory, 'note.txt');
+    await writeFile(source, 'upload-file');
+
+    const result = await invoke(['upload', source, '/note.txt']);
+    expect(result.code).toBe(0);
+    expect(requests).toContainEqual({
+      method: 'PUT', path: '/v1/volumes/vol/files/note.txt', body: 'upload-file',
+    });
+  });
+
+  it('upload dispatches a directory to a tree push with -r', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'airyfs-uploadtree-'));
+    temporaryPaths.push(directory);
+    await writeFile(join(directory, 'a.txt'), 'a');
+
+    const result = await invoke(['upload', '-r', directory, '/tree']);
+    expect(result.code).toBe(0);
+    expect(requests.some((request) =>
+      request.method === 'PUT' && request.path.startsWith('/v1/volumes/vol/trees/tree'))).toBe(true);
+  });
+
+  it('upload refuses a directory without -r', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'airyfs-uploadguard-'));
+    temporaryPaths.push(directory);
+
+    const result = await invoke(['upload', directory, '/tree']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('is a directory');
+  });
+
+  it('download dispatches a file to get', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'airyfs-download-'));
+    temporaryPaths.push(directory);
+    const destination = join(directory, 'out.txt');
+
+    const result = await invoke(['download', '/dl/file.txt', destination]);
+    expect(result.code).toBe(0);
+    expect(await readFile(destination, 'utf8')).toBe('file-body');
+  });
+
+  it('download refuses a directory without -r', async () => {
+    const result = await invoke(['download', '/dl/nested']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('is a directory');
+  });
+
+  it('download rejects --resume on a directory', async () => {
+    const result = await invoke(['download', '-r', '--resume', '/dl/nested']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('applies to files');
+  });
+
   it('does not close shared stdout after cat', async () => {
     const chunks: Buffer[] = [];
     const stdout = new Writable({
@@ -380,9 +435,17 @@ async function route(
   const directories: Record<string, unknown[]> = {
     '/v1/volumes/vol/directories': [entry('src', 'directory')],
     '/v1/volumes/vol/directories/src': [entry('file.txt', 'file', 12)],
+    '/v1/volumes/vol/directories/dl': [entry('file.txt', 'file', 12), entry('nested', 'directory')],
   };
   if (request.method === 'GET' && url.pathname in directories) {
     return json(response, 200, directories[url.pathname]);
+  }
+  if (request.method === 'PUT' && url.pathname.startsWith('/v1/volumes/vol/trees/')) {
+    return json(response, 201, { files: 1, directories: 0, symlinks: 0, bytes: 9 });
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/volumes/vol/files/dl/file.txt') {
+    response.writeHead(200, { 'Content-Type': 'application/octet-stream' }).end('file-body');
+    return;
   }
   if (request.method === 'PUT' && url.pathname.startsWith('/v1/volumes/vol/directories/')) {
     response.writeHead(204).end();

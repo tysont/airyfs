@@ -30,6 +30,7 @@ AgentFS provides the filesystem semantics and native TypeScript interface inside
 - **Repository automation:** maintain durable per-repository state, update individual files directly, and attach disposable compute only for operations such as checkout, diff, lint, build, or test.
 - **Per-user application storage with execution:** give each user or job an isolated filesystem that application code can query and mutate, while retaining the option to run general-purpose software against it.
 - **Durable workflow workspaces:** preserve intermediate files across retries, Container sleep, and Container replacement without adding a separate synchronization or recovery system.
+- **Static sites and artifact sharing:** publish a volume subtree as a public website with index-document and single-page-app routing, or mint expiring links to individual files, served directly from Durable Object SQLite with no Container.
 
 ## Core Properties
 
@@ -68,7 +69,8 @@ AiryFS is not optimized for workloads dominated by thousands of sequential metad
 | File mutations | Atomic replacement after a complete upload, delete, copy, rename, and truncate |
 | Directory operations | Create, list with metadata, remove, and recursive remove |
 | Links | Create symbolic links and read link targets |
-| Authentication | Optional root bearer auth plus signed, expiring, revocable capabilities scoped by volume, operation, and path |
+| Authentication | Optional root bearer auth, signed/expiring/revocable capabilities scoped by volume/operation/path, and per-volume passwords that mint scoped tokens without the root secret |
+| Web hosting | Opt-in public static-site serving with MIME inference, index documents, and SPA fallback, plus expiring file-share links, served directly from SQLite |
 | Bulk transfer | Transactional streaming directory push/pull using the dependency-free AiryFS archive format |
 | Snapshots | Named full-volume capture, list, exact diff, restore, delete, and cross-volume clone |
 | Large files | Persistent resumable uploads, range-resumed downloads, per-chunk and full-file SHA-256 verification |
@@ -77,7 +79,7 @@ AiryFS is not optimized for workloads dominated by thousands of sequential metad
 | Change feeds | Ordered create, modify, remove, and rename events from both direct API and FUSE writers, with retention-gap detection |
 | Workers RPC | Streams, metadata, mutations, trees, uploads, snapshots, jobs, changes, usage, lifecycle, and exec |
 | TypeScript SDK | Complete typed HTTP client plus watch, job-follow/wait, exec-id, and resumable Blob helpers |
-| CLI | Sessions, remote cwd, file and tree transfer, snapshots, jobs, watch, auth, diagnostics, JSON output, and interactive shell |
+| CLI | Sessions, remote cwd, smart upload/download plus file and tree transfer, snapshots, jobs, watch, password auth, session export/import, web hosting, one-command deploy, diagnostics, JSON output, and interactive shell |
 | Container execution | Run shell commands with `cwd=/volume`, a five-minute timeout, streaming output, and cancellation |
 | Standard tooling | Git, Python, shell utilities, and other programs included in the Container image |
 | Lifecycle | Single-flight startup, FUSE readiness checks, failed-mount cleanup, TCP reconnects, and explicit Container destruction |
@@ -293,31 +295,28 @@ for await (const change of watchChanges(client, { path: '/src', signal: controll
 The TypeScript CLI requires Node.js 22 or newer. It combines the HTTP filesystem API and Container execution behind named local sessions:
 
 ```bash
-cd cli
-npm ci
-npm run build
-npm link
+./install.sh   # builds the SDK and CLI, links `airyfs` and the short `airy` alias
 
 printf 'print("hello from AiryFS")\n' > /tmp/airyfs-main.py
 
-airyfs session create work \
+airy session create work \
   --endpoint https://your-worker.workers.dev \
   --volume project
-airyfs volume create --chunk-size 256k
+airy volume create --chunk-size 256k
 
-airyfs mkdir -p /src
-airyfs put /tmp/airyfs-main.py /src/main.py
-airyfs push ./project /project --replace
-airyfs cd /src
-airyfs cat main.py
+airy mkdir -p /src
+airy upload /tmp/airyfs-main.py /src/main.py
+airy upload -r ./project /project --replace
+airy cd /src
+airy cat main.py
 
-airyfs warm
-airyfs exec python3 main.py
-airyfs job submit --wait python3 main.py
-airyfs snapshot create before-refactor --note "known good"
-airyfs watch /src
-airyfs status
-airyfs shell
+airy warm
+airy exec python3 main.py
+airy job submit --wait python3 main.py
+airy snapshot create before-refactor --note "known good"
+airy watch /src
+airy status
+airy shell
 ```
 
 A session stores an endpoint, volume, and remote working directory under `~/.airyfs`. `AIRYFS_SESSION` and `--session` let separate terminals or scripts select different sessions. Volume names are explicit because Durable Object namespaces cannot enumerate names used to derive object IDs.
@@ -493,9 +492,20 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `GET` | `/v1/volumes/V/jobs/ID/logs?after=N` | Page persisted binary-safe stdout/stderr |
 | `POST` | `/v1/volumes/V/jobs/ID/cancel` | Cancel queued or running work |
 | `GET` | `/v1/volumes/V/changes/path?since=N&wait=25000` | Read or long-poll ordered filesystem changes |
+| `GET` | `/v1/volumes/V/auth` | Report whether deployment auth is enabled and a volume password is set |
+| `POST` | `/v1/volumes/V/auth/password` | Set or rotate the volume password (root, admin, or current password) |
+| `POST` | `/v1/volumes/V/auth/login` | Exchange the volume password for a scoped capability token |
 | `GET` | `/v1/volumes/V/capabilities` | Return auth mode and caller identity |
 | `POST` | `/v1/volumes/V/capabilities` | Mint a scoped capability using root access |
 | `DELETE` | `/v1/volumes/V/capabilities/ID` | Revoke a capability using root access |
+| `GET` | `/v1/volumes/V/sites` | Report the published-site status |
+| `PUT` | `/v1/volumes/V/sites` | Publish or update the public web root `{"path","indexDocument","spa","cacheControl"}` |
+| `DELETE` | `/v1/volumes/V/sites` | Unpublish the site |
+| `GET` | `/v1/volumes/V/shares` | List share links |
+| `POST` | `/v1/volumes/V/shares` | Create a share link `{"path","expiresInSeconds","cacheControl"}` |
+| `DELETE` | `/v1/volumes/V/shares/ID` | Delete a share link |
+| `GET` | `/s/V/path` | Public, unauthenticated static-site serving with MIME, index, and SPA fallback |
+| `GET` | `/d/V/ID` | Public, unauthenticated share-link download |
 | `GET` | `/v1/volumes/V/usage` | Return filesystem, SQLite, Container, and Hrana usage |
 
 Filesystem failures return structured JSON with stable POSIX-style codes and appropriate HTTP statuses.
@@ -647,13 +657,42 @@ AiryFS coordinates direct access and FUSE mutations, but it does not yet impleme
 
 ## Security
 
-Authentication is opt-in. Set `AIRYFS_AUTH_SECRET` to require `Authorization: Bearer ...` on HTTP requests. The configured value is the root administrative credential and the HMAC-SHA256 signing key for scoped capabilities. Leave it unset only for trusted local/test deployments.
+Authentication is opt-in. Set `AIRYFS_AUTH_SECRET` to require `Authorization: Bearer ...` on HTTP requests. The configured value is the root administrative credential and the base secret from which each volume's capability signing key is derived. Capability signing keys are derived per volume with HKDF-SHA256, so a token minted for one volume cannot be verified against another even under the same deployment secret. Leave the secret unset only for trusted local/test deployments.
 
 Root callers can mint expiring capabilities restricted to one volume, a subset of `read`, `write`, `exec`, and `admin`, and normalized path prefixes. Every capability request verifies its signature, expiry, volume, operation, path scope, and revocation state. Capability IDs can be revoked immediately. Cross-volume snapshot clone remains root-only because a capability is bound to one source volume.
+
+Each volume can also carry its own password, stored in the volume's SQLite as a PBKDF2 verifier (never as plaintext). `POST /v1/volumes/V/auth/password` sets or rotates it (authorized by the root credential, an `admin` capability, or the current password), and `POST /v1/volumes/V/auth/login` exchanges the password for a volume-scoped `read,write,exec` capability without needing the root secret. This lets a volume be secured at creation time and accessed from multiple machines. `GET /v1/volumes/V/auth` reports whether auth is enabled and a password is set. Password auth requires `AIRYFS_AUTH_SECRET` to be configured, because the minted token is signed with the derived per-volume key.
 
 The CLI stores an optional bearer token in its named session and sends it on every request. The TypeScript SDK accepts `token` and additional default headers through `AiryFSClient` options. Tokens are credentials: do not commit them, put them in URLs, or pass them through untrusted command arguments.
 
 Authentication does not make arbitrary execution safe for mutually untrusted users who share a volume. `exec` and durable jobs run shell commands in the attached Container with access to the complete mounted volume. Deployments still need an appropriate identity, command policy, request limits, and volume-isolation model for their product.
+
+## Web Hosting
+
+A volume can serve content publicly without a bearer token. Public serving is opt-in per volume: nothing is exposed until a site is published or a share link is minted, and both are served straight from Durable Object SQLite with no Container cold start.
+
+Static site hosting publishes a volume subtree as a web root. Directory requests resolve the index document, unknown paths fall back to the index when SPA mode is enabled, and files are returned with an inferred `Content-Type` and an optional `Cache-Control`.
+
+```bash
+airy upload -r ./dist /site        # push a built static site into the volume
+airy site publish /site --spa --cache "public, max-age=300"
+# served at https://<endpoint>/s/<volume>/
+airy site status
+airy site unpublish
+```
+
+File shares mint unguessable, optionally expiring links to individual files:
+
+```bash
+airy share /reports/q3.pdf --expires 24h
+# prints https://<endpoint>/d/<volume>/<id>
+airy share list
+airy share rm <id>
+```
+
+Path-based URLs (`/s/<volume>/...` and `/d/<volume>/<id>`) work on any deployment, including `workers.dev`, with no DNS setup. To serve sites on their own hostnames, set the `SITES_ZONE` Worker variable (for example `sites.example.com`) and add a wildcard route (`*.sites.example.com/*`) for the Worker. Requests to `<volume>.sites.example.com` are then served as that volume's published site. Arbitrary custom domains can be layered on later through Cloudflare for SaaS custom hostnames.
+
+Publishing exposes the selected subtree to anyone with the URL. Do not publish a volume that also holds private files outside the published web root, and prefer a dedicated public subtree.
 
 ## Deployment
 
@@ -681,6 +720,17 @@ DOCKER_CA_CERT=/path/to/root.crt ./agentfs/build.sh
 See [`docs/AGENTFS_PATCHES.md`](docs/AGENTFS_PATCHES.md) for upstream refresh and patch maintenance.
 
 ### Deploy
+
+The fastest path from a clone to a working session is the CLI, which wraps the same Wrangler machinery from inside the repository:
+
+```bash
+export CLOUDFLARE_API_TOKEN=your-api-token   # and CLOUDFLARE_ACCOUNT_ID or .dev.vars
+
+airy deploy int --allow-dirty                # deploy, set AIRYFS_AUTH_SECRET, create a session
+airy init int --volume myproject --password  # deploy, create a session, and secure a volume in one step
+```
+
+`airy deploy` runs `scripts/provision.mjs`, which deploys the Worker, generates and stores `AIRYFS_AUTH_SECRET`, discovers the workers.dev URL, and creates a local session pointing at it (holding the root credential). `airy init` additionally creates a volume, sets its password, and downgrades the session to a scoped token. Both must be run from within the repository because the deploy builds the Worker and Container from source.
 
 The checked-in Wrangler configuration defines isolated `int` and `prod` environments. Wrangler names their Workers `airyfs-int` and `airyfs-prod`; their Durable Object namespaces and Container applications remain separate. Local development uses `airyfs-local` with state under `.airyfs/local` and never binds remote resources.
 

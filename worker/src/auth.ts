@@ -57,11 +57,28 @@ function base64UrlDecode(value: string): Uint8Array {
   return bytes;
 }
 
-async function hmacKey(secret: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
+/**
+ * Derive a per-volume HMAC signing key from the deployment secret via HKDF-SHA256.
+ * Binding the key to the volume name isolates capabilities: a token minted for one
+ * volume cannot be verified against another even under the same deployment secret.
+ */
+async function hmacKey(secret: string, volume: string): Promise<CryptoKey> {
+  const base = await crypto.subtle.importKey(
     'raw',
     encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
+    'HKDF',
+    false,
+    ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: encoder.encode('airyfs/volume-capability/v1'),
+      info: encoder.encode(volume),
+    },
+    base,
+    { name: 'HMAC', hash: 'SHA-256', length: 256 },
     false,
     ['sign', 'verify']
   );
@@ -146,14 +163,21 @@ function isCapability(value: unknown): value is Capability {
 /** Mint a signed capability token. The returned token is the only copy of the credential. */
 export async function signCapability(secret: string, capability: Capability): Promise<string> {
   const payload = encoder.encode(JSON.stringify(capability));
-  const key = await hmacKey(secret);
+  const key = await hmacKey(secret, capability.volume);
   const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, payload));
   return `${base64UrlEncode(payload)}.${base64UrlEncode(signature)}`;
 }
 
 export class CapabilityError extends Error {}
 
-/** Verify a token's signature and shape. Does not check expiry, volume, or revocation. */
+/**
+ * Verify a token's signature and shape. Does not check expiry or revocation.
+ *
+ * The signing key is derived from the volume named inside the payload, so the
+ * payload is parsed for its `volume` field before verification. That field is
+ * untrusted until the signature validates: tampering with it selects a different
+ * derived key and the signature check then fails.
+ */
 export async function verifyCapability(secret: string, token: string): Promise<Capability> {
   const dot = token.indexOf('.');
   if (dot <= 0 || dot === token.length - 1) {
@@ -168,10 +192,6 @@ export async function verifyCapability(secret: string, token: string): Promise<C
     throw new CapabilityError('Malformed capability token');
   }
 
-  const key = await hmacKey(secret);
-  const valid = await crypto.subtle.verify('HMAC', key, signature, payload);
-  if (!valid) throw new CapabilityError('Invalid capability signature');
-
   let parsed: unknown;
   try {
     parsed = JSON.parse(decoder.decode(payload));
@@ -179,7 +199,60 @@ export async function verifyCapability(secret: string, token: string): Promise<C
     throw new CapabilityError('Malformed capability payload');
   }
   if (!isCapability(parsed)) throw new CapabilityError('Malformed capability payload');
+
+  const key = await hmacKey(secret, parsed.volume);
+  const valid = await crypto.subtle.verify('HMAC', key, signature, payload);
+  if (!valid) throw new CapabilityError('Invalid capability signature');
+
   return parsed;
+}
+
+// ---------------------------------------------------------------------------
+// Per-volume password authentication
+// ---------------------------------------------------------------------------
+
+/** Stored PBKDF2 verifier for a volume password. Never contains the password itself. */
+export interface PasswordRecord {
+  salt: string;
+  hash: string;
+  iterations: number;
+}
+
+const PASSWORD_ITERATIONS = 210_000;
+const PASSWORD_KEY_BYTES = 32;
+const PASSWORD_SALT_BYTES = 16;
+
+async function pbkdf2(password: string, salt: Uint8Array, iterations: number): Promise<Uint8Array> {
+  const base = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
+    base,
+    PASSWORD_KEY_BYTES * 8
+  );
+  return new Uint8Array(bits);
+}
+
+/** Hash a plaintext password into a storable PBKDF2 verifier with a fresh random salt. */
+export async function hashPassword(password: string): Promise<PasswordRecord> {
+  const salt = crypto.getRandomValues(new Uint8Array(PASSWORD_SALT_BYTES));
+  const hash = await pbkdf2(password, salt, PASSWORD_ITERATIONS);
+  return {
+    salt: base64UrlEncode(salt),
+    hash: base64UrlEncode(hash),
+    iterations: PASSWORD_ITERATIONS,
+  };
+}
+
+/** Constant-time verification of a candidate password against a stored verifier. */
+export async function verifyPassword(password: string, record: PasswordRecord): Promise<boolean> {
+  let salt: Uint8Array;
+  try {
+    salt = base64UrlDecode(record.salt);
+  } catch {
+    return false;
+  }
+  const candidate = await pbkdf2(password, salt, record.iterations);
+  return timingSafeEqual(base64UrlEncode(candidate), record.hash);
 }
 
 // ---------------------------------------------------------------------------
@@ -254,5 +327,37 @@ export function revokeCapability(sql: SqlExec, id: string): void {
   sql.exec(
     'INSERT OR IGNORE INTO capability_revocations (id, revoked_at) VALUES (?, unixepoch())',
     id
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-volume password persistence (one row, id=1, in the volume's own SQLite)
+// ---------------------------------------------------------------------------
+
+export function readPasswordRecord(sql: SqlExec): PasswordRecord | null {
+  const rows = sql
+    .exec('SELECT salt, hash, iterations FROM volume_auth WHERE id = 1')
+    .toArray();
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    salt: String(row.salt),
+    hash: String(row.hash),
+    iterations: Number(row.iterations),
+  };
+}
+
+export function writePasswordRecord(sql: SqlExec, record: PasswordRecord): void {
+  sql.exec(
+    `INSERT INTO volume_auth (id, salt, hash, iterations, created_at, updated_at)
+       VALUES (1, ?, ?, ?, unixepoch(), unixepoch())
+     ON CONFLICT(id) DO UPDATE SET
+       salt = excluded.salt,
+       hash = excluded.hash,
+       iterations = excluded.iterations,
+       updated_at = unixepoch()`,
+    record.salt,
+    record.hash,
+    record.iterations
   );
 }

@@ -7,11 +7,15 @@ import {
   authenticate,
   buildCapability,
   capabilityAllows,
+  hashPassword,
   isCapabilityRevoked,
   normalizePath,
+  readPasswordRecord,
   revokeCapability,
   signCapability,
   verifyCapability,
+  verifyPassword,
+  writePasswordRecord,
   type Capability,
 } from '../src/auth';
 import { HttpError } from '../src/files-api';
@@ -184,5 +188,32 @@ describe('revocation table', () => {
     revokeCapability(sql, 'cap-1');
     revokeCapability(sql, 'cap-1');
     expect(isCapabilityRevoked(sql, 'cap-1')).toBe(true);
+  });
+
+  it('stores and rotates a per-volume password verifier without the plaintext', async () => {
+    expect(readPasswordRecord(sql)).toBeNull();
+
+    writePasswordRecord(sql, await hashPassword('correct horse'));
+    const stored = readPasswordRecord(sql);
+    expect(stored).not.toBeNull();
+    expect(JSON.stringify(stored)).not.toContain('correct horse');
+    expect(await verifyPassword('correct horse', stored!)).toBe(true);
+    expect(await verifyPassword('wrong', stored!)).toBe(false);
+
+    writePasswordRecord(sql, await hashPassword('new-password'));
+    const rotated = readPasswordRecord(sql);
+    expect(await verifyPassword('new-password', rotated!)).toBe(true);
+    expect(await verifyPassword('correct horse', rotated!)).toBe(false);
+  });
+});
+
+describe('per-volume capability isolation', () => {
+  it('rejects a token minted for one volume when checked against another', async () => {
+    const token = await signCapability(SECRET, capability({ volume: 'alpha', operations: ['read'] }));
+    // Same deployment secret, different volume in the request: authentication fails.
+    await expect(authenticate(SECRET, `Bearer ${token}`, 'beta')).rejects.toThrow(HttpError);
+    // The correct volume still authenticates.
+    const identity = await authenticate(SECRET, `Bearer ${token}`, 'alpha');
+    expect(identity.kind).toBe('capability');
   });
 });

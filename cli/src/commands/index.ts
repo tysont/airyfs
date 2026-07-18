@@ -1,7 +1,8 @@
 // ABOUTME: Registers the complete AiryFS command surface and maps commands to API calls.
 // ABOUTME: One-shot and interactive-shell execution share these same handlers.
 
-import { createReadStream, createWriteStream } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import {
   access,
   link,
@@ -10,7 +11,7 @@ import {
   rm as removeLocal,
   stat as statLocal,
 } from 'node:fs/promises';
-import { basename as localBasename, resolve as resolveLocal } from 'node:path';
+import { basename as localBasename, dirname as localDirname, join as joinLocal, resolve as resolveLocal } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createInterface } from 'node:readline/promises';
@@ -57,6 +58,8 @@ export function registerCommands(program: Command, runtime: Runtime): void {
   registerCapabilityCommands(program, runtime);
   registerDiagnosticCommands(program, runtime);
   registerKvCommands(program, runtime);
+  registerDeployCommands(program, runtime);
+  registerSiteCommands(program, runtime);
 
   program.command('shell')
     .description('Start an interactive AiryFS shell')
@@ -171,6 +174,81 @@ function registerSessionCommands(program: Command, runtime: Runtime): void {
       runtime.onSessionEvent?.({ type: 'rename', from, to });
       output.success(`Renamed session ${from} to ${to}`, { name: renamed.name, ...renamed.session });
     }));
+
+  session.command('export')
+    .argument('[name]')
+    .description('Print a portable session blob (endpoint, volume, token) for another computer')
+    .action(async (name, _options, command) => performConfig(runtime, command, async (output) => {
+      const globals = (command as Command).optsWithGlobals() as GlobalOptions;
+      const selected = await resolveRuntimeSession(runtime, globals, name);
+      const blob = encodeSessionBlob(selected.name, selected.session);
+      if (output.json) {
+        output.value({ name: selected.name, blob });
+        return;
+      }
+      // The blob embeds a bearer token; surface it once and warn like other credentials.
+      output.stderr.write(output.dim('This blob contains a credential. Share it only over a trusted channel.\n'));
+      output.value(blob);
+    }));
+
+  session.command('import')
+    .argument('<blob>')
+    .argument('[name]', 'override the session name from the blob')
+    .description('Recreate a session from a blob produced by `session export`')
+    .action(async (blob, name, _options, command) => performConfig(runtime, command, async (output) => {
+      const decoded = decodeSessionBlob(blob);
+      const sessionName = name || decoded.name;
+      const created = await runtime.sessions.create(sessionName, {
+        endpoint: decoded.endpoint,
+        volume: decoded.volume,
+      });
+      if (decoded.token) await runtime.sessions.setToken(created.name, decoded.token);
+      runtime.onSessionEvent?.({ type: 'select', name: created.name });
+      output.success(`Imported and selected session ${created.name}`, {
+        name: created.name,
+        endpoint: decoded.endpoint,
+        volume: decoded.volume,
+        token: decoded.token ? 'configured' : 'none',
+      });
+    }));
+}
+
+interface SessionBlob {
+  name: string;
+  endpoint: string;
+  volume: string;
+  token?: string;
+}
+
+/** Encode a session as a base64url JSON blob for transfer between computers. */
+function encodeSessionBlob(name: string, session: { endpoint: string; volume: string; token?: string }): string {
+  const payload: SessionBlob = {
+    name,
+    endpoint: session.endpoint,
+    volume: session.volume,
+    ...(session.token ? { token: session.token } : {}),
+  };
+  return `airyfs1:${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')}`;
+}
+
+function decodeSessionBlob(blob: string): SessionBlob {
+  const trimmed = blob.trim();
+  const body = trimmed.startsWith('airyfs1:') ? trimmed.slice('airyfs1:'.length) : trimmed;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+  } catch {
+    throw new ConfigError('Invalid session blob');
+  }
+  if (
+    typeof parsed !== 'object' || parsed === null ||
+    typeof (parsed as SessionBlob).name !== 'string' ||
+    typeof (parsed as SessionBlob).endpoint !== 'string' ||
+    typeof (parsed as SessionBlob).volume !== 'string'
+  ) {
+    throw new ConfigError('Invalid session blob');
+  }
+  return parsed as SessionBlob;
 }
 
 function registerContextCommands(program: Command, runtime: Runtime): void {
@@ -240,43 +318,7 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
     .action(async (remote, local, options, command) => perform(runtime, command, async (context) => {
       const remotePath = context.path(remote);
       const localPath = local || remoteBasename(remotePath);
-      if (options.resume) {
-        const spinner = createSpinner(context, `Downloading ${remotePath}`);
-        spinner?.start();
-        try {
-          const result = await resumableDownload(
-            context.client(), remotePath, localPath, { force: options.force },
-            (progress) => updateTransfer(spinner, `Downloading ${remotePath}`, progress),
-          );
-          spinner?.stop();
-          context.output.success(`Downloaded ${remotePath} to ${localPath}`, { remote: remotePath, local: localPath, ...result });
-        } catch (error) {
-          spinner?.stop();
-          throw error;
-        }
-        return;
-      }
-      if (!options.force) {
-        await access(localPath).then(() => {
-          throw new ConfigError(`Local path already exists: ${localPath} (use --force to overwrite)`);
-        }).catch((error: unknown) => {
-          if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
-        });
-      }
-      const response = await context.client().readFile(remotePath);
-      const temporary = `${localPath}.airyfs-${process.pid}.tmp`;
-      try {
-        await pipeResponse(response, createWriteStream(temporary, { flags: 'wx' }));
-        if (options.force) await renameLocal(temporary, localPath);
-        else {
-          await link(temporary, localPath);
-          await removeLocal(temporary, { force: true });
-        }
-      } catch (error) {
-        await removeLocal(temporary, { force: true });
-        throw error;
-      }
-      context.output.success(`Downloaded ${remotePath} to ${localPath}`, { remote: remotePath, local: localPath });
+      await downloadFile(context, remotePath, localPath, { force: options.force, resume: options.resume });
     }));
 
   program.command('put')
@@ -288,24 +330,7 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       const localStats = await statLocal(local);
       if (!localStats.isFile()) throw new ConfigError(`Local path is not a file: ${local}`);
       const remotePath = context.path(remote || localBasename(local));
-      if (options.resume) {
-        const spinner = createSpinner(context, `Uploading ${local}`);
-        spinner?.start();
-        try {
-          const result = await resumableUpload(
-            context.client(), local, localStats.size, remotePath,
-            (progress) => updateTransfer(spinner, `Uploading ${local}`, progress),
-          );
-          spinner?.stop();
-          context.output.success(`Uploaded ${local} to ${remotePath}`, result);
-        } catch (error) {
-          spinner?.stop();
-          throw error;
-        }
-        return;
-      }
-      await context.client().writeFile(remotePath, createReadStream(local) as NonNullable<RequestInit['body']>);
-      context.output.success(`Uploaded ${local} to ${remotePath}`, { local, remote: remotePath });
+      await uploadFile(context, local, remotePath, { resume: options.resume, size: localStats.size });
     }));
 
   program.command('write')
@@ -420,12 +445,7 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       if (!localStats.isDirectory()) throw new ConfigError(`Local path is not a directory: ${localDir}`);
       const defaultName = localBasename(resolveLocal(localDir));
       const remotePath = context.path(remote || defaultName);
-      const body = createLocalTreeStream(localDir) as unknown as NonNullable<RequestInit['body']>;
-      const summary = await context.client().importTree(remotePath, body, Boolean(options.replace));
-      context.output.success(
-        `Pushed ${localDir} to ${remotePath} (${summarize(summary)})`,
-        { local: localDir, remote: remotePath, ...summary },
-      );
+      await uploadTree(context, localDir, remotePath, { replace: options.replace });
     }));
 
   program.command('pull')
@@ -436,42 +456,53 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
     .action(async (remote, local, options, command) => perform(runtime, command, async (context) => {
       const remotePath = context.path(remote);
       const localPath = local || remoteBasename(remotePath);
-      const exists = await localExists(localPath);
-      if (exists && !options.force) {
-        throw new ConfigError(`Local path already exists: ${localPath} (use --force to overwrite)`);
-      }
-      const response = await context.client().exportTree(remotePath);
-      if (!response.body) throw new ConfigError('Server returned an empty archive');
+      await downloadTree(context, remotePath, localPath, { force: options.force });
+    }));
 
-      const temporary = `${localPath}.airyfs-${process.pid}-${crypto.randomUUID()}.tmp`;
-      let summary;
-      try {
-        await mkdirLocal(temporary, { recursive: true });
-        summary = await extractLocalTree(response.body as ReadableStream<Uint8Array>, temporary);
-      } catch (error) {
-        await removeLocal(temporary, { recursive: true, force: true });
-        throw error;
-      }
-
-      const backup = `${localPath}.airyfs-backup-${process.pid}-${crypto.randomUUID()}`;
-      try {
-        if (exists) await renameLocal(localPath, backup);
-        try {
-          await renameLocal(temporary, localPath);
-        } catch (error) {
-          if (exists) await renameLocal(backup, localPath).catch(() => undefined);
-          throw error;
+  program.command('upload')
+    .argument('<local>')
+    .argument('[remote]')
+    .option('-r, --recursive', 'upload a directory tree')
+    .option('--replace', 'replace an existing remote directory (directories only)')
+    .option('--resume', 'resumable, checksummed upload in 1 MiB chunks (files only)')
+    .description('Upload a local file or directory, choosing the transfer automatically')
+    .action(async (local, remote, options, command) => perform(runtime, command, async (context) => {
+      const localStats = await statLocal(local);
+      if (localStats.isDirectory()) {
+        if (!options.recursive) {
+          throw new ConfigError(`${local} is a directory (use -r/--recursive to upload it)`);
         }
-      } catch (error) {
-        await removeLocal(temporary, { recursive: true, force: true });
-        throw error;
+        if (options.resume) throw new ConfigError('--resume applies to files, not directories');
+        const remotePath = context.path(remote || localBasename(resolveLocal(local)));
+        await uploadTree(context, local, remotePath, { replace: options.replace });
+        return;
       }
-      if (exists) await removeLocal(backup, { recursive: true, force: true });
+      if (!localStats.isFile()) throw new ConfigError(`Local path is not a file or directory: ${local}`);
+      if (options.replace) throw new ConfigError('--replace applies to directories, not files');
+      const remotePath = context.path(remote || localBasename(local));
+      await uploadFile(context, local, remotePath, { resume: options.resume, size: localStats.size });
+    }));
 
-      context.output.success(
-        `Pulled ${remotePath} to ${localPath} (${summarize(summary)})`,
-        { remote: remotePath, local: localPath, ...summary },
-      );
+  program.command('download')
+    .argument('<remote>')
+    .argument('[local]')
+    .option('-r, --recursive', 'download a directory tree')
+    .option('-f, --force', 'overwrite an existing local path')
+    .option('--resume', 'resumable, checksummed download with a partial sidecar (files only)')
+    .description('Download a remote file or directory, choosing the transfer automatically')
+    .action(async (remote, local, options, command) => perform(runtime, command, async (context) => {
+      const remotePath = context.path(remote);
+      const localPath = local || remoteBasename(remotePath);
+      const entry = await statRemote(context, remotePath);
+      if (entry.type === 'directory') {
+        if (!options.recursive) {
+          throw new ConfigError(`${remotePath} is a directory (use -r/--recursive to download it)`);
+        }
+        if (options.resume) throw new ConfigError('--resume applies to files, not directories');
+        await downloadTree(context, remotePath, localPath, { force: options.force });
+        return;
+      }
+      await downloadFile(context, remotePath, localPath, { force: options.force, resume: options.resume });
     }));
 }
 
@@ -487,6 +518,144 @@ async function localExists(path: string): Promise<boolean> {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false;
     throw error;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Shared transfer helpers
+//
+// `put`/`get` (files) and `push`/`pull` (directory trees) delegate here, and the
+// smart `upload`/`download` verbs reuse the same paths after detecting whether
+// the source is a file or a directory. One implementation keeps progress,
+// atomic-replace, and resumable behavior identical across every entry point.
+// ---------------------------------------------------------------------------
+
+async function uploadFile(
+  context: CommandContext,
+  local: string,
+  remotePath: string,
+  options: { resume?: boolean; size: number },
+): Promise<void> {
+  if (options.resume) {
+    const spinner = createSpinner(context, `Uploading ${local}`);
+    spinner?.start();
+    try {
+      const result = await resumableUpload(
+        context.client(), local, options.size, remotePath,
+        (progress) => updateTransfer(spinner, `Uploading ${local}`, progress),
+      );
+      spinner?.stop();
+      context.output.success(`Uploaded ${local} to ${remotePath}`, result);
+    } catch (error) {
+      spinner?.stop();
+      throw error;
+    }
+    return;
+  }
+  await context.client().writeFile(remotePath, createReadStream(local) as NonNullable<RequestInit['body']>);
+  context.output.success(`Uploaded ${local} to ${remotePath}`, { local, remote: remotePath });
+}
+
+async function downloadFile(
+  context: CommandContext,
+  remotePath: string,
+  localPath: string,
+  options: { force?: boolean; resume?: boolean },
+): Promise<void> {
+  if (options.resume) {
+    const spinner = createSpinner(context, `Downloading ${remotePath}`);
+    spinner?.start();
+    try {
+      const result = await resumableDownload(
+        context.client(), remotePath, localPath, { force: options.force },
+        (progress) => updateTransfer(spinner, `Downloading ${remotePath}`, progress),
+      );
+      spinner?.stop();
+      context.output.success(`Downloaded ${remotePath} to ${localPath}`, { remote: remotePath, local: localPath, ...result });
+    } catch (error) {
+      spinner?.stop();
+      throw error;
+    }
+    return;
+  }
+  if (!options.force) {
+    await access(localPath).then(() => {
+      throw new ConfigError(`Local path already exists: ${localPath} (use --force to overwrite)`);
+    }).catch((error: unknown) => {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+    });
+  }
+  const response = await context.client().readFile(remotePath);
+  const temporary = `${localPath}.airyfs-${process.pid}.tmp`;
+  try {
+    await pipeResponse(response, createWriteStream(temporary, { flags: 'wx' }));
+    if (options.force) await renameLocal(temporary, localPath);
+    else {
+      await link(temporary, localPath);
+      await removeLocal(temporary, { force: true });
+    }
+  } catch (error) {
+    await removeLocal(temporary, { force: true });
+    throw error;
+  }
+  context.output.success(`Downloaded ${remotePath} to ${localPath}`, { remote: remotePath, local: localPath });
+}
+
+async function uploadTree(
+  context: CommandContext,
+  localDir: string,
+  remotePath: string,
+  options: { replace?: boolean },
+): Promise<void> {
+  const body = createLocalTreeStream(localDir) as unknown as NonNullable<RequestInit['body']>;
+  const summary = await context.client().importTree(remotePath, body, Boolean(options.replace));
+  context.output.success(
+    `Pushed ${localDir} to ${remotePath} (${summarize(summary)})`,
+    { local: localDir, remote: remotePath, ...summary },
+  );
+}
+
+async function downloadTree(
+  context: CommandContext,
+  remotePath: string,
+  localPath: string,
+  options: { force?: boolean },
+): Promise<void> {
+  const exists = await localExists(localPath);
+  if (exists && !options.force) {
+    throw new ConfigError(`Local path already exists: ${localPath} (use --force to overwrite)`);
+  }
+  const response = await context.client().exportTree(remotePath);
+  if (!response.body) throw new ConfigError('Server returned an empty archive');
+
+  const temporary = `${localPath}.airyfs-${process.pid}-${crypto.randomUUID()}.tmp`;
+  let summary;
+  try {
+    await mkdirLocal(temporary, { recursive: true });
+    summary = await extractLocalTree(response.body as ReadableStream<Uint8Array>, temporary);
+  } catch (error) {
+    await removeLocal(temporary, { recursive: true, force: true });
+    throw error;
+  }
+
+  const backup = `${localPath}.airyfs-backup-${process.pid}-${crypto.randomUUID()}`;
+  try {
+    if (exists) await renameLocal(localPath, backup);
+    try {
+      await renameLocal(temporary, localPath);
+    } catch (error) {
+      if (exists) await renameLocal(backup, localPath).catch(() => undefined);
+      throw error;
+    }
+  } catch (error) {
+    await removeLocal(temporary, { recursive: true, force: true });
+    throw error;
+  }
+  if (exists) await removeLocal(backup, { recursive: true, force: true });
+
+  context.output.success(
+    `Pulled ${remotePath} to ${localPath} (${summarize(summary)})`,
+    { remote: remotePath, local: localPath, ...summary },
+  );
 }
 
 function registerExecCommand(program: Command, runtime: Runtime): void {
@@ -946,10 +1115,33 @@ function registerVolumeCommands(program: Command, runtime: Runtime): void {
   const volume = program.command('volume').description('Manage the selected volume');
   volume.command('create')
     .option('--chunk-size <size>', 'immutable chunk size (4k to 1m)', '256k')
+    .option('-p, --password [password]', 'set a volume password and log the session in with a scoped token')
     .description('Create or configure the selected volume')
     .action(async (options, command) => perform(runtime, command, async (context) => {
       const result = await context.client().createVolume(parseSize(options.chunkSize));
-      context.output.success(`Volume ${context.volume} uses ${formatSize(result.chunkSize)} chunks`, result);
+      if (options.password === undefined) {
+        context.output.success(`Volume ${context.volume} uses ${formatSize(result.chunkSize)} chunks`, result);
+        return;
+      }
+      if (context.shellMode && options.password === true) {
+        throw new ConfigError('Provide the password as an argument inside `airyfs shell`: volume create --password <pw>');
+      }
+      const password = await requiredInput(
+        runtime,
+        typeof options.password === 'string' ? options.password : undefined,
+        'Volume password: ',
+        'password',
+      );
+      if (password.length < 8) throw new ConfigError('Password must be at least 8 characters');
+      // Set the password (needs the current root/admin token), then downgrade the
+      // session to a scoped password token so day-to-day use is least-privilege.
+      await context.client().setVolumePassword(password);
+      const minted = await context.client().loginWithPassword(password);
+      await context.sessions.setToken(context.named.name, minted.token);
+      context.output.success(
+        `Volume ${context.volume} uses ${formatSize(result.chunkSize)} chunks; password set and session logged in`,
+        { ...result, passwordSet: true, capability: minted.id, expires: minted.expires },
+      );
     }));
 
   volume.command('info')
@@ -1064,8 +1256,31 @@ function registerAuthCommands(program: Command, runtime: Runtime): void {
 
   auth.command('login')
     .argument('[token]', 'bearer token (root secret or capability)')
+    .option('-p, --password [password]', 'log in with the volume password instead of a token')
+    .option('--expires <duration>', 'token lifetime for password login, such as 24h')
     .description('Authenticate the active session and store its token')
-    .action(async (token, _options, command) => perform(runtime, command, async (context) => {
+    .action(async (token, options, command) => perform(runtime, command, async (context) => {
+      if (options.password !== undefined) {
+        if (context.shellMode && options.password === true) {
+          throw new ConfigError('Provide the password as an argument inside `airyfs shell`: auth login --password <pw>');
+        }
+        const password = await requiredInput(
+          runtime,
+          typeof options.password === 'string' ? options.password : undefined,
+          'Volume password: ',
+          'password',
+        );
+        const expiresInSeconds = options.expires ? durationSeconds(options.expires) : undefined;
+        const minted = await context.client().loginWithPassword(password, expiresInSeconds);
+        await context.sessions.setToken(context.named.name, minted.token);
+        context.output.success(`Logged in to ${context.volume} with a password-scoped token`, {
+          session: context.named.name,
+          volume: context.volume,
+          capability: minted.id,
+          expires: minted.expires,
+        });
+        return;
+      }
       const candidate = await requiredInput(runtime, token, 'Token: ', 'token');
       const probe = new AiryFSClient(context.endpoint, context.volume, undefined, candidate);
       const status = await probe.authStatus();
@@ -1076,6 +1291,20 @@ function registerAuthCommands(program: Command, runtime: Runtime): void {
         auth: status.auth,
         capability: status.capability,
       });
+    }));
+
+  auth.command('passwd')
+    .argument('[password]', 'new volume password (min 8 characters)')
+    .option('--current <password>', 'current password, when rotating without a root/admin token')
+    .description('Set or rotate the volume password (root, admin, or current password required)')
+    .action(async (password, options, command) => perform(runtime, command, async (context) => {
+      if (context.shellMode && password === undefined) {
+        throw new ConfigError('Provide the new password as an argument inside `airyfs shell`: auth passwd <pw>');
+      }
+      const next = await requiredInput(runtime, password, 'New volume password: ', 'password');
+      if (next.length < 8) throw new ConfigError('Password must be at least 8 characters');
+      const status = await context.client().setVolumePassword(next, options.current);
+      context.output.success(`Set the volume password for ${status.volume}`, status);
     }));
 
   auth.command('logout')
@@ -1222,6 +1451,279 @@ function registerKvCommands(program: Command, runtime: Runtime): void {
     }));
 }
 
+// ---------------------------------------------------------------------------
+// Web hosting (sites and shares)
+// ---------------------------------------------------------------------------
+
+/** Build the public URL for a volume's site root. */
+function siteUrl(endpoint: string, volume: string): string {
+  return `${endpoint}/s/${encodeURIComponent(volume)}/`;
+}
+
+/** Build the public URL for a share link. */
+function shareUrl(endpoint: string, volume: string, id: string): string {
+  return `${endpoint}/d/${encodeURIComponent(volume)}/${encodeURIComponent(id)}`;
+}
+
+function registerSiteCommands(program: Command, runtime: Runtime): void {
+  const site = program.command('site').description('Publish the volume as a static website');
+
+  site.command('publish')
+    .argument('[path]', 'volume subtree to serve as the web root', '/')
+    .option('--index <file>', 'directory index document', 'index.html')
+    .option('--spa', 'serve the index document for unmatched routes (single-page apps)')
+    .option('--cache <value>', 'Cache-Control header for served files')
+    .description('Publish (or update) the volume web root for public serving')
+    .action(async (path, options, command) => perform(runtime, command, async (context) => {
+      const info = await context.client().publishSite({
+        path: context.path(path),
+        indexDocument: options.index,
+        spa: Boolean(options.spa),
+        cacheControl: options.cache,
+      });
+      context.output.success(
+        `Published ${context.volume} at ${siteUrl(context.endpoint, context.volume)}`,
+        { ...info, url: siteUrl(context.endpoint, context.volume) },
+      );
+    }));
+
+  site.command('status')
+    .description('Show the published-site status')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const status = await context.client().getSite();
+      if (context.output.json) {
+        context.output.value({ ...status, url: status.published ? siteUrl(context.endpoint, context.volume) : null });
+        return;
+      }
+      if (!status.published || !status.site) {
+        context.output.value('No site published');
+        return;
+      }
+      context.output.table(['Field', 'Value'], [
+        ['URL', siteUrl(context.endpoint, context.volume)],
+        ['Root', status.site.pathPrefix],
+        ['Index', status.site.indexDocument],
+        ['SPA', status.site.spa ? 'yes' : 'no'],
+        ['Cache-Control', status.site.cacheControl ?? '-'],
+      ]);
+    }));
+
+  site.command('unpublish')
+    .description('Remove the published site')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().unpublishSite();
+      context.output.success(result.removed ? `Unpublished ${context.volume}` : 'No site was published', result);
+    }));
+
+  const share = program.command('share').description('Create public share links for individual files');
+
+  share.command('create', { isDefault: true })
+    .argument('<path>', 'file to share')
+    .option('--expires <duration>', 'link lifetime, such as 24h or 30m')
+    .option('--cache <value>', 'Cache-Control header for the shared file')
+    .description('Create a public share link for a file')
+    .action(async (path, options, command) => perform(runtime, command, async (context) => {
+      const info = await context.client().createShare({
+        path: context.path(path),
+        expiresInSeconds: options.expires ? durationSeconds(options.expires) : undefined,
+        cacheControl: options.cache,
+      });
+      const url = shareUrl(context.endpoint, context.volume, info.id);
+      if (context.output.json) {
+        context.output.value({ ...info, url });
+        return;
+      }
+      context.output.success(`Shared ${info.path}`, { ...info, url });
+      context.output.value(url);
+    }));
+
+  share.command('list')
+    .alias('ls')
+    .description('List share links')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const shares = await context.client().listShares();
+      if (context.output.json) {
+        context.output.value(shares.map((info) => ({ ...info, url: shareUrl(context.endpoint, context.volume, info.id) })));
+        return;
+      }
+      context.output.table(
+        ['Id', 'Path', 'Expires', 'Created'],
+        shares.map((info) => [
+          info.id,
+          info.path,
+          info.expiresAt ? formatTime(info.expiresAt) : 'never',
+          formatTime(info.createdAt),
+        ]),
+      );
+    }));
+
+  share.command('delete')
+    .alias('rm')
+    .argument('<id>')
+    .description('Delete a share link')
+    .action(async (id, _options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().deleteShare(id);
+      context.output.success(result.removed ? `Deleted share ${id}` : `No share ${id}`, result);
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Deployment / bootstrap
+// ---------------------------------------------------------------------------
+
+export interface ProvisionResult {
+  env: string;
+  url: string | null;
+  secret: string;
+  accountId: string;
+}
+
+/** Walk up from `start` to find the AiryFS repository root (worker + provision script). */
+export function findRepoRoot(start: string): string | null {
+  let dir = resolveLocal(start);
+  while (true) {
+    if (
+      existsSync(joinLocal(dir, 'worker', 'wrangler.jsonc')) &&
+      existsSync(joinLocal(dir, 'scripts', 'provision.mjs'))
+    ) {
+      return dir;
+    }
+    const parent = localDirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/** Parse the JSON result line emitted by `scripts/provision.mjs --json`. */
+export function parseProvisionOutput(text: string): ProvisionResult {
+  for (const line of text.split('\n').reverse()) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as { airyfsProvision?: ProvisionResult };
+      if (parsed.airyfsProvision) return parsed.airyfsProvision;
+    } catch {
+      // Not the JSON result line; keep scanning older lines.
+    }
+  }
+  throw new ConfigError('Could not parse the provisioning result from the deploy output');
+}
+
+/** Run the repo-local provisioner, streaming its progress and returning the parsed result. */
+function runProvision(
+  runtime: Runtime,
+  repoRoot: string,
+  env: string,
+  flags: string[],
+): Promise<ProvisionResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [joinLocal(repoRoot, 'scripts', 'provision.mjs'), env, '--json', ...flags],
+      { cwd: repoRoot, stdio: ['inherit', 'pipe', 'inherit'] },
+    );
+    let stdout = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+      (runtime.stderr || process.stderr).write(chunk);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new ConfigError(`Deploy failed (provision.mjs exited with code ${code})`));
+        return;
+      }
+      try {
+        resolve(parseProvisionOutput(stdout));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
+function registerDeployCommands(program: Command, runtime: Runtime): void {
+  program.command('deploy')
+    .argument('[env]', 'deployment environment (int or prod)', 'int')
+    .option('--as <name>', 'session to create or update for the deployed endpoint', 'work')
+    .option('--volume <name>', 'volume for the created session', 'default')
+    .option('--allow-dirty', 'allow deploying from a dirty git tree (non-prod only)')
+    .option('--allow-prod', 'confirm a production deployment')
+    .description('Deploy the AiryFS Worker to Cloudflare and create a session for it')
+    .action(async (env, options, command) => performConfig(runtime, command, async (output) => {
+      const result = await deployAndCreateSession(runtime, output, env, options);
+      output.success(
+        `Deployed ${result.env} and configured session ${options.as} at ${result.url}`,
+        { session: options.as, endpoint: result.url, volume: options.volume, env: result.env },
+      );
+    }));
+
+  program.command('init')
+    .argument('[env]', 'deployment environment (int or prod)', 'int')
+    .option('--as <name>', 'session to create for the deployment', 'work')
+    .option('--volume <name>', 'volume to create', 'default')
+    .option('--password [password]', 'set a volume password (prompted when omitted)')
+    .option('--chunk-size <size>', 'immutable chunk size (4k to 1m)', '256k')
+    .option('--allow-dirty', 'allow deploying from a dirty git tree (non-prod only)')
+    .option('--allow-prod', 'confirm a production deployment')
+    .description('Deploy the Worker, create a session, and provision a secured volume in one step')
+    .action(async (env, options, command) => performConfig(runtime, command, async (output) => {
+      const result = await deployAndCreateSession(runtime, output, env, options);
+      const rootClient = new AiryFSClient(result.url!, options.volume, undefined, result.secret);
+      const created = await rootClient.createVolume(parseSize(options.chunkSize));
+
+      const password = await requiredInput(
+        runtime,
+        typeof options.password === 'string' ? options.password : undefined,
+        'Volume password: ',
+        'password',
+      );
+      if (password.length < 8) throw new ConfigError('Password must be at least 8 characters');
+      await rootClient.setVolumePassword(password);
+      const minted = await rootClient.loginWithPassword(password);
+      await runtime.sessions.setToken(options.as, minted.token);
+
+      output.success(
+        `Ready: session ${options.as} points at volume ${options.volume} (${formatSize(created.chunkSize)} chunks) with a password-scoped token`,
+        { session: options.as, endpoint: result.url, volume: options.volume, env: result.env, capability: minted.id },
+      );
+    }));
+}
+
+/** Shared deploy step: provision the Worker and create/select a session holding the root secret. */
+async function deployAndCreateSession(
+  runtime: Runtime,
+  output: Output,
+  env: string,
+  options: { as: string; volume: string; allowDirty?: boolean; allowProd?: boolean },
+): Promise<ProvisionResult> {
+  const repoRoot = findRepoRoot(process.cwd());
+  if (!repoRoot) {
+    throw new ConfigError('`airy deploy` must run from within the AiryFS repository (worker/ and scripts/ not found)');
+  }
+  const flags: string[] = [];
+  if (options.allowDirty) flags.push('--allow-dirty');
+  if (options.allowProd) flags.push('--allow-prod');
+
+  const result = await runProvision(runtime, repoRoot, env, flags);
+  if (!result.url) {
+    throw new ConfigError('Deploy succeeded but no workers.dev URL was found in the output');
+  }
+
+  const existing = await runtime.sessions.list();
+  if (existing.sessions.some((entry) => entry.name === options.as)) {
+    await runtime.sessions.edit(options.as, { endpoint: result.url, volume: options.volume });
+  } else {
+    await runtime.sessions.create(options.as, { endpoint: result.url, volume: options.volume });
+  }
+  await runtime.sessions.use(options.as);
+  // The deployment secret is the root credential; store it so volume/password setup works immediately.
+  await runtime.sessions.setToken(options.as, result.secret);
+  runtime.onSessionEvent?.({ type: 'select', name: options.as });
+  output.value(output.dim(`Session ${options.as} now targets ${result.url}`));
+  return result;
+}
+
 async function perform(runtime: Runtime, command: Command, handler: Handler): Promise<void> {
   const globals = command.optsWithGlobals<GlobalOptions>();
   try {
@@ -1358,11 +1860,17 @@ function durationSeconds(value: string): number {
 }
 
 function parseDuration(value: string): number {
-  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m)?$/i.exec(value.trim());
+  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?$/i.exec(value.trim());
   if (!match) throw new ConfigError(`Invalid duration: ${value}`);
   const unit = (match[2] || 'ms').toLowerCase();
-  const multiplier = unit === 'm' ? 60_000 : unit === 's' ? 1_000 : 1;
-  return Number(match[1]) * multiplier;
+  const multipliers: Record<string, number> = {
+    ms: 1,
+    s: 1_000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+  };
+  return Number(match[1]) * multipliers[unit];
 }
 
 function commandForExec(parts: string[]): string {
