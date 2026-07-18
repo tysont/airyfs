@@ -160,6 +160,7 @@ airyfs ls ../tests
 | `trash restore <id> [destination]` | Restore a trash entry |
 | `trash purge <id>` | Permanently delete a trash entry |
 | `undo` | Restore the most recently trashed path |
+| `exec --pty <command>` | Run an interactive command with raw input and terminal resizing |
 | `volume quota` | Show quotas; set with `--bytes`, `--inodes`, or `unlimited` |
 
 `cat` emits raw bytes and therefore cannot be combined with `--json` or `--quiet`. Use `get` for binary files that should not be written directly to the terminal.

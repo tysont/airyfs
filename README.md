@@ -558,6 +558,8 @@ Direct API and CLI deletes move paths into durable per-volume trash by default. 
 
 Volumes are mountable over WebDAV at `/dav/<volume>/`. The dependency-free adapter supports `OPTIONS`, finite `PROPFIND`, `GET`, `HEAD`, streaming `PUT`, `MKCOL`, recoverable `DELETE`, same-volume `MOVE` and bounded recursive `COPY`, no-op `PROPPATCH`, and Finder-compatible `LOCK`/`UNLOCK`. It advertises WebDAV classes 1 and 2, supports HTTP ranges and validators, hides internal trash, and enforces bearer capability scopes. When authentication is enabled, WebDAV also accepts Basic authentication with the root credential, a capability token, or the volume password.
 
+`airy exec --pty <command>` runs interactive terminal applications against the mounted volume. The CLI obtains a 30-second single-use ticket, upgrades to a binary WebSocket, forwards raw terminal input and resize events, and restores local terminal mode on every exit path. PTY sessions share the volume's single execution slot with buffered, streaming, and durable commands.
+
 ```sh
 # macOS Finder: Go > Connect to Server
 https://example.workers.dev/dav/my-volume/

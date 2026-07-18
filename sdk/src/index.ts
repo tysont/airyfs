@@ -5,6 +5,7 @@ export { AiryFSClient } from './client.js';
 export { AiryFSApiError, AiryFSTransportError, responseError } from './errors.js';
 export { NdjsonDecoder, NdjsonError, decodeNdjsonStream } from './ndjson.js';
 export { encodeRemotePath, remoteBasename, remoteDirname, resolveRemotePath } from './paths.js';
+export { openPty } from './pty.js';
 export {
   RESUMABLE_CHUNK_BYTES,
   drainJobLogs,

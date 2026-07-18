@@ -219,6 +219,10 @@ export class AiryFSClient {
     });
   }
 
+  createPtyTicket(): Promise<{ ticket: string; expiresAt: number }> {
+    return this.json<{ ticket: string; expiresAt: number }>(`${this.volumeBase}/exec/pty-ticket`, { method: 'POST' });
+  }
+
   beginUpload(path: string, size: number, checksum: string): Promise<UploadStatus> {
     return this.json<UploadStatus>(this.resourcePath('uploads', path), {
       method: 'POST',

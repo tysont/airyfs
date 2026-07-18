@@ -979,6 +979,7 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
     .passThroughOptions()
     .option('--no-wait', 'fail immediately if another command is running')
     .option('--no-stream', 'disable live streaming and buffer the full result (text mode)')
+    .option('--pty', 'run interactively in a remote pseudo-terminal')
     .option('--timeout <duration>', 'maximum startup and busy-wait time', '90s')
     .description('Execute a command in the volume Container')
     .action(async (parts: string[], options, command) => perform(runtime, command, async (context) => {
@@ -996,6 +997,11 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
         // Resolve startup failures with a retry-safe no-op before submitting the
         // user command, whose outcome can be ambiguous after a transport error.
         await execWithRetry(context, ':', deadline, true);
+        if (options.pty) {
+          spinner?.stop();
+          await runPtyExec(context, runtime, fullCommand);
+          return;
+        }
         if (streaming) {
           await runStreamingExec(context, runtime, fullCommand, spinner);
           return;
@@ -1014,6 +1020,38 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
         throw error;
       }
     }));
+}
+
+async function runPtyExec(context: CommandContext, runtime: Runtime, fullCommand: string): Promise<void> {
+  if (context.shellMode) throw new ConfigError('`exec --pty` is unavailable inside `airyfs shell`');
+  if (context.output.json || context.output.quiet) throw new ConfigError('`exec --pty` cannot be combined with --json or --quiet');
+  const input = context.stdin as NodeJS.ReadStream;
+  const output = context.output.stdout as NodeJS.WriteStream;
+  if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== 'function') {
+    throw new ConfigError('`exec --pty` requires an interactive terminal');
+  }
+
+  const session = await context.client().openPty();
+  const resize = (): void => session.resize(output.columns || 80, output.rows || 24);
+  const onInput = (chunk: Buffer | string): void => session.write(
+    typeof chunk === 'string' ? Buffer.from(chunk) : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength),
+  );
+  const removeData = session.onData((data) => output.write(data));
+  input.setRawMode(true);
+  input.resume();
+  input.on('data', onInput);
+  process.on('SIGWINCH', resize);
+  try {
+    resize();
+    session.write(new TextEncoder().encode(`${fullCommand}\r`));
+    runtime.exitCode = (await session.closed).exitCode;
+  } finally {
+    input.removeListener('data', onInput);
+    process.removeListener('SIGWINCH', resize);
+    removeData();
+    input.setRawMode(false);
+    session.close();
+  }
 }
 
 /**

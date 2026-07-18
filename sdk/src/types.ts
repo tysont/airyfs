@@ -185,6 +185,16 @@ export interface TailFileOptions {
   signal?: AbortSignal;
   onGap?: (page: ChangePage) => void;
 }
+export interface PtyExit { exitCode: number; signal?: number }
+export interface PtySession {
+  write(data: Uint8Array | string): void;
+  resize(cols: number, rows: number): void;
+  signal(name: string): void;
+  onData(listener: (data: Uint8Array) => void): () => void;
+  readonly closed: Promise<PtyExit>;
+  close(): void;
+}
+export interface OpenPtyOptions { webSocket?: typeof WebSocket }
 export interface WaitForJobOptions {
   interval?: number;
   after?: number;

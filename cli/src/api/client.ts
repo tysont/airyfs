@@ -4,6 +4,7 @@
 import { AiryFSTransportError, responseError } from './errors.js';
 import { decodeNdjsonStream } from './ndjson.js';
 import { encodeRemotePath } from './paths.js';
+import { connectPty, type PtySession } from './pty.js';
 import type {
   AuthStatus,
   AssetInfo,
@@ -286,6 +287,15 @@ export class AiryFSClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
     });
+  }
+
+  async openPty(WebSocketImpl: typeof WebSocket = WebSocket): Promise<PtySession> {
+    const { ticket } = await this.json<{ ticket: string }>(`${this.volumeBase}/exec/pty-ticket`, { method: 'POST' });
+    const url = new URL(this.endpoint);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.pathname = `${this.volumeBase}/exec/pty`;
+    url.search = new URLSearchParams({ ticket }).toString();
+    return connectPty(url, WebSocketImpl);
   }
 
   // --- Durable jobs -------------------------------------------------------

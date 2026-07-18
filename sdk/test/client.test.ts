@@ -69,6 +69,7 @@ describe('AiryFSClient', () => {
     for await (const event of await client.execStream('true')) execEvents.push(event);
     expect(execEvents).toHaveLength(2);
     await client.cancelExec('run');
+    await client.createPtyTicket();
     await client.beginUpload('/big', 3, 'a'.repeat(64));
     await client.uploadStatus('/big');
     await client.appendUpload('/big', 0, 'b'.repeat(64), new Uint8Array([1, 2, 3]));
