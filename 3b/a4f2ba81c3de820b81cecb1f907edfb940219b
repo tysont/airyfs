@@ -1,0 +1,31 @@
+worker/src/files-api.ts
+  s_e381e485077b84::t_48e14f70640c0f 146-148
+worker/src/index.ts
+  s_e381e485077b84::t_d5ef4cd4772ab7 143-144,418-440,1862-1871,2043-2054
+worker/src/pty-relay.ts
+  s_e381e485077b84::t_958b1680d63b71 1-71
+worker/src/pty-tickets.ts
+  s_e381e485077b84::t_c80716951c5e04 1-30
+worker/src/schema.ts
+  s_e381e485077b84::t_fd6e7ea70db6bc 11,243,281
+worker/test/files-api.test.ts
+  s_e381e485077b84::t_0270ee99ed416b 67-68
+worker/test/pty-relay.test.ts
+  s_e381e485077b84::t_ef5f96edd5d8d9 1-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3ba4f2ba81c3de820b81cecb1f907edfb940219b",
+  "prompts": {},
+  "sessions": {
+    "s_e381e485077b84": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08aa0daacffejmkJ8qy2F936Tn",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
