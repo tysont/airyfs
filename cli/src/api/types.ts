@@ -38,6 +38,22 @@ export interface VolumeInfo {
   chunkSize: number;
 }
 
+export interface QuotaInfo {
+  bytes: number | null;
+  inodes: number | null;
+}
+
+export interface TrashEntry {
+  id: string;
+  originalPath: string;
+  trashPath: string;
+  type: 'file' | 'directory' | 'symlink';
+  size: number;
+  deletedAt: number;
+}
+
+export interface RestoredTrashEntry extends TrashEntry { restoredPath: string }
+
 export interface TreeSummary {
   files: number;
   directories: number;
@@ -88,6 +104,13 @@ export interface ChecksumResult {
   ino: number;
 }
 
+export interface AssetInfo {
+  algorithm: 'sha256';
+  checksum: string;
+  size: number;
+  created: boolean;
+}
+
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
 
 export interface Job {
@@ -120,6 +143,18 @@ export interface JobLogPage {
   next: number | null;
 }
 
+export interface JobSchedule {
+  id: string;
+  name: string;
+  cron: string;
+  command: string;
+  cwd: string;
+  enabled: boolean;
+  nextRun: number | null;
+  lastRun: number | null;
+  createdAt: number;
+}
+
 export type ChangeType = 'create' | 'modify' | 'remove' | 'rename';
 
 export interface ChangeEvent {
@@ -147,6 +182,64 @@ export interface ChangeQuery {
   signal?: AbortSignal;
 }
 
+export type WebhookEvent = ChangeType;
+
+export interface WebhookInfo {
+  id: string;
+  url: string;
+  pathPrefix: string;
+  events: WebhookEvent[];
+  createdAt: number;
+}
+
+export interface CreatedWebhook extends WebhookInfo {
+  secret: string;
+}
+
+export interface CreateWebhookInput {
+  url: string;
+  pathPrefix?: string;
+  events?: WebhookEvent[];
+}
+
+export interface SearchResult {
+  path: string;
+  type: 'file' | 'directory' | 'symlink';
+  line?: number;
+  column?: number;
+  text?: string;
+}
+
+export interface SearchResponse {
+  results: SearchResult[];
+  truncated: boolean;
+  scannedEntries: number;
+  scannedBytes: number;
+}
+
+export interface SearchInput {
+  mode: 'find' | 'glob' | 'grep';
+  path?: string;
+  pattern: string;
+  regex?: boolean;
+  ignoreCase?: boolean;
+  limit?: number;
+}
+
+export interface TreeViewEntry {
+  path: string;
+  name: string;
+  depth: number;
+  type: 'file' | 'directory' | 'symlink';
+  size: number;
+}
+
+export interface TreeViewResponse {
+  root: string;
+  entries: TreeViewEntry[];
+  truncated: boolean;
+}
+
 export interface PerfInfo {
   pipelineRequests: number;
   sqlStatements: number;
@@ -163,7 +256,14 @@ export interface ContainerHealth {
 }
 
 export interface UsageInfo {
-  filesystem: Record<string, unknown>;
+  filesystem: {
+    bytesUsed: number;
+    inodes: number;
+    quotaBytes: number | null;
+    quotaInodes: number | null;
+    bytesAvailable: number | null;
+    inodesAvailable: number | null;
+  };
   sqliteBytes: number;
   container: ContainerHealth;
   hrana: PerfInfo;
@@ -197,6 +297,7 @@ export interface SiteInfo {
   pathPrefix: string;
   indexDocument: string;
   spa: boolean;
+  directoryListing: boolean;
   cacheControl: string | null;
   createdAt: number;
 }
@@ -210,6 +311,7 @@ export interface PublishSiteInput {
   path: string;
   indexDocument?: string;
   spa?: boolean;
+  directoryListing?: boolean;
   cacheControl?: string;
 }
 

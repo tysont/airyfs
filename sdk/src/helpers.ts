@@ -12,6 +12,7 @@ import type {
   WaitForJobOptions,
   WaitForJobResult,
   WatchChangesOptions,
+  TailFileOptions,
   UploadCompleteResult,
 } from './types.js';
 
@@ -51,6 +52,110 @@ export async function* watchChanges(
     for (const event of page.events) yield event;
     cursor = page.cursor;
   }
+}
+
+/** Yield a file's trailing bytes, optionally following appends via the change feed. */
+export async function* tailFile(
+  client: AiryFSClient,
+  path: string,
+  options: TailFileOptions = {},
+): AsyncGenerator<Uint8Array> {
+  if (options.lines !== undefined && options.bytes !== undefined) throw new Error('lines and bytes are mutually exclusive');
+  const lines = options.lines ?? (options.bytes === undefined ? 10 : undefined);
+  if (lines !== undefined && (!Number.isSafeInteger(lines) || lines < 0)) throw new Error('lines must be a non-negative integer');
+  if (options.bytes !== undefined && (!Number.isSafeInteger(options.bytes) || options.bytes < 0)) {
+    throw new Error('bytes must be a non-negative integer');
+  }
+
+  let cursor = (await client.getChanges({ path, since: 'latest', signal: options.signal })).cursor;
+  let offset = 0;
+  const initial = await trailingBytes(client, path, lines, options.bytes, options.signal);
+  offset = initial.size;
+  if (initial.data.byteLength > 0) yield initial.data;
+  if (!options.follow) return;
+
+  while (!options.signal?.aborted) {
+    let page;
+    try {
+      page = await client.getChanges({ path, since: cursor, wait: options.wait ?? 25_000, signal: options.signal });
+    } catch (error) {
+      if (options.signal?.aborted) return;
+      throw error;
+    }
+    if (page.gap) options.onGap?.(page);
+    cursor = page.cursor;
+    if (!page.events.some((event) => event.path === path || event.oldPath === path)) continue;
+    try {
+      const head = await client.headFile(path, options.signal);
+      const size = responseSize(head);
+      if (size < offset) offset = 0;
+      if (size > offset) {
+        const response = await client.readFile(path, `bytes=${offset}-`, options.signal);
+        const data = new Uint8Array(await response.arrayBuffer());
+        offset = responseTotal(response, offset + data.byteLength);
+        if (data.byteLength > 0) yield data;
+      }
+    } catch (error) {
+      if (error instanceof AiryFSApiError && error.code === 'ENOENT') {
+        if (!options.retry) return;
+        offset = 0;
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+async function trailingBytes(
+  client: AiryFSClient,
+  path: string,
+  lines: number | undefined,
+  bytes: number | undefined,
+  signal?: AbortSignal,
+): Promise<{ data: Uint8Array; size: number }> {
+  const head = await client.headFile(path, signal);
+  const size = responseSize(head);
+  if (size === 0 || bytes === 0 || lines === 0) return { data: new Uint8Array(), size };
+  if (bytes !== undefined) {
+    const response = await client.readFile(path, `bytes=-${Math.min(bytes, size)}`, signal);
+    return { data: new Uint8Array(await response.arrayBuffer()), size: responseTotal(response, size) };
+  }
+
+  let length = Math.min(size, 64 * 1024);
+  let data = new Uint8Array();
+  while (true) {
+    const response = await client.readFile(path, `bytes=-${length}`, signal);
+    data = new Uint8Array(await response.arrayBuffer());
+    if (length >= size || newlineCount(data) > (lines ?? 10)) {
+      return { data: lastLines(data, lines ?? 10), size: responseTotal(response, size) };
+    }
+    length = Math.min(size, length * 2);
+  }
+}
+
+function responseSize(response: Response): number {
+  const value = Number(response.headers.get('Content-Length'));
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error('File response is missing a valid Content-Length');
+  return value;
+}
+
+function responseTotal(response: Response, fallback: number): number {
+  const match = response.headers.get('Content-Range')?.match(/\/(\d+)$/);
+  return match ? Number(match[1]) : fallback;
+}
+
+function newlineCount(data: Uint8Array): number {
+  let count = 0;
+  for (const byte of data) if (byte === 10) count++;
+  return count;
+}
+
+function lastLines(data: Uint8Array, lines: number): Uint8Array {
+  let remaining = lines;
+  let index = data.length;
+  if (index > 0 && data[index - 1] === 10) index--;
+  while (index > 0 && remaining > 0) if (data[--index] === 10) remaining--;
+  return data.subarray(remaining === 0 ? index + 1 : 0);
 }
 
 /** Yield every currently available persisted job log entry in sequence order. */

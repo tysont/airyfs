@@ -7,6 +7,7 @@ import {
   execStreamWithId,
   followJobLogs,
   resumableUploadBlob,
+  tailFile,
   waitForJob,
   watchChanges,
   type ChangePage,
@@ -39,6 +40,33 @@ describe('watchChanges', () => {
     expect(seen.map((event) => event.seq)).toEqual([5]);
     expect(gap).toHaveBeenCalledOnce();
     expect((client.getChanges as ReturnType<typeof vi.fn>).mock.calls[1][0]).toMatchObject({ since: 4, wait: 25_000 });
+  });
+});
+
+describe('tailFile', () => {
+  it('returns trailing lines and follows appended bytes', async () => {
+    const controller = new AbortController();
+    const client = {
+      getChanges: vi.fn()
+        .mockResolvedValueOnce({ events: [], cursor: 2, latest: 2, oldest: 1, gap: false })
+        .mockResolvedValueOnce({
+          events: [{ seq: 3, type: 'modify', path: '/log', oldPath: null, ino: 2, timestamp: 1 }],
+          cursor: 3, latest: 3, oldest: 1, gap: false,
+        }),
+      headFile: vi.fn()
+        .mockResolvedValueOnce(new Response(null, { headers: { 'Content-Length': '8' } }))
+        .mockResolvedValueOnce(new Response(null, { headers: { 'Content-Length': '10' } })),
+      readFile: vi.fn()
+        .mockResolvedValueOnce(new Response('b\nc\n', { status: 206, headers: { 'Content-Range': 'bytes 4-7/8' } }))
+        .mockResolvedValueOnce(new Response('d\n', { status: 206, headers: { 'Content-Range': 'bytes 8-9/10' } })),
+    } as unknown as AiryFSClient;
+    const chunks: string[] = [];
+    for await (const chunk of tailFile(client, '/log', { lines: 2, follow: true, signal: controller.signal })) {
+      chunks.push(new TextDecoder().decode(chunk));
+      if (chunks.length === 2) controller.abort();
+    }
+    expect(chunks).toEqual(['b\nc\n', 'd\n']);
+    expect(client.readFile).toHaveBeenLastCalledWith('/log', 'bytes=8-', controller.signal);
   });
 });
 

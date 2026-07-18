@@ -480,6 +480,9 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `PATCH` | `/v1/volumes/V/uploads/path` | Append one checksummed chunk at `Upload-Offset` |
 | `PUT` | `/v1/volumes/V/uploads/path` | Verify and atomically publish a complete upload |
 | `DELETE` | `/v1/volumes/V/uploads/path` | Abort an upload and remove its hidden partial file |
+| `POST` | `/v1/volumes/V/browser-uploads/path` | Stream a raw browser `File` body using a write capability scoped to the destination path |
+| `GET` | `/v1/volumes/V/assets/SHA256` | Stream an immutable content-addressed asset with long-lived cache headers |
+| `PUT` | `/v1/volumes/V/assets/SHA256` | Verify and atomically publish content matching the SHA-256 URL |
 | `GET` | `/v1/volumes/V/snapshots` | List named full-volume snapshots |
 | `POST` | `/v1/volumes/V/snapshots` | Create a snapshot with optional name and note |
 | `GET` | `/v1/volumes/V/snapshots/ID/diff?against=live` | Diff against live state or another snapshot |
@@ -491,7 +494,18 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `GET` | `/v1/volumes/V/jobs/ID` | Return durable job state and terminal result |
 | `GET` | `/v1/volumes/V/jobs/ID/logs?after=N` | Page persisted binary-safe stdout/stderr |
 | `POST` | `/v1/volumes/V/jobs/ID/cancel` | Cancel queued or running work |
+| `GET` | `/v1/volumes/V/schedules` | List UTC cron schedules |
+| `POST` | `/v1/volumes/V/schedules` | Create an enabled schedule `{"name","cron","command","cwd"}` |
+| `POST` | `/v1/volumes/V/schedules/ID/enable` | Enable and recalculate the next run |
+| `POST` | `/v1/volumes/V/schedules/ID/disable` | Disable a schedule |
+| `DELETE` | `/v1/volumes/V/schedules/ID` | Delete a schedule |
 | `GET` | `/v1/volumes/V/changes/path?since=N&wait=25000` | Read or long-poll ordered filesystem changes |
+| `GET` | `/v1/volumes/V/webhooks` | List change-feed webhook subscriptions without signing secrets |
+| `POST` | `/v1/volumes/V/webhooks` | Create a durable signed webhook `{"url","pathPrefix","events"}` |
+| `DELETE` | `/v1/volumes/V/webhooks/ID` | Delete a webhook and its pending deliveries |
+| `POST` | `/v1/volumes/V/search` | Bounded server-side `find`, glob, or grep under a path prefix |
+| `GET` | `/v1/volumes/V/tree/P` | Bounded structured directory tree; accepts `depth` and `limit` |
+| `GET`, `PUT` | `/v1/volumes/V/quota` | Read or configure logical-byte and inode limits |
 | `GET` | `/v1/volumes/V/auth` | Report whether deployment auth is enabled and a volume password is set |
 | `POST` | `/v1/volumes/V/auth/password` | Set or rotate the volume password (root, admin, or current password) |
 | `POST` | `/v1/volumes/V/auth/login` | Exchange the volume password for a scoped capability token |
@@ -499,7 +513,7 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `POST` | `/v1/volumes/V/capabilities` | Mint a scoped capability using root access |
 | `DELETE` | `/v1/volumes/V/capabilities/ID` | Revoke a capability using root access |
 | `GET` | `/v1/volumes/V/sites` | Report the published-site status |
-| `PUT` | `/v1/volumes/V/sites` | Publish or update the public web root `{"path","indexDocument","spa","cacheControl"}` |
+| `PUT` | `/v1/volumes/V/sites` | Publish or update the public web root `{"path","indexDocument","spa","directoryListing","cacheControl"}` |
 | `DELETE` | `/v1/volumes/V/sites` | Unpublish the site |
 | `GET` | `/v1/volumes/V/shares` | List share links |
 | `POST` | `/v1/volumes/V/shares` | Create a share link `{"path","expiresInSeconds","cacheControl"}` |
@@ -519,9 +533,39 @@ File responses include:
 - `Content-Type: application/octet-stream`
 - `Content-Length`
 - `Accept-Ranges: bytes`
+- `ETag` from the inode, filesystem change sequence, and size
 - `Last-Modified` from the AgentFS inode
 - `X-AiryFS-Inode`
 - `Content-Range` and status `206` for a valid single range
+
+Reads honor `If-None-Match` and `If-Modified-Since` with a bodyless `304`. `If-None-Match` takes precedence when both are present. Range reads honor `If-Range`; a stale validator returns the complete representation with `200` instead of unsafe partial content.
+
+Change-feed webhooks use a durable SQLite outbox populated by the same triggers that observe direct and FUSE/Hrana writes. Create one with `airy webhook create https://hooks.example.com/airy --path /src --event create --event modify`. AiryFS posts `{ "volume", "event" }` and includes `X-AiryFS-Delivery` plus `X-AiryFS-Signature: sha256=...`, computed over the exact body with the signing secret shown once at creation. Delivery failures retry with bounded exponential backoff. Webhook endpoints must use HTTPS; management requires `admin` access.
+
+Content-addressed assets are immutable through the asset API and stored by SHA-256. `airy asset put ./bundle.wasm` hashes locally, streams to a temporary remote file, and publishes only after the server independently verifies the digest. Re-uploading the same digest is idempotent. `airy asset get SHA256 [local]` downloads it. Asset responses use `Cache-Control: public, max-age=31536000, immutable` and support the standard AiryFS validators and ranges.
+
+Scheduled jobs use five-field UTC cron expressions or `@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly` aliases. `airy schedule create build '*/15 * * * *' --cwd /site npm run build` persists the schedule and submits each occurrence through the existing durable, idempotent job queue. A crash after submission is safe: the occurrence's idempotency key is derived from the schedule and scheduled timestamp. Creating or changing schedules requires `admin` access because execution can continue after the caller's token expires.
+
+Server-side search reads AgentFS directly without starting the Container. `airy find /src --name config`, `airy glob '**/*.test.ts' /src`, and `airy grep needle /src --ignore-case` share bounded traversal. Grep skips binary files and files over 10 MiB, scans at most 100 MiB per request, and returns line/column metadata. All modes cap traversal at 100,000 entries and results at 1,000.
+
+`airy tree /src --depth 3` renders a structured server-side walk without starting the Container. The API returns path, depth, type, and logical size for up to 100,000 entries, with explicit truncation metadata.
+
+`airy volume quota --bytes 10g --inodes 100000` configures persistent logical-byte and inode limits. Use `unlimited` to clear either limit. SQLite triggers enforce quotas for direct HTTP writes and Container/FUSE writes at the shared filesystem boundary; rejected HTTP writes return `507 ENOSPC`. `airy usage` reports logical usage, configured limits, remaining capacity, physical SQLite size, and Container/FUSE health.
+
+`airy tail /logs/app.log` prints the last ten lines; `--bytes` selects a byte window and `--follow` streams appends. Follow mode composes range reads with the filesystem change feed, so it does not hold a Worker request or start the Container. `--retry` waits for a removed or rotated path to reappear.
+
+Direct API and CLI deletes move paths into durable per-volume trash by default. `airy trash list`, `airy trash restore ID`, and `airy undo` recover deleted files, directory subtrees, and symlinks; `airy rm --permanent` and `airy trash purge ID` reclaim space immediately. Trashed content continues to count against quota until purged. Deletes performed inside the Container through FUSE remain permanent because that path exposes only opaque filesystem SQL; take a snapshot before destructive `exec` operations when recovery is required.
+
+Volumes are mountable over WebDAV at `/dav/<volume>/`. The dependency-free adapter supports `OPTIONS`, finite `PROPFIND`, `GET`, `HEAD`, streaming `PUT`, `MKCOL`, recoverable `DELETE`, same-volume `MOVE` and bounded recursive `COPY`, no-op `PROPPATCH`, and Finder-compatible `LOCK`/`UNLOCK`. It advertises WebDAV classes 1 and 2, supports HTTP ranges and validators, hides internal trash, and enforces bearer capability scopes. When authentication is enabled, WebDAV also accepts Basic authentication with the root credential, a capability token, or the volume password.
+
+```sh
+# macOS Finder: Go > Connect to Server
+https://example.workers.dev/dav/my-volume/
+
+# Command-line discovery
+curl -u airy:$AIRYFS_TOKEN -X PROPFIND -H 'Depth: 1' \
+  https://example.workers.dev/dav/my-volume/
+```
 
 Unsatisfiable ranges return `416` with `Content-Range: bytes */SIZE`. Directory listings include `name`, `ino`, `mode`, `nlink`, `uid`, `gid`, `size`, timestamps, and a normalized `type` of `file`, `directory`, `symlink`, or `other`.
 
@@ -665,21 +709,45 @@ Each volume can also carry its own password, stored in the volume's SQLite as a 
 
 The CLI stores an optional bearer token in its named session and sends it on every request. The TypeScript SDK accepts `token` and additional default headers through `AiryFSClient` options. Tokens are credentials: do not commit them, put them in URLs, or pass them through untrusted command arguments.
 
+Browser uploads reuse capability authorization without placing credentials in URLs. `airy browser-upload /inbox/photo.jpg --expires 15m` mints a write-only capability restricted to that exact path and prints the upload endpoint and token. Browser code streams the `File` directly:
+
+```js
+await fetch(uploadUrl, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${token}` },
+  body: file,
+});
+```
+
+The endpoint supports CORS `OPTIONS` preflight and accepts a raw file body rather than `multipart/form-data`, so the Worker does not buffer the complete upload. The parent directory must already exist. Treat the generated token as a credential and revoke its capability ID when it is no longer needed.
+
 Authentication does not make arbitrary execution safe for mutually untrusted users who share a volume. `exec` and durable jobs run shell commands in the attached Container with access to the complete mounted volume. Deployments still need an appropriate identity, command policy, request limits, and volume-isolation model for their product.
 
 ## Web Hosting
 
 A volume can serve content publicly without a bearer token. Public serving is opt-in per volume: nothing is exposed until a site is published or a share link is minted, and both are served straight from Durable Object SQLite with no Container cold start.
 
-Static site hosting publishes a volume subtree as a web root. Directory requests resolve the index document, unknown paths fall back to the index when SPA mode is enabled, and files are returned with an inferred `Content-Type` and an optional `Cache-Control`.
+Static site hosting publishes a volume subtree as a web root. Directory requests resolve the index document. `--listing` opts into generated directory indexes when no index exists. Unknown paths fall back to the index when SPA mode is enabled. Files include an inferred `Content-Type`, an optional `Cache-Control`, and `ETag`/`Last-Modified` validators for conditional browser and CDN requests.
 
 ```bash
 airy upload -r ./dist /site        # push a built static site into the volume
 airy site publish /site --spa --cache "public, max-age=300"
+airy site publish /downloads --listing  # optional browsable file tree
 # served at https://<endpoint>/s/<volume>/
 airy site status
 airy site unpublish
 ```
+
+Deployments can snapshot the volume and transactionally replace an existing published root:
+
+```bash
+airy site publish /site
+airy site deploy ./dist
+# prints the rollback snapshot name
+airy site rollback site-deploy-2026-07-18T12-00-00-000Z
+```
+
+`site deploy` requires an existing publication so routing configuration does not change during cutover. Tree import stages and atomically renames the replacement. `site rollback` restores the named full-volume snapshot, not only the web root, so unrelated changes made after that snapshot are also reverted.
 
 File shares mint unguessable, optionally expiring links to individual files:
 

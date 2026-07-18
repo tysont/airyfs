@@ -310,7 +310,9 @@ export function getChanges(sql: SqlExec, options: GetChangesOptions = {}): Chang
   const prefix = options.pathPrefix === undefined ? '/' : normalizePrefix(options.pathPrefix);
 
   const bindings: unknown[] = [sinceSeq];
-  let where = 'seq > ?';
+  let where = `seq > ?
+    AND path != '/.airyfs-trash' AND substr(path, 1, 15) != '/.airyfs-trash/'
+    AND (oldPath IS NULL OR (oldPath != '/.airyfs-trash' AND substr(oldPath, 1, 15) != '/.airyfs-trash/'))`;
   if (prefix !== '/') {
     const withSlash = `${prefix}/`;
     const slashLen = withSlash.length;

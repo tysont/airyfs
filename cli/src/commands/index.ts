@@ -2,6 +2,7 @@
 // ABOUTME: One-shot and interactive-shell execution share these same handlers.
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import {
   access,
@@ -21,7 +22,7 @@ import { AiryFSClient } from '../api/client.js';
 import { createLocalTreeStream, extractLocalTree } from '../api/archive.js';
 import { resumableDownload, resumableUpload, type TransferProgress } from '../api/resume.js';
 import { AiryFSApiError, AiryFSTransportError } from '../api/errors.js';
-import { remoteBasename, remoteDirname } from '../api/paths.js';
+import { encodeRemotePath, remoteBasename, remoteDirname } from '../api/paths.js';
 import type {
   ChangeEvent,
   ChangePage,
@@ -31,6 +32,7 @@ import type {
   JobLogEntry,
   JobStatus,
   Operation,
+  WebhookEvent,
 } from '../api/types.js';
 import {
   createContext,
@@ -49,9 +51,13 @@ export function registerCommands(program: Command, runtime: Runtime): void {
   registerContextCommands(program, runtime);
   registerNavigationCommands(program, runtime);
   registerFileCommands(program, runtime);
+  registerAssetCommands(program, runtime);
+  registerSearchCommands(program, runtime);
   registerExecCommand(program, runtime);
   registerJobCommands(program, runtime);
+  registerScheduleCommands(program, runtime);
   registerWatchCommand(program, runtime);
+  registerWebhookCommands(program, runtime);
   registerVolumeCommands(program, runtime);
   registerSnapshotCommands(program, runtime);
   registerAuthCommands(program, runtime);
@@ -295,6 +301,37 @@ function registerNavigationCommands(program: Command, runtime: Runtime): void {
         .sort(compareEntries);
       printDirectory(context, entries, options.long);
     }));
+
+  program.command('tree')
+    .argument('[path]', 'remote directory', '.')
+    .option('-d, --depth <count>', 'maximum depth', Number, 20)
+    .option('--limit <count>', 'maximum entries', Number, 1000)
+    .description('Print a remote directory tree without starting the Container')
+    .action(async (path, options, command) => perform(runtime, command, async (context) => {
+      const response = await context.client().tree(context.path(path), {
+        depth: validateTreeInteger(options.depth, 'depth', 0, 100),
+        limit: validateTreeInteger(options.limit, 'limit', 1, 100_000),
+      });
+      if (context.output.json) {
+        context.output.value(response);
+        return;
+      }
+      context.output.text(`${response.root}\n`);
+      for (const entry of response.entries) {
+        const marker = entry.type === 'directory' ? '/' : entry.type === 'symlink' ? '@' : '';
+        context.output.text(`${'  '.repeat(entry.depth - 1)}${entry.name}${marker}\n`);
+      }
+      if (response.truncated && !context.output.quiet) {
+        context.output.stderr.write('Tree truncated; increase --depth or --limit.\n');
+      }
+    }));
+}
+
+function validateTreeInteger(value: number, name: string, minimum: number, maximum: number): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new ConfigError(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return value;
 }
 
 function registerFileCommands(program: Command, runtime: Runtime): void {
@@ -307,6 +344,27 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       }
       const response = await context.client().readFile(context.path(path));
       await pipeResponse(response, context.output.stdout, false);
+    }));
+
+  program.command('tail')
+    .argument('<path>')
+    .option('-n, --lines <count>', 'number of trailing lines', Number, 10)
+    .option('-c, --bytes <count>', 'number of trailing bytes', Number)
+    .option('-f, --follow', 'follow appended bytes')
+    .option('-F, --retry', 'follow and wait for a removed path to reappear')
+    .description('Print and optionally follow the end of a remote file')
+    .action(async (path, options, command) => perform(runtime, command, async (context) => {
+      if (context.output.json || context.output.quiet) {
+        throw new ConfigError('tail emits raw bytes and cannot be combined with --json or --quiet');
+      }
+      const lines = validateTailCount(options.lines, '--lines');
+      const bytes = options.bytes === undefined ? undefined : validateTailCount(options.bytes, '--bytes');
+      if (bytes !== undefined && command.getOptionValueSource('lines') === 'cli') {
+        throw new ConfigError('--lines and --bytes are mutually exclusive');
+      }
+      await runTail(context, context.path(path), {
+        lines, bytes, follow: Boolean(options.follow || options.retry), retry: Boolean(options.retry), runtime,
+      });
     }));
 
   program.command('get')
@@ -367,14 +425,49 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
   program.command('rm')
     .argument('<path>')
     .option('-r, --recursive', 'remove directories recursively')
+    .option('--permanent', 'delete immediately instead of moving to trash')
     .description('Remove a remote file or directory')
     .action(async (path, options, command) => perform(runtime, command, async (context) => {
       const target = context.path(path);
       if (target === '/') throw new ConfigError('Refusing to remove the volume root');
       const entry = await statRemote(context, target);
-      if (entry.type === 'directory') await context.client().removeDirectory(target, options.recursive);
-      else await context.client().deleteFile(target);
-      context.output.success(`Removed ${target}`, { path: target });
+      const trashed = entry.type === 'directory'
+        ? await context.client().removeDirectory(target, options.recursive, options.permanent)
+        : await context.client().deleteFile(target, options.permanent);
+      context.output.success(options.permanent ? `Permanently removed ${target}` : `Moved ${target} to trash`, trashed ?? { path: target });
+    }));
+
+  const trash = program.command('trash').description('List, restore, and permanently purge deleted paths');
+  trash.command('list', { isDefault: true })
+    .description('List recoverable deleted paths')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const entries = await context.client().listTrash();
+      if (context.output.json) context.output.value(entries);
+      else context.output.table(['ID', 'Deleted', 'Type', 'Size', 'Original path'], entries.map((entry) => [
+        entry.id, formatTime(entry.deletedAt), entry.type, formatSize(entry.size), entry.originalPath,
+      ]));
+    }));
+  trash.command('restore')
+    .argument('<id>')
+    .argument('[destination]')
+    .description('Restore a trashed path')
+    .action(async (id, destination, _options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().restoreTrash(id, destination ? context.path(destination) : undefined);
+      context.output.success(`Restored ${result.restoredPath}`, result);
+    }));
+  trash.command('purge')
+    .argument('<id>')
+    .description('Permanently delete a trash entry')
+    .action(async (id, _options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().purgeTrash(id);
+      context.output.success(`Permanently deleted ${result.originalPath}`, result);
+    }));
+
+  program.command('undo')
+    .description('Restore the most recently trashed path')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().undoTrash();
+      context.output.success(`Restored ${result.restoredPath}`, result);
     }));
 
   program.command('mv')
@@ -506,6 +599,207 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
     }));
 }
 
+function validateTailCount(value: number, option: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new ConfigError(`${option} must be a non-negative integer`);
+  return value;
+}
+
+async function runTail(
+  context: CommandContext,
+  path: string,
+  options: { lines: number; bytes?: number; follow: boolean; retry: boolean; runtime: Runtime },
+): Promise<void> {
+  const controller = new AbortController();
+  let interrupted = false;
+  const onInterrupt = (): void => { interrupted = true; controller.abort(); };
+  process.once('SIGINT', onInterrupt);
+  try {
+    let cursor = (await context.client().getChanges({ path, since: 'latest', signal: controller.signal })).cursor;
+    let offset = await writeTailInitial(context, path, options.lines, options.bytes, controller.signal);
+    if (!options.follow) return;
+    while (!controller.signal.aborted) {
+      const page = await context.client().getChanges({ path, since: cursor, wait: 25_000, signal: controller.signal });
+      reportChangeGap(context, page);
+      cursor = page.cursor;
+      if (!page.events.some((event) => event.path === path || event.oldPath === path)) continue;
+      try {
+        const head = await context.client().headFile(path);
+        const size = tailResponseSize(head);
+        if (size < offset) offset = 0;
+        if (size > offset) {
+          const response = await context.client().readFile(path, `bytes=${offset}-`);
+          const total = tailResponseTotal(response, size);
+          await pipeResponse(response, context.output.stdout, false);
+          offset = total;
+        }
+      } catch (error) {
+        if (error instanceof AiryFSApiError && error.code === 'ENOENT') {
+          if (!options.retry) return;
+          offset = 0;
+          continue;
+        }
+        throw error;
+      }
+    }
+  } catch (error) {
+    if (!interrupted && !controller.signal.aborted) throw error;
+  } finally {
+    process.removeListener('SIGINT', onInterrupt);
+  }
+  if (interrupted) options.runtime.exitCode = 130;
+}
+
+async function writeTailInitial(
+  context: CommandContext,
+  path: string,
+  lines: number,
+  bytes: number | undefined,
+  signal: AbortSignal,
+): Promise<number> {
+  const head = await context.client().headFile(path);
+  const size = tailResponseSize(head);
+  if (size === 0 || bytes === 0 || (bytes === undefined && lines === 0)) return size;
+  if (bytes !== undefined) {
+    const response = await context.client().readFile(path, `bytes=-${Math.min(bytes, size)}`);
+    await pipeResponse(response, context.output.stdout, false);
+    return tailResponseTotal(response, size);
+  }
+  let length = Math.min(size, 64 * 1024);
+  while (true) {
+    signal.throwIfAborted();
+    const response = await context.client().readFile(path, `bytes=-${length}`);
+    const data = new Uint8Array(await response.arrayBuffer());
+    if (length >= size || countByte(data, 10) > lines) {
+      context.output.stdout.write(lastTailLines(data, lines));
+      return tailResponseTotal(response, size);
+    }
+    length = Math.min(size, length * 2);
+  }
+}
+
+function tailResponseSize(response: Response): number {
+  const value = Number(response.headers.get('Content-Length'));
+  if (!Number.isSafeInteger(value) || value < 0) throw new ConfigError('File response is missing a valid Content-Length');
+  return value;
+}
+
+function tailResponseTotal(response: Response, fallback: number): number {
+  const match = response.headers.get('Content-Range')?.match(/\/(\d+)$/);
+  return match ? Number(match[1]) : fallback;
+}
+
+function countByte(data: Uint8Array, target: number): number {
+  let count = 0;
+  for (const byte of data) if (byte === target) count++;
+  return count;
+}
+
+function lastTailLines(data: Uint8Array, lines: number): Uint8Array {
+  let remaining = lines;
+  let index = data.length;
+  if (index > 0 && data[index - 1] === 10) index--;
+  while (index > 0 && remaining > 0) if (data[--index] === 10) remaining--;
+  return data.subarray(remaining === 0 ? index + 1 : 0);
+}
+
+function registerAssetCommands(program: Command, runtime: Runtime): void {
+  const asset = program.command('asset').description('Store immutable SHA-256-addressed files');
+
+  asset.command('put')
+    .argument('<local>', 'local file')
+    .description('Hash and publish a local file under its content address')
+    .action(async (local, _options, command) => perform(runtime, command, async (context) => {
+      const stats = await statLocal(local);
+      if (!stats.isFile()) throw new ConfigError(`Local path is not a file: ${local}`);
+      const checksum = await sha256LocalFile(local);
+      const result = await context.client().putAsset(
+        checksum,
+        createReadStream(local) as NonNullable<RequestInit['body']>,
+      );
+      context.output.success(
+        result.created ? `Published asset ${checksum}` : `Asset ${checksum} already exists`,
+        { ...result, local },
+      );
+    }));
+
+  asset.command('get')
+    .argument('<sha256>', 'asset SHA-256')
+    .argument('[local]', 'local destination')
+    .option('-f, --force', 'overwrite an existing local file')
+    .description('Download an immutable asset')
+    .action(async (checksum, local, options, command) => perform(runtime, command, async (context) => {
+      const localPath = local || checksum;
+      await saveResponse(await context.client().getAsset(checksum), localPath, Boolean(options.force));
+      context.output.success(`Downloaded asset ${checksum} to ${localPath}`, { checksum, local: localPath });
+    }));
+}
+
+function registerSearchCommands(program: Command, runtime: Runtime): void {
+  program.command('find')
+    .argument('[path]', 'remote root', '.')
+    .requiredOption('-n, --name <text>', 'literal filename text')
+    .option('--limit <count>', 'maximum results', Number, 100)
+    .description('Find paths by filename without starting the Container')
+    .action(async (path, options, command) => perform(runtime, command, async (context) => {
+      await printSearch(context, await context.client().search({
+        mode: 'find', path: context.path(path), pattern: options.name, limit: validateSearchLimit(options.limit),
+      }));
+    }));
+
+  program.command('glob')
+    .argument('<pattern>', 'glob relative to the remote root; ** crosses directories')
+    .argument('[path]', 'remote root', '.')
+    .option('--limit <count>', 'maximum results', Number, 100)
+    .description('Find paths by glob without starting the Container')
+    .action(async (pattern, path, options, command) => perform(runtime, command, async (context) => {
+      await printSearch(context, await context.client().search({
+        mode: 'glob', path: context.path(path), pattern, limit: validateSearchLimit(options.limit),
+      }));
+    }));
+
+  program.command('grep')
+    .argument('<pattern>')
+    .argument('[path]', 'remote root', '.')
+    .option('-E, --regex', 'interpret pattern as a regular expression')
+    .option('-i, --ignore-case', 'case-insensitive matching')
+    .option('--limit <count>', 'maximum matches', Number, 100)
+    .description('Search bounded remote file contents without starting the Container')
+    .action(async (pattern, path, options, command) => perform(runtime, command, async (context) => {
+      await printSearch(context, await context.client().search({
+        mode: 'grep', path: context.path(path), pattern,
+        regex: Boolean(options.regex), ignoreCase: Boolean(options.ignoreCase), limit: validateSearchLimit(options.limit),
+      }));
+    }));
+}
+
+async function printSearch(context: CommandContext, response: import('../api/types.js').SearchResponse): Promise<void> {
+  if (context.output.json) {
+    context.output.value(response);
+    return;
+  }
+  for (const result of response.results) {
+    context.output.text(result.line === undefined
+      ? `${result.path}\n`
+      : `${result.path}:${result.line}:${result.column}:${result.text}\n`);
+  }
+  if (response.truncated && !context.output.quiet) {
+    context.output.stderr.write('Results truncated; increase --limit or narrow the search.\n');
+  }
+}
+
+function validateSearchLimit(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 1000) {
+    throw new ConfigError('Search limit must be between 1 and 1000');
+  }
+  return value;
+}
+
+async function sha256LocalFile(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
 function summarize(summary: { files: number; directories: number; symlinks: number; bytes: number }): string {
   return `${summary.files} files, ${summary.directories} dirs, ${summary.symlinks} symlinks, ${summary.bytes} bytes`;
 }
@@ -577,18 +871,22 @@ async function downloadFile(
     }
     return;
   }
-  if (!options.force) {
+  await saveResponse(await context.client().readFile(remotePath), localPath, Boolean(options.force));
+  context.output.success(`Downloaded ${remotePath} to ${localPath}`, { remote: remotePath, local: localPath });
+}
+
+async function saveResponse(response: Response, localPath: string, force: boolean): Promise<void> {
+  if (!force) {
     await access(localPath).then(() => {
       throw new ConfigError(`Local path already exists: ${localPath} (use --force to overwrite)`);
     }).catch((error: unknown) => {
       if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
     });
   }
-  const response = await context.client().readFile(remotePath);
   const temporary = `${localPath}.airyfs-${process.pid}.tmp`;
   try {
     await pipeResponse(response, createWriteStream(temporary, { flags: 'wx' }));
-    if (options.force) await renameLocal(temporary, localPath);
+    if (force) await renameLocal(temporary, localPath);
     else {
       await link(temporary, localPath);
       await removeLocal(temporary, { force: true });
@@ -597,7 +895,6 @@ async function downloadFile(
     await removeLocal(temporary, { force: true });
     throw error;
   }
-  context.output.success(`Downloaded ${remotePath} to ${localPath}`, { remote: remotePath, local: localPath });
 }
 
 async function uploadTree(
@@ -988,6 +1285,64 @@ function parseCursor(value: string, option = '--after'): number {
   return parsed;
 }
 
+function registerScheduleCommands(program: Command, runtime: Runtime): void {
+  const schedule = program.command('schedule').description('Run durable jobs on UTC cron schedules');
+
+  schedule.command('create')
+    .argument('<name>')
+    .argument('<cron>', 'five-field UTC cron or @hourly/@daily/@weekly/@monthly/@yearly')
+    .argument('<command...>')
+    .allowUnknownOption(true)
+    .option('--cwd <remote>', 'remote working directory (defaults to the session cwd)')
+    .description('Create an enabled job schedule')
+    .action(async (name, cron, parts: string[], options, command) => perform(runtime, command, async (context) => {
+      const created = await context.client().createSchedule({
+        name,
+        cron,
+        command: commandForExec(parts),
+        cwd: options.cwd ? context.path(options.cwd) : context.cwd,
+      });
+      context.output.success(`Created schedule ${created.name}`, created);
+    }));
+
+  schedule.command('list')
+    .alias('ls')
+    .description('List job schedules')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const schedules = await context.client().listSchedules();
+      if (context.output.json) {
+        context.output.value(schedules);
+        return;
+      }
+      context.output.table(
+        ['ID', 'Name', 'Cron (UTC)', 'Enabled', 'Next', 'Command'],
+        schedules.map((entry) => [
+          entry.id, entry.name, entry.cron, entry.enabled ? 'yes' : 'no',
+          entry.nextRun === null ? '-' : formatTime(entry.nextRun), truncateCommand(entry.command),
+        ]),
+      );
+    }));
+
+  for (const [action, enabled] of [['enable', true], ['disable', false]] as const) {
+    schedule.command(action)
+      .argument('<id>')
+      .description(`${action[0].toUpperCase()}${action.slice(1)} a job schedule`)
+      .action(async (id, _options, command) => perform(runtime, command, async (context) => {
+        const updated = await context.client().setScheduleEnabled(id, enabled);
+        context.output.success(`${action === 'enable' ? 'Enabled' : 'Disabled'} schedule ${updated.name}`, updated);
+      }));
+  }
+
+  schedule.command('delete')
+    .alias('rm')
+    .argument('<id>')
+    .description('Delete a job schedule')
+    .action(async (id, _options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().deleteSchedule(id);
+      context.output.success(result.removed ? `Deleted schedule ${id}` : `Schedule ${id} was not found`, result);
+    }));
+}
+
 function registerWatchCommand(program: Command, runtime: Runtime): void {
   program.command('watch')
     .argument('[path]', 'remote path prefix', '.')
@@ -1103,6 +1458,57 @@ function reportChangeGap(context: CommandContext, page: ChangePage): void {
   );
 }
 
+function registerWebhookCommands(program: Command, runtime: Runtime): void {
+  const webhook = program.command('webhook').description('Deliver signed filesystem change events');
+
+  webhook.command('create')
+    .argument('<url>', 'HTTPS delivery endpoint')
+    .option('-p, --path <prefix>', 'remote path prefix', '/')
+    .option('-e, --event <type>', 'create, modify, remove, or rename (repeatable)', collectOption, [])
+    .description('Create a durable webhook subscription')
+    .action(async (url, options, command) => perform(runtime, command, async (context) => {
+      const events = normalizeWebhookEvents(options.event);
+      const created = await context.client().createWebhook({
+        url,
+        pathPrefix: context.path(options.path),
+        events: events.length > 0 ? events : undefined,
+      });
+      if (context.output.json) {
+        context.output.value(created);
+        return;
+      }
+      context.output.success(`Created webhook ${created.id}`, {
+        id: created.id, url: created.url, pathPrefix: created.pathPrefix, events: created.events,
+      });
+      context.output.value(created.secret);
+      context.output.stderr.write(context.output.dim('The signing secret is shown once. Store it securely.\n'));
+    }));
+
+  webhook.command('list')
+    .alias('ls')
+    .description('List webhook subscriptions without signing secrets')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const webhooks = await context.client().listWebhooks();
+      if (context.output.json) {
+        context.output.value(webhooks);
+        return;
+      }
+      context.output.table(
+        ['ID', 'URL', 'Path', 'Events'],
+        webhooks.map((entry) => [entry.id, entry.url, entry.pathPrefix, entry.events.join(',')]),
+      );
+    }));
+
+  webhook.command('delete')
+    .alias('rm')
+    .argument('<id>')
+    .description('Delete a webhook and its pending deliveries')
+    .action(async (id, _options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().deleteWebhook(id);
+      context.output.success(result.removed ? `Deleted webhook ${id}` : `Webhook ${id} was not found`, result);
+    }));
+}
+
 function parseChangeLimit(value: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 1000) {
@@ -1149,6 +1555,40 @@ function registerVolumeCommands(program: Command, runtime: Runtime): void {
     .action(async (_options, command) => perform(runtime, command, async (context) => {
       context.output.value(await context.client().getVolume());
     }));
+
+  volume.command('quota')
+    .option('--bytes <size>', 'logical byte limit, or unlimited')
+    .option('--inodes <count>', 'inode limit, or unlimited')
+    .description('Show or configure persistent volume quotas')
+    .action(async (options, command) => perform(runtime, command, async (context) => {
+      const hasBytes = options.bytes !== undefined;
+      const hasInodes = options.inodes !== undefined;
+      const quota = hasBytes || hasInodes
+        ? await context.client().setQuota({
+          ...(hasBytes ? { bytes: parseQuotaBytes(options.bytes) } : {}),
+          ...(hasInodes ? { inodes: parseQuotaInodes(options.inodes) } : {}),
+        })
+        : await context.client().quota();
+      if (context.output.json) {
+        context.output.value(quota);
+      } else {
+        context.output.table(['Resource', 'Limit'], [
+          ['Logical bytes', quota.bytes === null ? 'unlimited' : formatSize(quota.bytes)],
+          ['Inodes', quota.inodes === null ? 'unlimited' : quota.inodes],
+        ]);
+      }
+    }));
+}
+
+function parseQuotaBytes(value: string): number | null {
+  return value.toLowerCase() === 'unlimited' ? null : parseSize(value);
+}
+
+function parseQuotaInodes(value: string): number | null {
+  if (value.toLowerCase() === 'unlimited') return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new ConfigError('Inode quota must be a positive integer or unlimited');
+  return parsed;
 }
 
 function registerSnapshotCommands(program: Command, runtime: Runtime): void {
@@ -1369,6 +1809,31 @@ function registerCapabilityCommands(program: Command, runtime: Runtime): void {
       await context.client().revokeCapability(id);
       context.output.success(`Revoked capability ${id}`, { id });
     }));
+
+  program.command('browser-upload')
+    .argument('<path>', 'exact destination file path')
+    .option('--expires <duration>', 'upload credential lifetime such as 1h or 30m', '1h')
+    .description('Mint a path-scoped browser upload credential and print its endpoint')
+    .action(async (path, options, command) => perform(runtime, command, async (context) => {
+      const target = context.path(path);
+      const minted = await context.client().createCapability({
+        operations: ['write'],
+        pathPrefixes: [target],
+        expiresInSeconds: durationSeconds(options.expires),
+      });
+      const url = `${context.endpoint}/v1/volumes/${encodeURIComponent(context.volume)}/browser-uploads/${encodeRemotePath(target)}`;
+      const result = { url, token: minted.token, capability: minted.id, expires: minted.expires, path: target };
+      if (context.output.json) {
+        context.output.value(result);
+        return;
+      }
+      context.output.success(`Created browser upload ${minted.id} for ${target}`);
+      context.output.value(url);
+      context.output.value(minted.token);
+      context.output.stderr.write(context.output.dim(
+        'POST the raw File body with Authorization: Bearer <token>; the token is not part of the URL.\n',
+      ));
+    }));
 }
 
 function registerDiagnosticCommands(program: Command, runtime: Runtime): void {
@@ -1472,6 +1937,7 @@ function registerSiteCommands(program: Command, runtime: Runtime): void {
     .argument('[path]', 'volume subtree to serve as the web root', '/')
     .option('--index <file>', 'directory index document', 'index.html')
     .option('--spa', 'serve the index document for unmatched routes (single-page apps)')
+    .option('--listing', 'generate a directory index when no index document exists')
     .option('--cache <value>', 'Cache-Control header for served files')
     .description('Publish (or update) the volume web root for public serving')
     .action(async (path, options, command) => perform(runtime, command, async (context) => {
@@ -1479,6 +1945,7 @@ function registerSiteCommands(program: Command, runtime: Runtime): void {
         path: context.path(path),
         indexDocument: options.index,
         spa: Boolean(options.spa),
+        directoryListing: Boolean(options.listing),
         cacheControl: options.cache,
       });
       context.output.success(
@@ -1504,8 +1971,41 @@ function registerSiteCommands(program: Command, runtime: Runtime): void {
         ['Root', status.site.pathPrefix],
         ['Index', status.site.indexDocument],
         ['SPA', status.site.spa ? 'yes' : 'no'],
+        ['Directory listing', status.site.directoryListing ? 'yes' : 'no'],
         ['Cache-Control', status.site.cacheControl ?? '-'],
       ]);
+    }));
+
+  site.command('deploy')
+    .argument('<local-directory>', 'built static-site directory')
+    .option('-n, --note <note>', 'snapshot note')
+    .description('Snapshot the volume and atomically replace the published web root')
+    .action(async (localDir, options, command) => perform(runtime, command, async (context) => {
+      const localStats = await statLocal(localDir);
+      if (!localStats.isDirectory()) throw new ConfigError(`Local path is not a directory: ${localDir}`);
+      const status = await context.client().getSite();
+      if (!status.published || !status.site) {
+        throw new ConfigError('Publish a site before deploying: airy site publish <remote-path>');
+      }
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const snapshot = await context.client().createSnapshot(
+        `site-deploy-${stamp}`,
+        options.note || `Before site deploy to ${status.site.pathPrefix}`,
+      );
+      const body = createLocalTreeStream(localDir) as unknown as NonNullable<RequestInit['body']>;
+      const summary = await context.client().importTree(status.site.pathPrefix, body, true);
+      context.output.success(
+        `Deployed ${localDir} to ${status.site.pathPrefix}; rollback snapshot ${snapshot.name}`,
+        { root: status.site.pathPrefix, snapshot, ...summary, url: siteUrl(context.endpoint, context.volume) },
+      );
+    }));
+
+  site.command('rollback')
+    .argument('<snapshot>', 'snapshot id or name created before deployment')
+    .description('Restore a pre-deploy full-volume snapshot')
+    .action(async (snapshot, _options, command) => perform(runtime, command, async (context) => {
+      const restored = await context.client().restoreSnapshot(snapshot);
+      context.output.success(`Restored site from full-volume snapshot ${restored.name}`, restored);
     }));
 
   site.command('unpublish')
@@ -1851,6 +2351,18 @@ function normalizeOperations(values: string[]): Operation[] {
     if (!(allowed as string[]).includes(value)) throw new ConfigError(`Unknown operation: ${value}`);
   }
   return [...new Set(values)] as Operation[];
+}
+
+function normalizeWebhookEvents(values: string[]): WebhookEvent[] {
+  const allowed: WebhookEvent[] = ['create', 'modify', 'remove', 'rename'];
+  const events: WebhookEvent[] = [];
+  for (const value of values) {
+    if (!allowed.includes(value as WebhookEvent)) {
+      throw new ConfigError(`Unknown webhook event: ${value}`);
+    }
+    if (!events.includes(value as WebhookEvent)) events.push(value as WebhookEvent);
+  }
+  return events;
 }
 
 function durationSeconds(value: string): number {

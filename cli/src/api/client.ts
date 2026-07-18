@@ -6,8 +6,11 @@ import { decodeNdjsonStream } from './ndjson.js';
 import { encodeRemotePath } from './paths.js';
 import type {
   AuthStatus,
+  AssetInfo,
   ChangePage,
   ChangeQuery,
+  CreatedWebhook,
+  CreateWebhookInput,
   ChecksumResult,
   DatabaseInfo,
   DirectoryEntry,
@@ -15,23 +18,31 @@ import type {
   ExecResult,
   Job,
   JobLogPage,
+  JobSchedule,
   JobStatus,
   MintCapabilityInput,
   MintedCapability,
   PasswordStatus,
   PublishSiteInput,
+  QuotaInfo,
   CreateShareInput,
   SiteInfo,
   SiteStatus,
+  SearchInput,
+  SearchResponse,
   ShareInfo,
   PerfInfo,
   SnapshotDiffEntry,
   SnapshotInfo,
   TreeSummary,
+  TreeViewResponse,
+  TrashEntry,
+  RestoredTrashEntry,
   UploadCompleteResult,
   UploadStatus,
   UsageInfo,
   VolumeInfo,
+  WebhookInfo,
 } from './types.js';
 
 type Fetch = typeof fetch;
@@ -52,6 +63,18 @@ export class AiryFSClient {
     return this.json<VolumeInfo>(this.volumeBase);
   }
 
+  async quota(): Promise<QuotaInfo> {
+    return this.json<QuotaInfo>(`${this.volumeBase}/quota`);
+  }
+
+  async setQuota(input: Partial<QuotaInfo>): Promise<QuotaInfo> {
+    return this.json<QuotaInfo>(`${this.volumeBase}/quota`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
   async createVolume(chunkSize?: number): Promise<VolumeInfo> {
     return this.json<VolumeInfo>(this.volumeBase, {
       method: 'PUT',
@@ -62,6 +85,13 @@ export class AiryFSClient {
 
   async listDirectory(path: string): Promise<DirectoryEntry[]> {
     return this.json<DirectoryEntry[]>(this.resourcePath('directories', path));
+  }
+
+  async tree(path: string, options: { depth?: number; limit?: number } = {}): Promise<TreeViewResponse> {
+    const url = new URL(this.resourcePath('tree', path), 'http://airyfs.local');
+    if (options.depth !== undefined) url.searchParams.set('depth', String(options.depth));
+    if (options.limit !== undefined) url.searchParams.set('limit', String(options.limit));
+    return this.json<TreeViewResponse>(`${url.pathname}${url.search}`);
   }
 
   async readFile(path: string, range?: string): Promise<Response> {
@@ -82,18 +112,41 @@ export class AiryFSClient {
     } as RequestInit & { duplex: 'half' });
   }
 
-  async deleteFile(path: string): Promise<void> {
-    await this.request(this.resourcePath('files', path), { method: 'DELETE' });
+  async deleteFile(path: string, permanent = false): Promise<TrashEntry | undefined> {
+    const url = new URL(this.url(this.resourcePath('files', path)));
+    if (permanent) url.searchParams.set('permanent', 'true');
+    const response = await this.requestUrl(url, { method: 'DELETE' });
+    return permanent ? undefined : await response.json() as TrashEntry;
   }
 
   async makeDirectory(path: string): Promise<void> {
     await this.request(this.resourcePath('directories', path), { method: 'PUT' });
   }
 
-  async removeDirectory(path: string, recursive = false): Promise<void> {
+  async removeDirectory(path: string, recursive = false, permanent = false): Promise<TrashEntry | undefined> {
     const url = new URL(this.url(this.resourcePath('directories', path)));
     if (recursive) url.searchParams.set('recursive', 'true');
-    await this.requestUrl(url, { method: 'DELETE' });
+    if (permanent) url.searchParams.set('permanent', 'true');
+    const response = await this.requestUrl(url, { method: 'DELETE' });
+    return permanent ? undefined : await response.json() as TrashEntry;
+  }
+
+  async listTrash(): Promise<TrashEntry[]> {
+    return this.json<TrashEntry[]>(`${this.volumeBase}/trash`);
+  }
+
+  async restoreTrash(id: string, to?: string): Promise<RestoredTrashEntry> {
+    return this.json<RestoredTrashEntry>(`${this.volumeBase}/trash/${encodeURIComponent(id)}/restore`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(to ? { to } : {}),
+    });
+  }
+
+  async purgeTrash(id: string): Promise<TrashEntry> {
+    return this.json<TrashEntry>(`${this.volumeBase}/trash/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async undoTrash(): Promise<RestoredTrashEntry> {
+    return this.json<RestoredTrashEntry>(`${this.volumeBase}/trash/undo`, { method: 'POST' });
   }
 
   async rename(from: string, to: string): Promise<void> {
@@ -120,6 +173,18 @@ export class AiryFSClient {
   /** Compute the server-side streaming SHA-256 of a remote file. */
   async checksum(path: string): Promise<ChecksumResult> {
     return this.operation<ChecksumResult>('checksum', { path });
+  }
+
+  async putAsset(checksum: string, body: NonNullable<RequestInit['body']>): Promise<AssetInfo> {
+    return this.json<AssetInfo>(`${this.volumeBase}/assets/${encodeURIComponent(checksum)}`, {
+      method: 'PUT',
+      body,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+  }
+
+  async getAsset(checksum: string): Promise<Response> {
+    return this.request(`${this.volumeBase}/assets/${encodeURIComponent(checksum)}`);
   }
 
   // --- Resumable uploads (the route path is the final target) -------------
@@ -267,6 +332,32 @@ export class AiryFSClient {
     return this.json<Job>(`${this.volumeBase}/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
   }
 
+  async createSchedule(input: { name: string; cron: string; command: string; cwd: string }): Promise<JobSchedule> {
+    return this.json<JobSchedule>(`${this.volumeBase}/schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async listSchedules(): Promise<JobSchedule[]> {
+    return this.json<JobSchedule[]>(`${this.volumeBase}/schedules`);
+  }
+
+  async setScheduleEnabled(id: string, enabled: boolean): Promise<JobSchedule> {
+    return this.json<JobSchedule>(
+      `${this.volumeBase}/schedules/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`,
+      { method: 'POST' },
+    );
+  }
+
+  async deleteSchedule(id: string): Promise<{ id: string; removed: boolean }> {
+    return this.json<{ id: string; removed: boolean }>(
+      `${this.volumeBase}/schedules/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
+  }
+
   /** Read or long-poll filesystem changes after an exclusive sequence cursor. */
   async getChanges(options: ChangeQuery = {}): Promise<ChangePage> {
     const url = new URL(this.url(this.resourcePath('changes', options.path ?? '/')));
@@ -274,6 +365,33 @@ export class AiryFSClient {
     if (options.limit !== undefined) url.searchParams.set('limit', String(options.limit));
     if (options.wait !== undefined) url.searchParams.set('wait', String(options.wait));
     return (await this.requestUrl(url, { signal: options.signal })).json() as Promise<ChangePage>;
+  }
+
+  async search(input: SearchInput): Promise<SearchResponse> {
+    return this.json<SearchResponse>(`${this.volumeBase}/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async createWebhook(input: CreateWebhookInput): Promise<CreatedWebhook> {
+    return this.json<CreatedWebhook>(`${this.volumeBase}/webhooks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async listWebhooks(): Promise<WebhookInfo[]> {
+    return this.json<WebhookInfo[]>(`${this.volumeBase}/webhooks`);
+  }
+
+  async deleteWebhook(id: string): Promise<{ id: string; removed: boolean }> {
+    return this.json<{ id: string; removed: boolean }>(
+      `${this.volumeBase}/webhooks/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
   }
 
   async usage(): Promise<UsageInfo> {
@@ -443,7 +561,7 @@ export class AiryFSClient {
     return response.json() as Promise<T>;
   }
 
-  private resourcePath(resource: 'files' | 'directories' | 'trees' | 'uploads' | 'changes', path: string): string {
+  private resourcePath(resource: 'files' | 'directories' | 'trees' | 'tree' | 'uploads' | 'changes', path: string): string {
     const encoded = encodeRemotePath(path);
     return `${this.volumeBase}/${resource}${encoded ? `/${encoded}` : ''}`;
   }

@@ -171,6 +171,21 @@ describe('capability commands', () => {
     const revoke = requests.slice().reverse().find((r) => r.method === 'DELETE');
     expect(revoke?.path).toBe('/v1/volumes/vol/capabilities/cap-123');
   });
+
+  it('creates an exact-path browser upload credential without putting it in the URL', async () => {
+    await sessions.setToken('test', 'root-secret');
+    const result = await invoke(['--json', 'browser-upload', '/inbox/a b.txt', '--expires', '15m']);
+
+    expect(result.code).toBe(0);
+    const output = JSON.parse(result.stdout);
+    expect(output.url).toBe(`${endpoint}/v1/volumes/vol/browser-uploads/inbox/a%20b.txt`);
+    expect(output.url).not.toContain('minted-token');
+    expect(output.token).toBe('minted-token');
+    const mint = requests.slice().reverse().find((r) => r.method === 'POST' && r.path === '/v1/volumes/vol/capabilities');
+    expect(JSON.parse(mint?.body || '{}')).toEqual({
+      operations: ['write'], pathPrefixes: ['/inbox/a b.txt'], expiresInSeconds: 900,
+    });
+  });
 });
 
 async function invoke(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {

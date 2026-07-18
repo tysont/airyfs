@@ -240,6 +240,7 @@ export class HranaServer {
   private readable: ReadableStream<Uint8Array>;
   private writable: WritableStream<Uint8Array>;
   private writeLock?: () => Promise<() => void>;
+  private onWrite?: () => void | Promise<void>;
   private baton: string | null = null;
   private storedSql = new Map<number, string>();
 
@@ -253,11 +254,13 @@ export class HranaServer {
     writable: WritableStream<Uint8Array>;
     sql: SqlBackend;
     writeLock?: () => Promise<() => void>;
+    onWrite?: () => void | Promise<void>;
   }) {
     this.readable = opts.readable;
     this.writable = opts.writable;
     this.sql = opts.sql;
     this.writeLock = opts.writeLock;
+    this.onWrite = opts.onWrite;
   }
 
   async serve(): Promise<void> {
@@ -311,10 +314,19 @@ export class HranaServer {
 
       case 'execute':
         this.statementCount++;
-        return { type: 'execute', result: await executeStmt(this.sql, this.resolveStmt(req.stmt), this.writeLock) };
+        {
+          const statement = this.resolveStmt(req.stmt);
+          const result = await executeStmt(this.sql, statement, this.writeLock);
+          if (!isReadOnlyStatement(statement.sql ?? '')) await this.onWrite?.();
+          return { type: 'execute', result };
+        }
 
       case 'batch':
-        return { type: 'batch', result: await this.executeBatch(req.batch.steps) };
+        {
+          const result = await this.executeBatch(req.batch.steps);
+          if (req.batch.steps.some((step) => !isReadOnlyStatement(step.stmt.sql ?? ''))) await this.onWrite?.();
+          return { type: 'batch', result };
+        }
 
       case 'get_autocommit':
         return { type: 'get_autocommit', is_autocommit: true };
@@ -329,6 +341,7 @@ export class HranaServer {
             : () => undefined;
           try { this.sql.exec(t); } finally { release(); }
         }
+        await this.onWrite?.();
         return { type: 'sequence' };
       }
 

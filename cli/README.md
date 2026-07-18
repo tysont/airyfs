@@ -109,9 +109,12 @@ airyfs auth login --password              # exchange the password for a token on
 airyfs auth login <token>                 # or store a bearer token (root secret or capability) directly
 airyfs auth status                        # show the session's authentication state
 airyfs auth logout                        # clear the stored token
+airyfs browser-upload /inbox/photo.jpg --expires 15m # mint an exact-path browser upload
 ```
 
 `volume create --password` stores only the resulting scoped token in the session, not the password, so day-to-day use is least-privilege. From a second computer, create a session pointing at the same endpoint and volume, then run `airyfs auth login --password` to obtain your own token.
+
+`browser-upload` prints an endpoint and a write-only capability restricted to the exact destination path. Send a raw browser `File` with `POST` and `Authorization: Bearer <token>`. The endpoint supports CORS preflight, streams without multipart buffering, and requires the parent directory to exist. The token never appears in the URL.
 
 ## Navigation
 
@@ -145,6 +148,19 @@ airyfs ls ../tests
 | `readlink <path>` | Print a symbolic-link target |
 | `truncate <path> <size>` | Resize a file; sizes accept `k`, `m`, and `g` suffixes |
 | `stat <path>` | Show path metadata |
+| `asset put <local>` | Hash and publish an immutable SHA-256-addressed asset |
+| `asset get <sha256> [local]` | Download a content-addressed asset |
+| `find [path] --name <text>` | Find names server-side without starting the Container |
+| `glob <pattern> [path]` | Match root-relative paths; `**` crosses directories |
+| `grep <pattern> [path]` | Search bounded text content; supports `--regex` and `--ignore-case` |
+| `tree [path]` | Print a server-side directory tree with `--depth` and `--limit` bounds |
+| `tail <path>` | Print trailing lines or bytes; follow appends with `-f` or rotations with `-F` |
+| `rm <path>` | Move a path to trash; use `--permanent` to bypass recovery |
+| `trash list` | List recoverable deleted paths |
+| `trash restore <id> [destination]` | Restore a trash entry |
+| `trash purge <id>` | Permanently delete a trash entry |
+| `undo` | Restore the most recently trashed path |
+| `volume quota` | Show quotas; set with `--bytes`, `--inodes`, or `unlimited` |
 
 `cat` emits raw bytes and therefore cannot be combined with `--json` or `--quiet`. Use `get` for binary files that should not be written directly to the terminal.
 
@@ -163,6 +179,18 @@ airyfs exec --no-wait npm test       # Fail immediately if another exec is activ
 ```
 
 `airyfs warm` (alias `airyfs wake`) starts the Container and mounts the selected volume by executing the shell no-op `:`. It does not change volume contents. Use it before latency-sensitive commands to pay the Container startup cost early.
+
+Durable jobs can run on five-field UTC cron schedules:
+
+```bash
+airyfs schedule create build '*/15 * * * *' --cwd /site npm run build
+airyfs schedule list
+airyfs schedule disable <id>
+airyfs schedule enable <id>
+airyfs schedule delete <id>
+```
+
+Aliases `@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly` are supported. Scheduled occurrences use deterministic idempotency keys and enter the existing durable job queue. Schedule management requires `admin` access.
 
 Before an arbitrary command, the CLI runs the retry-safe shell no-op `:` to start or reconnect the Container. Transport failures and transient HTTP `502`, `503`, and `504` responses retry only that preflight. The user command is submitted at most once after ambiguous failures; it retries only for `EXEC_BUSY`, which confirms that the server did not admit it. Startup and busy-wait retries run for up to 90 seconds by default. `--timeout` controls only that startup and admission window; the server applies the remote process runtime limit.
 
@@ -223,15 +251,29 @@ Serve a volume publicly without a token. Nothing is exposed until you publish a 
 ```bash
 airyfs upload -r ./dist /site
 airyfs site publish /site --spa --cache "public, max-age=300"
+airyfs site publish /downloads --listing  # opt-in browsable directory indexes
 airyfs site status
 airyfs site unpublish
+
+airyfs site deploy ./dist                 # snapshot + atomic replacement
+airyfs site rollback <snapshot>           # restores the full volume snapshot
 
 airyfs share /reports/q3.pdf --expires 24h   # prints a /d/<volume>/<id> URL
 airyfs share list
 airyfs share rm <id>
 ```
 
-Sites are served at `<endpoint>/s/<volume>/` and shares at `<endpoint>/d/<volume>/<id>` on any deployment. If the Worker sets `SITES_ZONE` and has a matching wildcard route, `<volume>.<zone>` also serves the published site.
+Sites are served at `<endpoint>/s/<volume>/` and shares at `<endpoint>/d/<volume>/<id>` on any deployment. Public responses include `ETag` and `Last-Modified`, support conditional requests, and honor `If-Range` for safe resumable reads. If the Worker sets `SITES_ZONE` and has a matching wildcard route, `<volume>.<zone>` also serves the published site.
+
+## Webhooks
+
+```bash
+airyfs webhook create https://hooks.example.com/airy --path /src --event create --event modify
+airyfs webhook list
+airyfs webhook delete <id>
+```
+
+Creation prints an HMAC signing secret once. Deliveries contain `{ "volume", "event" }` with `X-AiryFS-Delivery` and `X-AiryFS-Signature: sha256=...` headers. A durable SQLite outbox captures direct and FUSE writes and retries transient failures with exponential backoff. Endpoints must use HTTPS and webhook management requires an `admin` capability.
 
 ## Deployment
 

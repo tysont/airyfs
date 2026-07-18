@@ -5,6 +5,7 @@ import type { FileSystem } from 'agentfs-sdk/cloudflare';
 import { normalizePath } from './auth';
 import { fileResponse, HttpError, VolumeAccessCoordinator } from './files-api';
 import type { SqlExec } from './schema';
+import { TRASH_ROOT } from './trash';
 
 // ---------------------------------------------------------------------------
 // MIME inference
@@ -39,10 +40,10 @@ const MIME_TYPES: Record<string, string> = {
   webmanifest: 'application/manifest+json',
 };
 
-/** Extract the volume for a public hosting request: `/s/<volume>/...` or `/d/<volume>/...`. */
+/** Extract the volume for a site, share, or WebDAV request. */
 export function parsePublicVolume(pathname: string): string | null {
   const segments = pathname.split('/').filter(Boolean);
-  if ((segments[0] === 's' || segments[0] === 'd') && segments[1]) {
+  if ((segments[0] === 's' || segments[0] === 'd' || segments[0] === 'dav') && segments[1]) {
     return decodeURIComponent(segments[1]);
   }
   return null;
@@ -78,6 +79,8 @@ export interface SiteRecord {
   indexDocument: string;
   /** Serve indexDocument with 200 for unmatched paths (single-page apps). */
   spa: boolean;
+  /** Generate an HTML directory index when no index document exists. */
+  directoryListing: boolean;
   /** Optional Cache-Control header value applied to served files. */
   cacheControl: string | null;
   createdAt: number;
@@ -97,7 +100,7 @@ const SITE_ID = 'web';
 
 export function readSite(sql: SqlExec): SiteRecord | null {
   const rows = sql
-    .exec("SELECT path, index_document, spa, cache_control, created_at FROM site_config WHERE kind = 'site' AND id = ?", SITE_ID)
+    .exec("SELECT path, index_document, spa, directory_listing, cache_control, created_at FROM site_config WHERE kind = 'site' AND id = ?", SITE_ID)
     .toArray();
   if (rows.length === 0) return null;
   const row = rows[0];
@@ -105,6 +108,7 @@ export function readSite(sql: SqlExec): SiteRecord | null {
     pathPrefix: String(row.path),
     indexDocument: String(row.index_document),
     spa: Number(row.spa) === 1,
+    directoryListing: Number(row.directory_listing) === 1,
     cacheControl: row.cache_control === null ? null : String(row.cache_control),
     createdAt: Number(row.created_at),
   };
@@ -112,17 +116,19 @@ export function readSite(sql: SqlExec): SiteRecord | null {
 
 export function writeSite(sql: SqlExec, record: Omit<SiteRecord, 'createdAt'>): SiteRecord {
   sql.exec(
-    `INSERT INTO site_config (id, kind, path, index_document, spa, cache_control, expires_at, created_at)
-       VALUES (?, 'site', ?, ?, ?, ?, NULL, unixepoch())
+    `INSERT INTO site_config (id, kind, path, index_document, spa, directory_listing, cache_control, expires_at, created_at)
+       VALUES (?, 'site', ?, ?, ?, ?, ?, NULL, unixepoch())
      ON CONFLICT(id) DO UPDATE SET
        path = excluded.path,
-       index_document = excluded.index_document,
-       spa = excluded.spa,
-       cache_control = excluded.cache_control`,
+        index_document = excluded.index_document,
+        spa = excluded.spa,
+        directory_listing = excluded.directory_listing,
+        cache_control = excluded.cache_control`,
     SITE_ID,
     normalizePath(record.pathPrefix),
     record.indexDocument,
     record.spa ? 1 : 0,
+    record.directoryListing ? 1 : 0,
     record.cacheControl
   );
   return readSite(sql)!;
@@ -192,7 +198,12 @@ export function deleteShare(sql: SqlExec, id: string): boolean {
 
 /** Join a normalized root and a request-relative subpath, preventing traversal above root. */
 function resolveUnder(root: string, subPath: string): string {
-  return normalizePath(`${root}/${subPath}`);
+  const normalizedRoot = normalizePath(root);
+  const resolved = normalizePath(`${normalizedRoot}/${subPath}`);
+  if (normalizedRoot !== '/' && resolved !== normalizedRoot && !resolved.startsWith(`${normalizedRoot}/`)) {
+    throw new HttpError(404, 'NOT_FOUND', 'No published file for this path');
+  }
+  return resolved;
 }
 
 async function isFile(fs: FileSystem, path: string): Promise<boolean> {
@@ -201,6 +212,52 @@ async function isFile(fs: FileSystem, path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function isDirectory(fs: FileSystem, path: string): Promise<boolean> {
+  try {
+    return (await fs.stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]!);
+}
+
+async function directoryIndex(
+  fs: FileSystem,
+  path: string,
+  request: Request,
+  atRoot: boolean,
+  cacheControl: string | null
+): Promise<Response> {
+  const entries = (await fs.readdirPlus(path))
+    .filter((entry) => !(atRoot && path === '/' && entry.name === '.airyfs-trash'));
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  const url = new URL(request.url);
+  const pathname = url.pathname.endsWith('/') ? url.pathname : `${url.pathname}/`;
+  const rows = entries.map((entry) => {
+    const directory = entry.stats.isDirectory();
+    const label = `${entry.name}${directory ? '/' : ''}`;
+    const href = `${pathname}${encodeURIComponent(entry.name)}${directory ? '/' : ''}`;
+    return `<li><a href="${escapeHtml(href)}">${escapeHtml(label)}</a></li>`;
+  });
+  if (!atRoot) rows.unshift('<li><a href="../">../</a></li>');
+  const title = `Index of ${url.pathname}`;
+  const body = new TextEncoder().encode(
+    `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head>`
+    + `<body><h1>${escapeHtml(title)}</h1><ul>${rows.join('')}</ul></body></html>`
+  );
+  const headers = new Headers({
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': String(body.byteLength),
+    'Cache-Control': cacheControl ?? 'no-cache',
+  });
+  return new Response(request.method === 'HEAD' ? null : body, { headers });
 }
 
 /** Re-wrap a fileResponse with a public Content-Type and optional Cache-Control. */
@@ -221,10 +278,18 @@ export async function serveSite(
   access: VolumeAccessCoordinator,
   site: SiteRecord,
   subPath: string,
-  request: Request
+  request: Request,
+  versionForInode?: (ino: number) => number
 ): Promise<Response> {
+  if (site.pathPrefix === TRASH_ROOT || site.pathPrefix.startsWith(`${TRASH_ROOT}/`)) {
+    throw new HttpError(404, 'NOT_FOUND', 'No published file for this path');
+  }
   const trimmed = subPath.replace(/^\/+/, '');
+  if (site.pathPrefix === '/' && (trimmed === '.airyfs-trash' || trimmed.startsWith('.airyfs-trash/'))) {
+    throw new HttpError(404, 'NOT_FOUND', 'No published file for this path');
+  }
   const wantsIndex = trimmed === '' || subPath.endsWith('/');
+  const requested = resolveUnder(site.pathPrefix, trimmed);
   const primary = wantsIndex
     ? resolveUnder(site.pathPrefix, `${trimmed}/${site.indexDocument}`)
     : resolveUnder(site.pathPrefix, trimmed);
@@ -238,10 +303,14 @@ export async function serveSite(
     if (await isFile(fs, asDirIndex)) target = asDirIndex;
   }
 
+  if (!target && site.directoryListing && await isDirectory(fs, requested)) {
+    return directoryIndex(fs, requested, request, requested === site.pathPrefix, site.cacheControl);
+  }
+
   if (!target && site.spa) {
     const fallback = resolveUnder(site.pathPrefix, site.indexDocument);
     if (await isFile(fs, fallback)) {
-      const response = await fileResponse(fs, fallback, request, access);
+      const response = await fileResponse(fs, fallback, request, access, versionForInode);
       return withPublicHeaders(response, contentTypeFor(fallback), site.cacheControl);
     }
   }
@@ -249,7 +318,7 @@ export async function serveSite(
   if (!target) {
     throw new HttpError(404, 'NOT_FOUND', 'No published file for this path');
   }
-  const response = await fileResponse(fs, target, request, access);
+  const response = await fileResponse(fs, target, request, access, versionForInode);
   return withPublicHeaders(response, contentTypeFor(target), site.cacheControl);
 }
 
@@ -258,14 +327,18 @@ export async function serveShare(
   fs: FileSystem,
   access: VolumeAccessCoordinator,
   share: ShareRecord,
-  request: Request
+  request: Request,
+  versionForInode?: (ino: number) => number
 ): Promise<Response> {
+  if (share.path === TRASH_ROOT || share.path.startsWith(`${TRASH_ROOT}/`)) {
+    throw new HttpError(404, 'NOT_FOUND', 'The shared file no longer exists');
+  }
   if (share.expiresAt !== null && share.expiresAt <= Math.floor(Date.now() / 1000)) {
     throw new HttpError(410, 'SHARE_EXPIRED', 'This share link has expired');
   }
   if (!(await isFile(fs, share.path))) {
     throw new HttpError(404, 'NOT_FOUND', 'The shared file no longer exists');
   }
-  const response = await fileResponse(fs, share.path, request, access);
+  const response = await fileResponse(fs, share.path, request, access, versionForInode);
   return withPublicHeaders(response, contentTypeFor(share.path), share.cacheControl);
 }

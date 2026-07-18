@@ -16,6 +16,16 @@ export interface FileStats {
 
 export interface DirectoryEntry extends FileStats { name: string }
 export interface VolumeInfo { chunkSize: number }
+export interface QuotaInfo { bytes: number | null; inodes: number | null }
+export interface TrashEntry {
+  id: string;
+  originalPath: string;
+  trashPath: string;
+  type: 'file' | 'directory' | 'symlink';
+  size: number;
+  deletedAt: number;
+}
+export interface RestoredTrashEntry extends TrashEntry { restoredPath: string }
 export interface ExecResult { exitCode: number; stdout: string; stderr: string }
 export type ExecEvent =
   | { type: 'start'; id: string }
@@ -111,10 +121,29 @@ export interface ContainerHealth {
   error?: string;
 }
 export interface UsageInfo {
-  filesystem: Record<string, unknown>;
+  filesystem: {
+    bytesUsed: number;
+    inodes: number;
+    quotaBytes: number | null;
+    quotaInodes: number | null;
+    bytesAvailable: number | null;
+    inodesAvailable: number | null;
+  };
   sqliteBytes: number;
   container: ContainerHealth;
   hrana: PerfInfo;
+}
+export interface TreeViewEntry {
+  path: string;
+  name: string;
+  depth: number;
+  type: 'file' | 'directory' | 'symlink';
+  size: number;
+}
+export interface TreeViewResponse {
+  root: string;
+  entries: TreeViewEntry[];
+  truncated: boolean;
 }
 export type DatabaseInfo = Record<string, number>;
 
@@ -145,6 +174,15 @@ export interface AiryFSClientOptions {
 }
 export interface WatchChangesOptions extends Omit<ChangeQuery, 'wait'> {
   wait?: number;
+  onGap?: (page: ChangePage) => void;
+}
+export interface TailFileOptions {
+  lines?: number;
+  bytes?: number;
+  follow?: boolean;
+  retry?: boolean;
+  wait?: number;
+  signal?: AbortSignal;
   onGap?: (page: ChangePage) => void;
 }
 export interface WaitForJobOptions {

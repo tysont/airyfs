@@ -5,6 +5,9 @@ import { initSnapshotSchema, SNAPSHOT_TABLES } from './snapshots';
 import { initUploadSchema, UPLOAD_TABLES } from './uploads';
 import { initJobSchema, JOB_TABLES } from './jobs';
 import { initChangeFeedSchema, CHANGE_FEED_TABLES } from './change-feed';
+import { initWebhookSchema, WEBHOOK_TABLES } from './webhooks';
+import { initScheduleSchema, SCHEDULE_TABLES } from './schedules';
+import { initTrashSchema, TRASH_TABLES } from './trash';
 
 // Minimal interface matching the subset of SqlStorage that initSchema needs.
 // DO SqlStorage satisfies this; tests can provide a lightweight adapter.
@@ -158,6 +161,7 @@ const DDL_STATEMENTS = [
     path TEXT NOT NULL,
     index_document TEXT NOT NULL DEFAULT 'index.html',
     spa INTEGER NOT NULL DEFAULT 0,
+    directory_listing INTEGER NOT NULL DEFAULT 0,
     cache_control TEXT,
     expires_at INTEGER,
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -172,6 +176,32 @@ const DDL_STATEMENTS = [
       DELETE FROM fs_data WHERE ino = OLD.ino;
       DELETE FROM fs_symlink WHERE ino = OLD.ino;
       DELETE FROM fs_open_inode WHERE ino = OLD.ino;
+    END`,
+
+  `CREATE TRIGGER IF NOT EXISTS trg_fs_inode_quota_insert
+    BEFORE INSERT ON fs_inode
+    BEGIN
+      SELECT CASE WHEN
+        (SELECT CAST(value AS INTEGER) FROM fs_config WHERE key = 'quota_inodes') IS NOT NULL
+        AND (SELECT count(*) + 1 FROM fs_inode) >
+          (SELECT CAST(value AS INTEGER) FROM fs_config WHERE key = 'quota_inodes')
+      THEN RAISE(ABORT, 'AIRYFS_ENOSPC_INODES') END;
+      SELECT CASE WHEN
+        NEW.size > 0
+        AND (SELECT CAST(value AS INTEGER) FROM fs_config WHERE key = 'quota_bytes') IS NOT NULL
+        AND (SELECT COALESCE(sum(size), 0) + NEW.size FROM fs_inode) >
+          (SELECT CAST(value AS INTEGER) FROM fs_config WHERE key = 'quota_bytes')
+      THEN RAISE(ABORT, 'AIRYFS_ENOSPC_BYTES') END;
+    END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_fs_inode_quota_update
+    BEFORE UPDATE OF size ON fs_inode
+    WHEN NEW.size > OLD.size
+    BEGIN
+      SELECT CASE WHEN
+        (SELECT CAST(value AS INTEGER) FROM fs_config WHERE key = 'quota_bytes') IS NOT NULL
+        AND (SELECT COALESCE(sum(size), 0) - OLD.size + NEW.size FROM fs_inode) >
+          (SELECT CAST(value AS INTEGER) FROM fs_config WHERE key = 'quota_bytes')
+      THEN RAISE(ABORT, 'AIRYFS_ENOSPC_BYTES') END;
     END`,
 ];
 
@@ -206,6 +236,9 @@ export const SCHEMA_TABLES = [
   ...SNAPSHOT_TABLES,
   ...JOB_TABLES,
   ...CHANGE_FEED_TABLES,
+  ...WEBHOOK_TABLES,
+  ...SCHEDULE_TABLES,
+  ...TRASH_TABLES,
 ] as const;
 
 /**
@@ -221,6 +254,7 @@ export function initSchema(sql: SqlExec, transactionSync?: TransactionSync): voi
     migrateInodeColumns(sql);
     migrateWhiteouts(sql);
     migrateToolCalls(sql);
+    migrateSiteConfig(sql);
 
     // Additive snapshot metadata + payload tables. Raw snapshot SQL is isolated
     // in snapshots.ts; initialization stays idempotent alongside the core DDL.
@@ -237,6 +271,12 @@ export function initSchema(sql: SqlExec, transactionSync?: TransactionSync): voi
     // tables the triggers reference already exist.
     initChangeFeedSchema(sql);
 
+    // Webhook outbox triggers depend on the change-feed table and triggers.
+    initWebhookSchema(sql);
+
+    initScheduleSchema(sql);
+    initTrashSchema(sql);
+
     for (const stmt of SEED_STATEMENTS) {
       sql.exec(stmt);
     }
@@ -249,6 +289,50 @@ export function initSchema(sql: SqlExec, transactionSync?: TransactionSync): voi
 export interface ChunkSizeConfiguration {
   chunkSize: number;
   created: boolean;
+}
+
+export interface QuotaConfiguration {
+  bytes: number | null;
+  inodes: number | null;
+}
+
+function quotaValue(sql: SqlExec, key: string): number | null {
+  const rows = sql.exec('SELECT value FROM fs_config WHERE key = ?', key).toArray() as Array<{ value: string }>;
+  if (rows.length === 0) return null;
+  const value = Number(rows[0].value);
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Stored ${key} is invalid: ${rows[0].value}`);
+  return value;
+}
+
+export function readQuota(sql: SqlExec): QuotaConfiguration {
+  return { bytes: quotaValue(sql, 'quota_bytes'), inodes: quotaValue(sql, 'quota_inodes') };
+}
+
+function validateQuotaValue(value: unknown, name: string): number | null | undefined {
+  if (value === undefined || value === null) return value;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer or null`);
+  }
+  return value;
+}
+
+export function configureQuota(
+  sql: SqlExec,
+  input: { bytes?: unknown; inodes?: unknown },
+): QuotaConfiguration {
+  const bytes = validateQuotaValue(input.bytes, 'bytes');
+  const inodes = validateQuotaValue(input.inodes, 'inodes');
+  const usage = sql.exec('SELECT COALESCE(sum(size), 0) AS bytes, count(*) AS inodes FROM fs_inode').toArray()[0] as {
+    bytes: number; inodes: number;
+  };
+  if (typeof bytes === 'number' && bytes < usage.bytes) throw new Error(`bytes quota cannot be below current usage (${usage.bytes})`);
+  if (typeof inodes === 'number' && inodes < usage.inodes) throw new Error(`inodes quota cannot be below current usage (${usage.inodes})`);
+  for (const [key, value] of [['quota_bytes', bytes], ['quota_inodes', inodes]] as const) {
+    if (value === undefined) continue;
+    if (value === null) sql.exec('DELETE FROM fs_config WHERE key = ?', key);
+    else sql.exec('INSERT OR REPLACE INTO fs_config (key, value) VALUES (?, ?)', key, String(value));
+  }
+  return readQuota(sql);
 }
 
 export function validateChunkSize(value: unknown): number {
@@ -366,4 +450,11 @@ function migrateToolCalls(sql: SqlExec): void {
   sql.exec('DROP TABLE tool_calls_legacy');
   sql.exec('CREATE INDEX idx_tool_calls_name ON tool_calls(name)');
   sql.exec('CREATE INDEX idx_tool_calls_started_at ON tool_calls(started_at)');
+}
+
+function migrateSiteConfig(sql: SqlExec): void {
+  const columns = new Set(tableColumns(sql, 'site_config').map((column) => column.name));
+  if (!columns.has('directory_listing')) {
+    sql.exec('ALTER TABLE site_config ADD COLUMN directory_listing INTEGER NOT NULL DEFAULT 0');
+  }
 }

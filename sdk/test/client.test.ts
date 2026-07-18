@@ -21,6 +21,9 @@ describe('AiryFSClient', () => {
       if (method === 'HEAD') {
         return new Response(null, { headers: { 'Content-Length': '3', 'X-AiryFS-Inode': '2' } });
       }
+      if (url.includes('/files/') && method === 'DELETE') return Response.json({
+        id: 'trash', originalPath: '/a b/file', trashPath: '/.airyfs-trash/trash', type: 'file', size: 3, deletedAt: 1,
+      });
       if (url.includes('/files/')) return new Response('abc');
       if (url.includes('/trees/') && method === 'GET') return new Response(new Uint8Array([1, 2]));
       if (url.includes('/operations/readlink')) return Response.json({ target: '../target' });
@@ -40,6 +43,7 @@ describe('AiryFSClient', () => {
     await client.getVolume();
     await client.createVolume(262144);
     await client.listDirectory('/a b');
+    await client.tree('/a b', { depth: 2, limit: 10 });
     await client.readFile('/a b/file');
     await client.headFile('/a b/file');
     await client.readFileBytes('/a b/file');
@@ -48,6 +52,10 @@ describe('AiryFSClient', () => {
     await client.deleteFile('/a b/file');
     await client.makeDirectory('/dir');
     await client.removeDirectory('/dir', true);
+    await client.listTrash();
+    await client.restoreTrash('trash id');
+    await client.purgeTrash('trash id');
+    await client.undoTrash();
     await client.rename('/from', '/to');
     await client.copy('/from', '/to');
     await client.symlink('../target', '/link');
@@ -82,6 +90,8 @@ describe('AiryFSClient', () => {
     await client.createCapability({ operations: ['read'], pathPrefixes: ['/a'], expiresInSeconds: 60 });
     await client.revokeCapability('cap id');
     await client.usage();
+    await client.quota();
+    await client.setQuota({ bytes: 1024, inodes: null });
     await client.perf();
     await client.databaseInfo();
     await client.destroyContainer();
@@ -91,6 +101,8 @@ describe('AiryFSClient', () => {
     expect(requests.every((request) => request.headers.get('Authorization') === 'Bearer secret')).toBe(true);
     expect(requests.every((request) => request.headers.get('X-Client') === 'sdk')).toBe(true);
     expect(requests.some((request) => request.url.includes('/directories/a%20b'))).toBe(true);
+    expect(requests.some((request) => request.url.includes('/tree/a%20b?depth=2&limit=10'))).toBe(true);
+    expect(requests.some((request) => request.url.endsWith('/quota') && request.method === 'PUT')).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/directories/dir?recursive=true'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/trees/tree?replace=true'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/jobs?status=running'))).toBe(true);

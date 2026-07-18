@@ -4,7 +4,7 @@
 import Database from 'better-sqlite3';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AgentFS } from 'agentfs-sdk/cloudflare';
-import { VolumeAccessCoordinator, HttpError } from '../src/files-api';
+import { VolumeAccessCoordinator, HttpError, latestFileVersion } from '../src/files-api';
 import { initSchema } from '../src/schema';
 import { createTestStorage } from './support/storage';
 import {
@@ -45,6 +45,7 @@ describe('public serving', () => {
     await fs.writeFile('/public/index.html', '<!doctype html>root');
     await fs.mkdir('/public/assets');
     await fs.writeFile('/public/assets/app.js', 'console.log(1)');
+    await fs.writeFile('/private.txt', 'secret');
   });
 
   function get(path: string): Request {
@@ -52,7 +53,7 @@ describe('public serving', () => {
   }
 
   it('serves the index document for the site root with an inferred type', async () => {
-    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, cacheControl: 'max-age=60' });
+    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, directoryListing: false, cacheControl: 'max-age=60' });
     const response = await serveSite(fs, access, readSite(sql)!, '/', get('/s/vol/'));
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
@@ -61,32 +62,74 @@ describe('public serving', () => {
   });
 
   it('serves nested assets with their own content type', async () => {
-    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, cacheControl: null });
+    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, directoryListing: false, cacheControl: null });
     const response = await serveSite(fs, access, readSite(sql)!, '/assets/app.js', get('/s/vol/assets/app.js'));
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('text/javascript; charset=utf-8');
     expect(await response.text()).toBe('console.log(1)');
   });
 
+  it('preserves public headers on conditional responses', async () => {
+    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, directoryListing: false, cacheControl: 'public, max-age=60' });
+    const version = (ino: number) => latestFileVersion(sql, ino);
+    const initial = await serveSite(fs, access, readSite(sql)!, '/', get('/s/vol/'), version);
+    const etag = initial.headers.get('ETag')!;
+    await initial.body?.cancel();
+
+    const response = await serveSite(fs, access, readSite(sql)!, '/', new Request('http://vol.example/s/vol/', {
+      headers: { 'If-None-Match': etag },
+    }), version);
+    expect(response.status).toBe(304);
+    expect(response.headers.get('ETag')).toBe(etag);
+    expect(response.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60');
+  });
+
   it('falls back to the index document for unmatched SPA routes', async () => {
-    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: true, cacheControl: null });
+    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: true, directoryListing: false, cacheControl: null });
     const response = await serveSite(fs, access, readSite(sql)!, '/deep/route', get('/s/vol/deep/route'));
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('<!doctype html>root');
   });
 
   it('returns 404 for unmatched non-SPA routes', async () => {
-    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, cacheControl: null });
+    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, directoryListing: false, cacheControl: null });
     await expect(serveSite(fs, access, readSite(sql)!, '/missing', get('/s/vol/missing')))
+      .rejects.toMatchObject({ status: 404 });
+  });
+
+  it('rejects traversal outside the published root', async () => {
+    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, directoryListing: true, cacheControl: null });
+    await expect(serveSite(fs, access, readSite(sql)!, '/../private.txt', get('/s/vol/private.txt')))
       .rejects.toMatchObject({ status: 404 });
   });
 
   it('publishes and unpublishes the site', () => {
     expect(readSite(sql)).toBeNull();
-    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, cacheControl: null });
+    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, directoryListing: false, cacheControl: null });
     expect(readSite(sql)?.pathPrefix).toBe('/public');
     expect(deleteSite(sql)).toBe(true);
     expect(readSite(sql)).toBeNull();
+  });
+
+  it('generates escaped, encoded directory indexes only when enabled', async () => {
+    await fs.mkdir('/public/downloads');
+    await fs.mkdir('/public/downloads/folder');
+    await fs.writeFile('/public/downloads/a & b.txt', 'data');
+    writeSite(sql, { pathPrefix: '/public', indexDocument: 'index.html', spa: false, directoryListing: true, cacheControl: null });
+
+    const response = await serveSite(fs, access, readSite(sql)!, '/downloads/', get('/s/vol/downloads/'));
+    const html = await response.text();
+    expect(response.headers.get('Cache-Control')).toBe('no-cache');
+    expect(html).toContain('href="../"');
+    expect(html).toContain('/s/vol/downloads/a%20%26%20b.txt');
+    expect(html).toContain('a &amp; b.txt');
+    expect(html).toContain('/s/vol/downloads/folder/');
+
+    const head = await serveSite(fs, access, readSite(sql)!, '/downloads/', new Request('http://vol.example/s/vol/downloads/', { method: 'HEAD' }));
+    expect(head.status).toBe(200);
+    expect(head.body).toBeNull();
+    expect(Number(head.headers.get('Content-Length'))).toBeGreaterThan(0);
   });
 
   it('serves a share and enforces expiry', async () => {

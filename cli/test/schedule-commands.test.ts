@@ -1,0 +1,88 @@
+// ABOUTME: Exercises UTC cron schedule CLI management against a local mock server.
+// ABOUTME: Verifies command/cwd creation payloads and list/enable/disable/delete routes.
+
+import { createServer, type ServerResponse } from 'node:http';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable, Writable } from 'node:stream';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { SessionManager } from '../src/config/sessions.js';
+import { ConfigStore } from '../src/config/store.js';
+import { execute } from '../src/program.js';
+
+const requests: Array<{ method: string; path: string; body: string }> = [];
+let endpoint: string;
+let home: string;
+let sessions: SessionManager;
+
+const info = {
+  id: 'schedule-1', name: 'build', cron: '*/15 * * * *', command: 'npm run build', cwd: '/site',
+  enabled: true, nextRun: 1_800_000_000, lastRun: null, createdAt: 1,
+};
+
+const server = createServer(async (request, response) => {
+  const url = new URL(request.url || '/', 'http://localhost');
+  let body = '';
+  for await (const chunk of request) body += chunk.toString();
+  requests.push({ method: request.method || 'GET', path: url.pathname, body });
+  if (url.pathname === '/v1/volumes/vol/schedules' && request.method === 'POST') return json(response, 201, info);
+  if (url.pathname === '/v1/volumes/vol/schedules' && request.method === 'GET') return json(response, 200, [info]);
+  if (url.pathname === '/v1/volumes/vol/schedules/schedule-1/enable' && request.method === 'POST') return json(response, 200, info);
+  if (url.pathname === '/v1/volumes/vol/schedules/schedule-1/disable' && request.method === 'POST') return json(response, 200, { ...info, enabled: false, nextRun: null });
+  if (url.pathname === '/v1/volumes/vol/schedules/schedule-1' && request.method === 'DELETE') return json(response, 200, { id: 'schedule-1', removed: true });
+  json(response, 404, { error: { code: 'NOT_FOUND', message: 'Unhandled request' } });
+});
+
+beforeAll(async () => {
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Mock server did not bind');
+  endpoint = `http://127.0.0.1:${address.port}`;
+  home = await mkdtemp(join(tmpdir(), 'airyfs-schedule-cmd-'));
+  sessions = new SessionManager(new ConfigStore(home));
+  await sessions.create('test', { endpoint, volume: 'vol' });
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  await rm(home, { recursive: true, force: true });
+});
+
+describe('schedule commands', () => {
+  it('creates a schedule with a remote cwd and command', async () => {
+    const result = await invoke(['schedule', 'create', 'build', '*/15 * * * *', '--cwd', '/site', 'npm', 'run', 'build']);
+    expect(result.code).toBe(0);
+    const request = requests.find((entry) => entry.method === 'POST' && entry.path === '/v1/volumes/vol/schedules');
+    expect(JSON.parse(request?.body || '{}')).toEqual({
+      name: 'build', cron: '*/15 * * * *', command: 'npm run build', cwd: '/site',
+    });
+  });
+
+  it('lists and manages schedules', async () => {
+    expect((await invoke(['--json', 'schedule', 'list'])).stdout).toContain('schedule-1');
+    expect((await invoke(['schedule', 'disable', 'schedule-1'])).code).toBe(0);
+    expect((await invoke(['schedule', 'enable', 'schedule-1'])).code).toBe(0);
+    expect((await invoke(['schedule', 'delete', 'schedule-1'])).code).toBe(0);
+  });
+});
+
+async function invoke(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  const sink = (chunks: Buffer[]) => new Writable({
+    write(chunk, _encoding, callback) { chunks.push(Buffer.from(chunk)); callback(); },
+  });
+  const code = await execute(['node', 'airyfs', '--session', 'test', ...args], {
+    sessions,
+    stdin: Readable.from(''),
+    stdout: sink(stdout),
+    stderr: sink(stderr),
+    shellMode: true,
+  });
+  return { code, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() };
+}
+
+function json(response: ServerResponse, status: number, value: unknown): void {
+  response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
+}

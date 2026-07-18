@@ -20,9 +20,13 @@ import type {
   MintCapabilityInput,
   MintedCapability,
   PerfInfo,
+  QuotaInfo,
+  TrashEntry,
+  RestoredTrashEntry,
   SnapshotDiffEntry,
   SnapshotInfo,
   TreeSummary,
+  TreeViewResponse,
   UploadCompleteResult,
   UploadStatus,
   UsageInfo,
@@ -50,6 +54,18 @@ export class AiryFSClient {
     return this.json<VolumeInfo>(this.volumeBase);
   }
 
+  quota(): Promise<QuotaInfo> {
+    return this.json<QuotaInfo>(`${this.volumeBase}/quota`);
+  }
+
+  setQuota(input: Partial<QuotaInfo>): Promise<QuotaInfo> {
+    return this.json<QuotaInfo>(`${this.volumeBase}/quota`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
   createVolume(chunkSize?: number): Promise<VolumeInfo> {
     return this.json<VolumeInfo>(this.volumeBase, {
       method: 'PUT',
@@ -60,6 +76,14 @@ export class AiryFSClient {
 
   listDirectory(path: string): Promise<DirectoryEntry[]> {
     return this.json<DirectoryEntry[]>(this.resourcePath('directories', path));
+  }
+
+  tree(path: string, options: { depth?: number; limit?: number } = {}): Promise<TreeViewResponse> {
+    const query = new URLSearchParams();
+    if (options.depth !== undefined) query.set('depth', String(options.depth));
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    const suffix = query.size > 0 ? `?${query}` : '';
+    return this.json<TreeViewResponse>(`${this.resourcePath('tree', path)}${suffix}`);
   }
 
   readFile(path: string, range?: string, signal?: AbortSignal): Promise<Response> {
@@ -90,18 +114,41 @@ export class AiryFSClient {
     } as RequestInit & { duplex: 'half' });
   }
 
-  async deleteFile(path: string): Promise<void> {
-    await this.request(this.resourcePath('files', path), { method: 'DELETE' });
+  async deleteFile(path: string, permanent = false): Promise<TrashEntry | undefined> {
+    const url = this.resourceUrl('files', path);
+    if (permanent) url.searchParams.set('permanent', 'true');
+    const response = await this.requestUrl(url, { method: 'DELETE' });
+    return permanent ? undefined : await response.json() as TrashEntry;
   }
 
   async makeDirectory(path: string): Promise<void> {
     await this.request(this.resourcePath('directories', path), { method: 'PUT' });
   }
 
-  async removeDirectory(path: string, recursive = false): Promise<void> {
+  async removeDirectory(path: string, recursive = false, permanent = false): Promise<TrashEntry | undefined> {
     const url = this.resourceUrl('directories', path);
     if (recursive) url.searchParams.set('recursive', 'true');
-    await this.requestUrl(url, { method: 'DELETE' });
+    if (permanent) url.searchParams.set('permanent', 'true');
+    const response = await this.requestUrl(url, { method: 'DELETE' });
+    return permanent ? undefined : await response.json() as TrashEntry;
+  }
+
+  listTrash(): Promise<TrashEntry[]> {
+    return this.json<TrashEntry[]>(`${this.volumeBase}/trash`);
+  }
+
+  restoreTrash(id: string, to?: string): Promise<RestoredTrashEntry> {
+    return this.json<RestoredTrashEntry>(`${this.volumeBase}/trash/${encodeURIComponent(id)}/restore`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(to ? { to } : {}),
+    });
+  }
+
+  purgeTrash(id: string): Promise<TrashEntry> {
+    return this.json<TrashEntry>(`${this.volumeBase}/trash/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  undoTrash(): Promise<RestoredTrashEntry> {
+    return this.json<RestoredTrashEntry>(`${this.volumeBase}/trash/undo`, { method: 'POST' });
   }
 
   rename(from: string, to: string): Promise<void> {

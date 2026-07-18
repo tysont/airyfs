@@ -6,8 +6,10 @@ import { AgentFS, type CloudflareStorage } from 'agentfs-sdk/cloudflare';
 import {
   ChunkSizeConflictError,
   configureChunkSize,
+  configureQuota,
   initSchema,
   InvalidChunkSizeError,
+  readQuota,
   SCHEMA_TABLES,
 } from './schema';
 import { HranaServer, wrapSqlStorage } from './hrana-server';
@@ -15,6 +17,7 @@ import { MutationJournal } from './mutation-journal';
 import {
   errorResponse,
   fileResponse,
+  latestFileVersion,
   handleFilesystemRequest,
   HttpError,
   parseV1Route,
@@ -91,6 +94,7 @@ import {
   capabilityAllows,
   hashPassword,
   isCapabilityRevoked,
+  normalizePath,
   OPERATIONS,
   readPasswordRecord,
   revokeCapability,
@@ -114,6 +118,28 @@ import {
   subdomainVolume,
   writeSite,
 } from './sites';
+import {
+  createWebhook,
+  deleteWebhook,
+  deliverWebhooks,
+  hasPendingWebhookDeliveries,
+  listWebhooks,
+  nextWebhookDelay,
+} from './webhooks';
+import { assetPath, getAsset, putAsset } from './assets';
+import {
+  advanceSchedule,
+  createSchedule,
+  deleteSchedule,
+  listDueSchedules,
+  listSchedules,
+  nextScheduleDelay,
+  setScheduleEnabled,
+} from './schedules';
+import { search as searchVolume } from './search';
+import { readTree } from './tree';
+import { listTrash, moveToTrash, purgeTrash, restoreTrash, undoTrash } from './trash';
+import { handleWebDav, parseWebDavDestination } from './webdav';
 
 interface Env {
   AiryFS: DurableObjectNamespace<AiryFS>;
@@ -167,6 +193,8 @@ export class AiryFS extends Container<Env> {
   private activeExec: symbol | null = null;
   /** In-memory single-flight guard for the scheduled queue runner. */
   private jobRunning = false;
+  private webhookDeliveryRunning = false;
+  private scheduleRunnerActive = false;
   private dataSocket: WorkerSocket | null = null;
   private invalidationSocket: WorkerSocket | null = null;
   private hranaServer: HranaServer | null = null;
@@ -178,7 +206,55 @@ export class AiryFS extends Container<Env> {
     this.mutations = new MutationJournal(this.ctx.storage.sql);
     this.ctx.blockConcurrencyWhile(async () => {
       initSchema(this.ctx.storage.sql, (callback) => this.ctx.storage.transactionSync(callback));
+      await this.scheduleWebhookDelivery();
+      await this.scheduleNextCronRun();
     });
+  }
+
+  private async recordMutations(fs: AgentFS, paths: string[]): Promise<void> {
+    await this.mutations.record(fs, paths);
+    await this.scheduleWebhookDelivery();
+  }
+
+  private async scheduleWebhookDelivery(): Promise<void> {
+    if (!hasPendingWebhookDeliveries(this.ctx.storage.sql)) return;
+    await this.schedule(nextWebhookDelay(this.ctx.storage.sql) ?? 0, 'deliverWebhookQueue');
+  }
+
+  async deliverWebhookQueue(): Promise<void> {
+    if (this.webhookDeliveryRunning) return;
+    this.webhookDeliveryRunning = true;
+    try {
+      const rows = this.ctx.storage.sql.exec("SELECT value FROM fs_config WHERE key = 'volume_name'").toArray();
+      const volume = rows[0]?.value === undefined ? '' : String(rows[0].value);
+      await deliverWebhooks(this.ctx.storage.sql, volume);
+      await this.scheduleWebhookDelivery();
+    } finally {
+      this.webhookDeliveryRunning = false;
+    }
+  }
+
+  private async scheduleNextCronRun(): Promise<void> {
+    const delay = nextScheduleDelay(this.ctx.storage.sql);
+    if (delay !== null) await this.schedule(delay, 'runScheduledJobs');
+  }
+
+  async runScheduledJobs(): Promise<void> {
+    if (this.scheduleRunnerActive) return;
+    this.scheduleRunnerActive = true;
+    try {
+      for (const schedule of listDueSchedules(this.ctx.storage.sql)) {
+        await this.submitJob(
+          schedule.command,
+          schedule.cwd,
+          `schedule:${schedule.id}:${schedule.scheduledFor}`,
+        );
+        advanceSchedule(this.ctx.storage.sql, schedule);
+      }
+      await this.scheduleNextCronRun();
+    } finally {
+      this.scheduleRunnerActive = false;
+    }
   }
 
   private filesystem(requestedChunkSize?: unknown): AgentFS {
@@ -354,7 +430,7 @@ export class AiryFS extends Container<Env> {
     const release = await this.access.acquireWrite(path);
     try {
       await fs.writeFile(path, content);
-      await this.mutations.record(fs, [path]);
+      await this.recordMutations(fs, [path]);
     } finally {
       release();
     }
@@ -398,7 +474,7 @@ export class AiryFS extends Container<Env> {
     const release = await this.access.acquireWrite(path);
     try {
       await fs.mkdir(path);
-      await this.mutations.record(fs, [path]);
+      await this.recordMutations(fs, [path]);
     } finally { release(); }
   }
 
@@ -407,7 +483,7 @@ export class AiryFS extends Container<Env> {
     const release = await this.access.acquireWrite(path);
     try {
       await fs.rm(path, { recursive });
-      await this.mutations.record(fs, [path]);
+      await this.recordMutations(fs, [path]);
     } finally { release(); }
   }
 
@@ -416,7 +492,7 @@ export class AiryFS extends Container<Env> {
     const release = await this.access.acquireWrite([from, to]);
     try {
       await fs.rename(from, to);
-      await this.mutations.record(fs, [from, to]);
+      await this.recordMutations(fs, [from, to]);
     } finally { release(); }
   }
 
@@ -425,7 +501,7 @@ export class AiryFS extends Container<Env> {
     const release = await this.access.acquireWrite([from, to]);
     try {
       await fs.copyFile(from, to);
-      await this.mutations.record(fs, [to]);
+      await this.recordMutations(fs, [to]);
     } finally { release(); }
   }
 
@@ -434,7 +510,7 @@ export class AiryFS extends Container<Env> {
     const release = await this.access.acquireWrite(path);
     try {
       await fs.symlink(target, path);
-      await this.mutations.record(fs, [path]);
+      await this.recordMutations(fs, [path]);
     } finally { release(); }
   }
 
@@ -468,7 +544,7 @@ export class AiryFS extends Container<Env> {
   async writeFileStream(path: string, stream: ReadableStream<Uint8Array>): Promise<void> {
     const fs = this.filesystem();
     await writeFileStream(fs, path, stream, this.access);
-    await this.mutations.record(fs, [path]);
+    await this.recordMutations(fs, [path]);
   }
 
   /**
@@ -510,7 +586,7 @@ export class AiryFS extends Container<Env> {
       { replace: options?.replace, allowRoot: options?.allowRoot },
       {
         acquireWrite: (target) => this.access.acquireWrite(target),
-        record: (paths) => this.mutations.record(fs, paths),
+        record: (paths) => this.recordMutations(fs, paths),
       }
     );
     // A root replace rebuilds the whole tree; drop the cached AgentFS so the
@@ -559,7 +635,7 @@ export class AiryFS extends Container<Env> {
   async completeUpload(path: string): Promise<UploadCompleteResult> {
     const fs = this.filesystem();
     const result = await completeUpload(fs, this.ctx.storage.sql, this.access, path);
-    await this.mutations.record(fs, [path]);
+    await this.recordMutations(fs, [path]);
     return result;
   }
 
@@ -828,6 +904,7 @@ export class AiryFS extends Container<Env> {
   /** Return logical filesystem usage, physical SQLite size, and runtime health. */
   async usage(): Promise<Record<string, unknown>> {
     const filesystem = await this.filesystem().statfs();
+    const quota = readQuota(this.ctx.storage.sql);
     const runtimeState = await this.getState();
     let container: Record<string, unknown> = {
       state: runtimeState.status,
@@ -855,7 +932,13 @@ export class AiryFS extends Container<Env> {
     }
 
     return {
-      filesystem,
+      filesystem: {
+        ...filesystem,
+        quotaBytes: quota.bytes,
+        quotaInodes: quota.inodes,
+        bytesAvailable: quota.bytes === null ? null : Math.max(0, quota.bytes - filesystem.bytesUsed),
+        inodesAvailable: quota.inodes === null ? null : Math.max(0, quota.inodes - filesystem.inodes),
+      },
       sqliteBytes: this.ctx.storage.sql.databaseSize,
       container,
       hrana: {
@@ -1067,6 +1150,7 @@ export class AiryFS extends Container<Env> {
       writable: socket.writable,
       sql: wrapSqlStorage(this.ctx.storage.sql),
       writeLock: () => this.access.acquireWrite('*'),
+      onWrite: () => this.scheduleWebhookDelivery(),
     });
 
     const servePromise = this.hranaServer.serve();
@@ -1328,7 +1412,14 @@ export class AiryFS extends Container<Env> {
     if (!site) throw new HttpError(404, 'NOT_PUBLISHED', 'This volume has no published site');
     const segments = url.pathname.split('/').filter(Boolean); // ['s', volume, ...rest]
     const subPath = `/${segments.slice(2).map(decodeURIComponent).join('/')}`;
-    return serveSite(this.filesystem(), this.access, site, subPath, request);
+    return serveSite(
+      this.filesystem(),
+      this.access,
+      site,
+      subPath,
+      request,
+      (ino) => latestFileVersion(this.ctx.storage.sql, ino)
+    );
   }
 
   /**
@@ -1343,7 +1434,59 @@ export class AiryFS extends Container<Env> {
     const id = segments[2] ? decodeURIComponent(segments[2]) : '';
     const share = id ? readShare(this.ctx.storage.sql, id) : null;
     if (!share) throw new HttpError(404, 'NOT_FOUND', 'Unknown share link');
-    return serveShare(this.filesystem(), this.access, share, request);
+    return serveShare(
+      this.filesystem(),
+      this.access,
+      share,
+      request,
+      (ino) => latestFileVersion(this.ctx.storage.sql, ino)
+    );
+  }
+
+  private async handleWebDavRequest(url: URL, request: Request): Promise<Response> {
+    const segments = url.pathname.split('/').filter(Boolean);
+    const volume = segments[1] ? decodeURIComponent(segments[1]) : '';
+    const path = normalizePath(`/${segments.slice(2).map(decodeURIComponent).join('/')}`);
+    if (!volume) throw new HttpError(404, 'INVALID_ROUTE', 'Missing WebDAV volume');
+    if (request.method !== 'OPTIONS') await this.authorizeWebDav(request, volume, path);
+    return handleWebDav({
+      fs: this.filesystem(), sql: this.ctx.storage.sql, access: this.access, volume, path, request,
+      onMutation: (paths) => this.recordMutations(this.filesystem(), paths),
+    });
+  }
+
+  private async authorizeWebDav(request: Request, volume: string, path: string): Promise<void> {
+    const secret = this.env.AIRYFS_AUTH_SECRET;
+    if (!secret) return;
+    let authorization = request.headers.get('Authorization');
+    const basic = authorization?.match(/^Basic\s+(.+)$/i);
+    if (basic) {
+      try {
+        const decoded = new TextDecoder().decode(Uint8Array.from(atob(basic[1]), (character) => character.charCodeAt(0)));
+        const password = decoded.slice(decoded.indexOf(':') + 1);
+        const record = readPasswordRecord(this.ctx.storage.sql);
+        if (record && await verifyPassword(password, record)) return;
+        authorization = `Bearer ${password}`;
+      } catch {
+        authorization = null;
+      }
+    }
+    let identity: Identity;
+    try {
+      identity = await authenticate(secret, authorization, volume);
+    } catch {
+      throw new HttpError(401, 'UNAUTHENTICATED', 'WebDAV credentials required', {
+        'WWW-Authenticate': `Basic realm="AiryFS ${volume}"`,
+      });
+    }
+    if (identity.kind !== 'capability') return;
+    if (isCapabilityRevoked(this.ctx.storage.sql, identity.capability.id)) throw new HttpError(403, 'TOKEN_REVOKED', 'Capability revoked');
+    const read = request.method === 'GET' || request.method === 'HEAD' || request.method === 'PROPFIND';
+    const paths = [path];
+    if (request.method === 'MOVE' || request.method === 'COPY') paths.push(parseWebDavDestination(request, volume));
+    if (!capabilityAllows(identity.capability, read ? 'read' : 'write', paths)) {
+      throw new HttpError(403, 'FORBIDDEN', 'Capability does not permit this WebDAV operation');
+    }
   }
 
   /** Manage the published site: GET status, PUT publish/update, DELETE unpublish. */
@@ -1361,8 +1504,9 @@ export class AiryFS extends Container<Env> {
         ? body.indexDocument
         : 'index.html';
       const spa = body.spa === true;
+      const directoryListing = body.directoryListing === true;
       const cacheControl = typeof body.cacheControl === 'string' ? body.cacheControl : null;
-      const site = writeSite(sql, { pathPrefix, indexDocument, spa, cacheControl });
+      const site = writeSite(sql, { pathPrefix, indexDocument, spa, directoryListing, cacheControl });
       return Response.json(site);
     }
     if (request.method === 'DELETE') {
@@ -1395,6 +1539,89 @@ export class AiryFS extends Container<Env> {
       return Response.json({ id: segments[0], removed: deleteShare(sql, segments[0]) });
     }
     throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, POST, DELETE' });
+  }
+
+  private async handleWebhooks(request: Request, route: V1Route): Promise<Response> {
+    const segments = route.path.split('/').filter(Boolean);
+    if (segments.length === 0) {
+      if (request.method === 'GET') return Response.json(listWebhooks(this.ctx.storage.sql));
+      if (request.method === 'POST') {
+        const body = await readJsonObject(request);
+        this.ctx.storage.sql.exec(
+          "INSERT OR REPLACE INTO fs_config (key, value) VALUES ('volume_name', ?)",
+          route.volume,
+        );
+        return Response.json(createWebhook(this.ctx.storage.sql, {
+          url: body.url,
+          pathPrefix: body.pathPrefix,
+          events: body.events,
+        }), { status: 201 });
+      }
+      throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, POST' });
+    }
+    if (segments.length === 1 && request.method === 'DELETE') {
+      return Response.json({ id: segments[0], removed: deleteWebhook(this.ctx.storage.sql, segments[0]) });
+    }
+    throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, POST, DELETE' });
+  }
+
+  private async handleAssets(request: Request, route: V1Route): Promise<Response> {
+    const segments = route.path.split('/').filter(Boolean);
+    if (segments.length !== 1) throw new HttpError(404, 'INVALID_ROUTE', 'An asset SHA-256 is required');
+    const hash = segments[0];
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      return getAsset(
+        this.filesystem(),
+        this.access,
+        hash,
+        request,
+        (ino) => latestFileVersion(this.ctx.storage.sql, ino),
+      );
+    }
+    if (request.method === 'PUT') {
+      const result = await putAsset(this.filesystem(), this.access, hash, request.body);
+      if (result.created) await this.recordMutations(this.filesystem(), [assetPath(hash)]);
+      return Response.json(result, { status: result.created ? 201 : 200 });
+    }
+    throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, HEAD, PUT' });
+  }
+
+  private async handleSchedules(request: Request, route: V1Route): Promise<Response> {
+    const segments = route.path.split('/').filter(Boolean);
+    if (segments.length === 0) {
+      if (request.method === 'GET') return Response.json(listSchedules(this.ctx.storage.sql));
+      if (request.method === 'POST') {
+        const schedule = createSchedule(this.ctx.storage.sql, await readJsonObject(request));
+        await this.scheduleNextCronRun();
+        return Response.json(schedule, { status: 201 });
+      }
+      throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, POST' });
+    }
+    if (segments.length === 1 && request.method === 'DELETE') {
+      return Response.json({ id: segments[0], removed: deleteSchedule(this.ctx.storage.sql, segments[0]) });
+    }
+    if (segments.length === 2 && request.method === 'POST' && (segments[1] === 'enable' || segments[1] === 'disable')) {
+      const schedule = setScheduleEnabled(this.ctx.storage.sql, segments[0], segments[1] === 'enable');
+      await this.scheduleNextCronRun();
+      return Response.json(schedule);
+    }
+    throw new HttpError(404, 'INVALID_ROUTE', 'Invalid schedule route');
+  }
+
+  private async handleSearch(request: Request, route: V1Route): Promise<Response> {
+    if (route.path !== '/') throw new HttpError(404, 'INVALID_ROUTE', 'Search does not accept a path suffix');
+    if (request.method !== 'POST') {
+      throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'POST' });
+    }
+    const body = await readJsonObject(request);
+    return Response.json(await searchVolume(this.filesystem(), this.access, {
+      mode: body.mode,
+      path: body.path,
+      pattern: body.pattern,
+      regex: body.regex,
+      ignoreCase: body.ignoreCase,
+      limit: body.limit,
+    }));
   }
 
   /**
@@ -1580,6 +1807,7 @@ export class AiryFS extends Container<Env> {
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    const browserUploadRequest = url.pathname.includes('/browser-uploads/');
 
     try {
       // Public web hosting is served before any bearer check.
@@ -1589,8 +1817,15 @@ export class AiryFS extends Container<Env> {
       if (url.pathname.startsWith('/d/')) {
         return await this.handleShareRequest(url, request);
       }
+      if (url.pathname.startsWith('/dav/')) {
+        return await this.handleWebDavRequest(url, request);
+      }
 
       const v1Route = parseV1Route(url.pathname);
+
+      if (v1Route?.resource === 'browser-uploads' && request.method === 'OPTIONS') {
+        return withBrowserUploadCors(new Response(null, { status: 204 }));
+      }
 
       // The per-volume auth resource is handled before the bearer check so that
       // `/auth/login` can exchange the volume password for a token unauthenticated.
@@ -1639,15 +1874,34 @@ export class AiryFS extends Container<Env> {
           );
         }
 
+        if (
+          request.method === 'DELETE'
+          && (v1Route.resource === 'files' || v1Route.resource === 'directories')
+          && url.searchParams.get('permanent') !== 'true'
+        ) {
+          const entry = await moveToTrash(this.filesystem(), this.ctx.storage.sql, this.access, v1Route.path);
+          await this.recordMutations(this.filesystem(), [v1Route.path, entry.trashPath]);
+          return Response.json(entry, { headers: { 'X-AiryFS-Trash-Id': entry.id } });
+        }
+
+        if (v1Route.resource !== 'trash' && (v1Route.path === '/.airyfs-trash' || v1Route.path.startsWith('/.airyfs-trash/'))) {
+          throw new HttpError(404, 'ENOENT', 'Path not found');
+        }
+
         const fs = this.filesystem();
         const filesystemResponse = await handleFilesystemRequest(
           request,
           v1Route,
           fs,
           this.access,
-          (paths) => this.mutations.record(fs, paths)
+          (paths) => this.recordMutations(fs, paths),
+          (ino) => latestFileVersion(this.ctx.storage.sql, ino)
         );
-        if (filesystemResponse) return filesystemResponse;
+        if (filesystemResponse) {
+          return v1Route.resource === 'browser-uploads'
+            ? withBrowserUploadCors(filesystemResponse)
+            : filesystemResponse;
+        }
 
         if (v1Route.resource === 'trees') {
           if (request.method === 'GET') {
@@ -1685,6 +1939,70 @@ export class AiryFS extends Container<Env> {
 
         if (v1Route.resource === 'shares') {
           return await this.handleShares(request, v1Route);
+        }
+
+        if (v1Route.resource === 'webhooks') {
+          return await this.handleWebhooks(request, v1Route);
+        }
+
+        if (v1Route.resource === 'assets') {
+          return await this.handleAssets(request, v1Route);
+        }
+
+        if (v1Route.resource === 'schedules') {
+          return await this.handleSchedules(request, v1Route);
+        }
+
+        if (v1Route.resource === 'search') {
+          return await this.handleSearch(request, v1Route);
+        }
+
+        if (v1Route.resource === 'tree') {
+          if (request.method !== 'GET') {
+            throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET' });
+          }
+          return Response.json(await readTree(this.filesystem(), this.access, {
+            path: v1Route.path,
+            depth: optionalQueryNumber(url, 'depth'),
+            limit: optionalQueryNumber(url, 'limit'),
+          }));
+        }
+
+        if (v1Route.resource === 'quota') {
+          if (v1Route.path !== '/') throw new HttpError(404, 'INVALID_ROUTE', 'Quota does not accept a path suffix');
+          if (request.method === 'GET') return Response.json(readQuota(this.ctx.storage.sql));
+          if (request.method === 'PUT') {
+            const body = await readJsonObject(request);
+            try {
+              return Response.json(this.ctx.storage.transactionSync(() => configureQuota(this.ctx.storage.sql, body)));
+            } catch (error) {
+              throw new HttpError(400, 'INVALID_QUOTA', error instanceof Error ? error.message : String(error));
+            }
+          }
+          throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, PUT' });
+        }
+
+        if (v1Route.resource === 'trash') {
+          const segments = v1Route.path.split('/').filter(Boolean);
+          if (segments.length === 0 && request.method === 'GET') {
+            return Response.json(listTrash(this.ctx.storage.sql));
+          }
+          if (segments.length === 1 && segments[0] === 'undo' && request.method === 'POST') {
+            return Response.json(await undoTrash(this.filesystem(), this.ctx.storage.sql, this.access));
+          }
+          if (segments.length === 1 && request.method === 'DELETE') {
+            return Response.json(await purgeTrash(this.filesystem(), this.ctx.storage.sql, this.access, segments[0]));
+          }
+          if (segments.length === 2 && segments[1] === 'restore' && request.method === 'POST') {
+            const body = await readOptionalJsonObject(request);
+            if (body.to !== undefined && typeof body.to !== 'string') {
+              throw new HttpError(400, 'INVALID_ARGUMENT', 'to must be a string');
+            }
+            return Response.json(await restoreTrash(
+              this.filesystem(), this.ctx.storage.sql, this.access, segments[0], body.to as string | undefined,
+            ));
+          }
+          throw new HttpError(404, 'INVALID_ROUTE', 'Invalid trash route');
         }
 
         if (v1Route.resource === 'exec') {
@@ -1732,14 +2050,20 @@ export class AiryFS extends Container<Env> {
         const path = url.searchParams.get('path');
         if (!path) return new Response('Missing ?path=', { status: 400 });
         await writeFileStream(this.filesystem(), path, request.body, this.access);
-        await this.mutations.record(this.filesystem(), [path]);
+        await this.recordMutations(this.filesystem(), [path]);
         return new Response('ok');
       }
 
       if (url.pathname === '/fs/read') {
         const path = url.searchParams.get('path');
         if (!path) return new Response('Missing ?path=', { status: 400 });
-        return fileResponse(this.filesystem(), path, request, this.access);
+        return fileResponse(
+          this.filesystem(),
+          path,
+          request,
+          this.access,
+          (ino) => latestFileVersion(this.ctx.storage.sql, ino)
+        );
       }
 
       if (url.pathname === '/fs/ls') {
@@ -1786,9 +2110,27 @@ export class AiryFS extends Container<Env> {
 
       return new Response('Not found', { status: 404 });
     } catch (error) {
-      return errorResponse(error);
+      const response = errorResponse(error);
+      return browserUploadRequest ? withBrowserUploadCors(response) : response;
     }
   }
+}
+
+function withBrowserUploadCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set('Access-Control-Allow-Origin', '*');
+  headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  headers.set('Access-Control-Max-Age', '86400');
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function optionalQueryNumber(url: URL, name: string): number | undefined {
+  const value = url.searchParams.get(name);
+  if (value === null) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new HttpError(400, 'INVALID_ARGUMENT', `${name} must be a number`);
+  return parsed;
 }
 
 /** Describe the operation and paths a request requires, for capability authorization. */
@@ -1811,10 +2153,19 @@ async function requiredAccess(
         return { operation: method === 'GET' ? 'read' : 'write', paths: [route.path] };
       case 'trees':
         return { operation: method === 'GET' ? 'read' : 'write', paths: [route.path] };
+      case 'tree':
+        return { operation: 'read', paths: [route.path] };
       case 'uploads':
         // The route path is the final target; status reads, all mutating upload
         // methods write, scoped to that path.
         return { operation: method === 'GET' ? 'read' : 'write', paths: [route.path] };
+      case 'browser-uploads':
+        return { operation: 'write', paths: [route.path] };
+      case 'assets':
+        return {
+          operation: method === 'GET' || method === 'HEAD' ? 'read' : 'write',
+          paths: [assetPath(route.path.slice(1))],
+        };
       case 'operations':
         return method === 'POST'
           ? operationAccess(await safeJson(request), route.path.slice(1))
@@ -1827,10 +2178,27 @@ async function requiredAccess(
         // Command text and output are execution-capable and sensitive: every job
         // route requires the exec capability on the volume root.
         return { operation: 'exec', paths: ['/'] };
+      case 'schedules':
+        // Schedules persist command execution beyond the caller's token lifetime.
+        return { operation: 'admin', paths: [] };
+      case 'search': {
+        const body = await safeJson(request);
+        return { operation: 'read', paths: [typeof body?.path === 'string' ? body.path : '/'] };
+      }
       case 'changes':
         return { operation: 'read', paths: [route.path] };
+      case 'webhooks':
+        return { operation: 'admin', paths: [] };
       case 'usage':
         return { operation: 'read', paths: ['/'] };
+      case 'quota':
+        return method === 'GET'
+          ? { operation: 'read', paths: ['/'] }
+          : { operation: 'admin', paths: [] };
+      case 'trash':
+        return method === 'GET'
+          ? { operation: 'read', paths: ['/'] }
+          : { operation: 'admin', paths: [] };
       case 'capabilities':
         return method === 'GET'
           ? { operation: null, paths: [] }

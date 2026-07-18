@@ -11,6 +11,7 @@ export {
   execStreamWithId,
   followJobLogs,
   resumableUploadBlob,
+  tailFile,
   waitForJob,
   watchChanges,
 } from './helpers.js';

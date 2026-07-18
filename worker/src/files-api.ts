@@ -4,6 +4,7 @@
 import { Buffer } from 'buffer';
 import type { FileHandle, FileSystem, Stats } from 'agentfs-sdk/cloudflare';
 import { sha256Path } from './checksum';
+import type { SqlExec } from './schema';
 
 const READ_CHUNK_SIZE = 256 * 1024;
 const WRITE_CHUNK_SIZE = 256 * 1024;
@@ -23,7 +24,7 @@ export interface StatsDto {
 
 export interface V1Route {
   volume: string;
-  resource: 'volume' | 'files' | 'directories' | 'trees' | 'operations' | 'exec' | 'usage' | 'capabilities' | 'snapshots' | 'uploads' | 'jobs' | 'changes' | 'auth' | 'sites' | 'shares';
+  resource: 'volume' | 'files' | 'directories' | 'trees' | 'tree' | 'operations' | 'exec' | 'usage' | 'quota' | 'trash' | 'capabilities' | 'snapshots' | 'uploads' | 'browser-uploads' | 'assets' | 'jobs' | 'schedules' | 'search' | 'changes' | 'webhooks' | 'auth' | 'sites' | 'shares';
   path: string;
 }
 
@@ -135,7 +136,7 @@ export function parseV1Route(pathname: string): V1Route | null {
   }
 
   const resource = parts[4];
-  if (!['files', 'directories', 'trees', 'operations', 'exec', 'usage', 'capabilities', 'snapshots', 'uploads', 'jobs', 'changes', 'auth', 'sites', 'shares'].includes(resource)) {
+  if (!['files', 'directories', 'trees', 'tree', 'operations', 'exec', 'usage', 'quota', 'trash', 'capabilities', 'snapshots', 'uploads', 'browser-uploads', 'assets', 'jobs', 'schedules', 'search', 'changes', 'webhooks', 'auth', 'sites', 'shares'].includes(resource)) {
     throw new HttpError(404, 'INVALID_ROUTE', `Unknown volume resource: ${resource}`);
   }
 
@@ -185,7 +186,8 @@ export function errorResponse(error: unknown): Response {
   }
 
   const errno = error instanceof Error ? error as ErrnoLike : null;
-  const code = errno?.code ?? 'INTERNAL_ERROR';
+  const quotaExceeded = errno?.message.includes('AIRYFS_ENOSPC_') ?? false;
+  const code = quotaExceeded ? 'ENOSPC' : errno?.code ?? 'INTERNAL_ERROR';
   const statusByCode: Record<string, number> = {
     ENOENT: 404,
     EEXIST: 409,
@@ -288,11 +290,47 @@ function createReadStream(
   });
 }
 
+export function latestFileVersion(sql: SqlExec, ino: number): number {
+  const rows = sql.exec('SELECT max(seq) AS version FROM fs_change_feed WHERE ino = ?', ino).toArray();
+  return rows[0]?.version === null || rows[0]?.version === undefined ? 0 : Number(rows[0].version);
+}
+
+function entityTag(stats: Stats, version: number): string {
+  return `"${stats.ino.toString(16)}-${version.toString(16)}-${stats.size.toString(16)}"`;
+}
+
+function weakTagValue(value: string): string {
+  return value.trim().replace(/^W\//, '');
+}
+
+function isNotModified(request: Request, etag: string, mtime: number): boolean {
+  const ifNoneMatch = request.headers.get('If-None-Match');
+  if (ifNoneMatch !== null) {
+    return ifNoneMatch.trim() === '*'
+      || ifNoneMatch.split(',').some((candidate) => weakTagValue(candidate) === etag);
+  }
+
+  const ifModifiedSince = request.headers.get('If-Modified-Since');
+  if (!ifModifiedSince) return false;
+  const since = Date.parse(ifModifiedSince);
+  return !Number.isNaN(since) && Math.floor(mtime) * 1000 <= since;
+}
+
+function canServeRange(request: Request, etag: string, mtime: number): boolean {
+  const ifRange = request.headers.get('If-Range');
+  if (!ifRange) return true;
+  if (ifRange.startsWith('W/')) return false;
+  if (ifRange.startsWith('"')) return ifRange === etag;
+  const since = Date.parse(ifRange);
+  return !Number.isNaN(since) && Math.floor(mtime) * 1000 <= since;
+}
+
 export async function fileResponse(
   fs: FileSystem,
   path: string,
   request: Request,
-  access?: VolumeAccessCoordinator
+  access?: VolumeAccessCoordinator,
+  versionForInode: (ino: number) => number = () => 0
 ): Promise<Response> {
   const release = access ? await access.acquireRead(path) : () => undefined;
   try {
@@ -307,17 +345,28 @@ export async function fileResponse(
       throw error;
     }
 
-    const range = request.method === 'GET' ? parseRange(request.headers.get('Range'), stats.size) : null;
+    const etag = entityTag(stats, versionForInode(stats.ino));
+    const lastModified = new Date(stats.mtime * 1000).toUTCString();
+    const baseHeaders = new Headers({
+      'Accept-Ranges': 'bytes',
+      'Content-Type': 'application/octet-stream',
+      'ETag': etag,
+      'Last-Modified': lastModified,
+      'X-AiryFS-Inode': String(stats.ino),
+    });
+    if (isNotModified(request, etag, stats.mtime)) {
+      release();
+      return new Response(null, { status: 304, headers: baseHeaders });
+    }
+
+    const range = request.method === 'GET' && canServeRange(request, etag, stats.mtime)
+      ? parseRange(request.headers.get('Range'), stats.size)
+      : null;
     const start = range?.start ?? 0;
     const end = range?.end ?? Math.max(0, stats.size - 1);
     const length = stats.size === 0 ? 0 : end - start + 1;
-    const headers = new Headers({
-      'Accept-Ranges': 'bytes',
-      'Content-Length': String(length),
-      'Content-Type': 'application/octet-stream',
-      'Last-Modified': new Date(stats.mtime * 1000).toUTCString(),
-      'X-AiryFS-Inode': String(stats.ino),
-    });
+    const headers = baseHeaders;
+    headers.set('Content-Length', String(length));
     if (range) headers.set('Content-Range', `bytes ${start}-${end}/${stats.size}`);
 
     if (request.method === 'HEAD' || stats.size === 0) {
@@ -476,12 +525,13 @@ export async function handleFilesystemRequest(
   route: V1Route,
   fs: FileSystem,
   access?: VolumeAccessCoordinator,
-  onMutation?: (paths: string[]) => Promise<void>
+  onMutation?: (paths: string[]) => Promise<void>,
+  versionForInode?: (ino: number) => number
 ): Promise<Response | null> {
   try {
     if (route.resource === 'files') {
       if (request.method === 'GET' || request.method === 'HEAD') {
-        return await fileResponse(fs, route.path, request, access);
+        return await fileResponse(fs, route.path, request, access, versionForInode);
       }
       if (request.method === 'PUT') {
         await writeFileStream(fs, route.path, request.body, access);
@@ -496,10 +546,19 @@ export async function handleFilesystemRequest(
       throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, HEAD, PUT, DELETE' });
     }
 
+    if (route.resource === 'browser-uploads') {
+      if (request.method !== 'POST') {
+        throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'POST, OPTIONS' });
+      }
+      await writeFileStream(fs, route.path, request.body, access);
+      await onMutation?.([route.path]);
+      return Response.json({ path: route.path, ...toStatsDto(await fs.stat(route.path)) }, { status: 201 });
+    }
+
     if (route.resource === 'directories') {
       if (request.method === 'GET') {
         const entries = await withRead(access, route.path, () => fs.readdirPlus(route.path));
-        return Response.json(entries.map((entry) => ({
+        return Response.json(entries.filter((entry) => route.path !== '/' || entry.name !== '.airyfs-trash').map((entry) => ({
           name: entry.name,
           ...toStatsDto(entry.stats),
         })));

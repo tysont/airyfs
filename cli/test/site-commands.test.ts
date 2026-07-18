@@ -2,7 +2,7 @@
 // ABOUTME: Verifies publish/status/unpublish requests and share link creation and URLs.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -43,12 +43,12 @@ afterAll(async () => {
 
 describe('site commands', () => {
   it('publishes the web root and prints the public URL', async () => {
-    const result = await invoke(['site', 'publish', '/public', '--spa', '--index', 'index.html']);
+    const result = await invoke(['site', 'publish', '/public', '--spa', '--listing', '--index', 'index.html']);
     expect(result.code).toBe(0);
     expect(result.stdout).toContain(`${endpoint}/s/vol/`);
 
     const publish = requests.slice().reverse().find((r) => r.method === 'PUT' && r.path === '/v1/volumes/vol/sites');
-    expect(JSON.parse(publish?.body || '{}')).toMatchObject({ path: '/public', indexDocument: 'index.html', spa: true });
+    expect(JSON.parse(publish?.body || '{}')).toMatchObject({ path: '/public', indexDocument: 'index.html', spa: true, directoryListing: true });
   });
 
   it('shows the published status', async () => {
@@ -56,6 +56,28 @@ describe('site commands', () => {
     const status = JSON.parse(result.stdout);
     expect(status.published).toBe(true);
     expect(status.url).toBe(`${endpoint}/s/vol/`);
+  });
+
+  it('snapshots then atomically deploys into the existing published root', async () => {
+    const dist = join(temporaryPaths[0], 'dist');
+    await mkdir(dist);
+    await writeFile(join(dist, 'index.html'), '<h1>new</h1>');
+    const result = await invoke(['--json', 'site', 'deploy', dist]);
+    expect(result.code).toBe(0);
+    const output = JSON.parse(result.stdout);
+    expect(output.root).toBe('/public');
+    expect(output.snapshot.name).toMatch(/^site-deploy-/);
+
+    const snapshotIndex = requests.findIndex((r) => r.method === 'POST' && r.path === '/v1/volumes/vol/snapshots');
+    const importIndex = requests.findIndex((r) => r.method === 'PUT' && r.path === '/v1/volumes/vol/trees/public?replace=true');
+    expect(snapshotIndex).toBeGreaterThanOrEqual(0);
+    expect(importIndex).toBeGreaterThan(snapshotIndex);
+  });
+
+  it('rolls back through full-volume snapshot restore', async () => {
+    const result = await invoke(['site', 'rollback', 'site-deploy-old']);
+    expect(result.code).toBe(0);
+    expect(requests.some((r) => r.method === 'POST' && r.path === '/v1/volumes/vol/snapshots/site-deploy-old/restore')).toBe(true);
   });
 
   it('unpublishes the site', async () => {
@@ -109,14 +131,30 @@ async function invoke(args: string[]): Promise<{ code: number; stdout: string; s
 async function route(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
   if (url.pathname === '/v1/volumes/vol/sites') {
     if (request.method === 'PUT') {
-      return json(response, 200, { pathPrefix: '/public', indexDocument: 'index.html', spa: true, cacheControl: null, createdAt: 1 });
+      return json(response, 200, { pathPrefix: '/public', indexDocument: 'index.html', spa: true, directoryListing: true, cacheControl: null, createdAt: 1 });
     }
     if (request.method === 'GET') {
-      return json(response, 200, { published: true, site: { pathPrefix: '/public', indexDocument: 'index.html', spa: true, cacheControl: null, createdAt: 1 } });
+      return json(response, 200, { published: true, site: { pathPrefix: '/public', indexDocument: 'index.html', spa: true, directoryListing: true, cacheControl: null, createdAt: 1 } });
     }
     if (request.method === 'DELETE') {
       return json(response, 200, { removed: true });
     }
+  }
+  if (url.pathname === '/v1/volumes/vol/snapshots' && request.method === 'POST') {
+    const input = JSON.parse((requests.at(-1)?.body) || '{}');
+    return json(response, 201, {
+      id: 'snapshot-1', name: input.name, note: input.note ?? null, createdAt: 1, chunkSize: 262144,
+      inodeCount: 2, fileCount: 1, directoryCount: 1, symlinkCount: 0, byteCount: 12,
+    });
+  }
+  if (url.pathname === '/v1/volumes/vol/trees/public' && url.searchParams.get('replace') === 'true' && request.method === 'PUT') {
+    return json(response, 201, { files: 1, directories: 1, symlinks: 0, bytes: 12 });
+  }
+  if (url.pathname === '/v1/volumes/vol/snapshots/site-deploy-old/restore' && request.method === 'POST') {
+    return json(response, 200, {
+      id: 'snapshot-old', name: 'site-deploy-old', note: null, createdAt: 1, chunkSize: 262144,
+      inodeCount: 2, fileCount: 1, directoryCount: 1, symlinkCount: 0, byteCount: 12,
+    });
   }
   if (url.pathname === '/v1/volumes/vol/shares') {
     if (request.method === 'POST') {

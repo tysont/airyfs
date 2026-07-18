@@ -10,6 +10,7 @@ import {
   fileResponse,
   handleFilesystemRequest,
   HttpError,
+  latestFileVersion,
   parseV1Route,
   readCommandRequest,
   readVolumeCreateRequest,
@@ -27,9 +28,13 @@ function route(resource: V1Route['resource'], path: string): V1Route {
 
 describe('filesystem HTTP API', () => {
   let fs: AgentFS;
+  let sql: ReturnType<typeof createTestStorage>['sql'];
 
   beforeEach(() => {
-    fs = AgentFS.create(createTestStorage(new Database(':memory:')));
+    const storage = createTestStorage(new Database(':memory:'));
+    sql = storage.sql;
+    initSchema(sql);
+    fs = AgentFS.create(storage);
   });
 
   it('parses resource routes and encoded path segments', () => {
@@ -49,6 +54,15 @@ describe('filesystem HTTP API', () => {
     });
     expect(parseV1Route('/v1/volumes/vol/changes/src')).toEqual({
       volume: 'vol', resource: 'changes', path: '/src',
+    });
+    expect(parseV1Route('/v1/volumes/vol/browser-uploads/inbox/a%20b.txt')).toEqual({
+      volume: 'vol', resource: 'browser-uploads', path: '/inbox/a b.txt',
+    });
+    expect(parseV1Route('/v1/volumes/vol/tree/src')).toEqual({
+      volume: 'vol', resource: 'tree', path: '/src',
+    });
+    expect(parseV1Route('/v1/volumes/vol/trash/abc/restore')).toEqual({
+      volume: 'vol', resource: 'trash', path: '/abc/restore',
     });
     expect(parseV1Route('/fs/read')).toBeNull();
     expect(() => parseV1Route('/v1/volumes/test/unknown')).toThrow(HttpError);
@@ -75,6 +89,23 @@ describe('filesystem HTTP API', () => {
     expect(readResponse.headers.get('Content-Type')).toBe('application/octet-stream');
   });
 
+  it('streams browser POST uploads into their target path', async () => {
+    await fs.mkdir('/inbox');
+    const bytes = Uint8Array.from([0, 255, 7, 128]);
+    const response = await handleFilesystemRequest(
+      new Request('http://localhost/v1/volumes/test/browser-uploads/inbox/data.bin', {
+        method: 'POST',
+        body: bytes,
+      }),
+      route('browser-uploads', '/inbox/data.bin'),
+      fs,
+    );
+
+    expect(response?.status).toBe(201);
+    expect(await response?.json()).toMatchObject({ path: '/inbox/data.bin', size: bytes.byteLength, type: 'file' });
+    expect(new Uint8Array(await fs.readFile('/inbox/data.bin'))).toEqual(bytes);
+  });
+
   it('supports bounded, open-ended, and suffix byte ranges', async () => {
     await fs.writeFile('/range.txt', Buffer.from('0123456789'));
 
@@ -90,6 +121,58 @@ describe('filesystem HTTP API', () => {
       expect(await response.text()).toBe(expected);
       expect(response.headers.get('Content-Range')).toBe(contentRange);
     }
+  });
+
+  it('returns stable validators and handles conditional reads', async () => {
+    await fs.writeFile('/cached.txt', Buffer.from('cached'));
+    const version = (ino: number) => latestFileVersion(sql, ino);
+    const initial = await fileResponse(fs, '/cached.txt', new Request('http://localhost'), undefined, version);
+    const etag = initial.headers.get('ETag')!;
+    const lastModified = initial.headers.get('Last-Modified')!;
+    await initial.body?.cancel();
+
+    expect(etag).toMatch(/^"[0-9a-f]+-[0-9a-f]+-[0-9a-f]+"$/);
+    expect((await fileResponse(fs, '/cached.txt', new Request('http://localhost', {
+      headers: { 'If-None-Match': etag },
+    }), undefined, version)).status).toBe(304);
+    expect((await fileResponse(fs, '/cached.txt', new Request('http://localhost', {
+      headers: { 'If-None-Match': `W/${etag}` },
+    }), undefined, version)).status).toBe(304);
+    expect((await fileResponse(fs, '/cached.txt', new Request('http://localhost', {
+      headers: { 'If-None-Match': '"other"', 'If-Modified-Since': lastModified },
+    }), undefined, version)).status).toBe(200);
+    expect((await fileResponse(fs, '/cached.txt', new Request('http://localhost', {
+      headers: { 'If-Modified-Since': lastModified },
+    }), undefined, version)).status).toBe(304);
+
+    await fs.writeFile('/cached.txt', Buffer.from('change'));
+    const changed = await fileResponse(fs, '/cached.txt', new Request('http://localhost', {
+      headers: { 'If-None-Match': etag },
+    }), undefined, version);
+    expect(changed.status).toBe(200);
+    expect(changed.headers.get('ETag')).not.toBe(etag);
+    await changed.body?.cancel();
+  });
+
+  it('uses If-Range to prevent combining stale partial content', async () => {
+    await fs.writeFile('/range.txt', Buffer.from('0123456789'));
+    const version = (ino: number) => latestFileVersion(sql, ino);
+    const initial = await fileResponse(fs, '/range.txt', new Request('http://localhost'), undefined, version);
+    const etag = initial.headers.get('ETag')!;
+    await initial.body?.cancel();
+
+    const matching = await fileResponse(fs, '/range.txt', new Request('http://localhost', {
+      headers: { Range: 'bytes=2-4', 'If-Range': etag },
+    }), undefined, version);
+    expect(matching.status).toBe(206);
+    expect(await matching.text()).toBe('234');
+
+    const stale = await fileResponse(fs, '/range.txt', new Request('http://localhost', {
+      headers: { Range: 'bytes=2-4', 'If-Range': '"stale"' },
+    }), undefined, version);
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get('Content-Range')).toBeNull();
+    expect(await stale.text()).toBe('0123456789');
   });
 
   it('ignores unsupported ranges and Range on HEAD', async () => {
