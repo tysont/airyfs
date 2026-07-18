@@ -1,0 +1,83 @@
+cli/README.md
+  s_e381e485077b84::t_82c8c053459715 112,117-118,151-163,183-194,254,258-260,266-276
+cli/src/api/types.ts
+  s_e381e485077b84::t_78c7da84129ccf 41-56,107-113,146-157,185-242,259-266,300,314
+cli/src/commands/index.ts
+  s_e381e485077b84::t_df62ee4734da65 5,25,35,54-55,58,60,304-334,349-369,428,434-470,602-802,874-879,889,1288-1345,1461-1511,1558-1591,1812-1836,1940,1948,1974,1979-2010,2356-2367
+cli/test/asset-commands.test.ts
+  s_e381e485077b84::t_21761e761b8e06 1-88
+cli/test/auth-commands.test.ts
+  s_e381e485077b84::t_6c4e56037f9874 174-188
+cli/test/schedule-commands.test.ts
+  s_e381e485077b84::t_0bb71094423821 1-88
+cli/test/search-commands.test.ts
+  s_e381e485077b84::t_0d227dec2ab0e1 1-110
+cli/test/tail-commands.test.ts
+  s_e381e485077b84::t_b7823cf5629407 1-76
+cli/test/trash-commands.test.ts
+  s_e381e485077b84::t_0b844fd43c5dc6 1-70
+cli/test/webhook-commands.test.ts
+  s_e381e485077b84::t_3300c8612e3b01 1-102
+sdk/src/helpers.ts
+  s_e381e485077b84::t_8ecb6c47ae3a5c 15,57-160
+sdk/src/index.ts
+  s_e381e485077b84::t_715f93d7e2af90 14
+sdk/src/types.ts
+  s_e381e485077b84::t_8cfd7300e1a4e9 19-28,124-131,136-147,179-187
+sdk/test/helpers.test.ts
+  s_e381e485077b84::t_2bc71dec241055 10,46-72
+worker/src/assets.ts
+  s_e381e485077b84::t_cd3ac01463b3c6 1-107
+worker/src/change-feed.ts
+  s_e381e485077b84::t_d408276d7803c9 313-315
+worker/src/hrana-server.ts
+  s_e381e485077b84::t_a527aadf471f4b 243,257,263,317-322,325-329,344
+worker/src/index.ts
+  s_e381e485077b84::t_cce6b2a5f3a1da 9,12,20,97,121-142,196-197,209-210,214-259,433,477,486,495,504,513,547,589,638,907,935-941,1153,1415-1422,1437-1489,1507,1509,1544-1626,1810,1820-1822,1826-1829,1877-1890,1897-1898,1900-1904,1944-2007,2053,2060-2066,2113-2114,2119-2135,2156-2157,2162-2168,2181-2187,2190-2191,2194-2201
+worker/src/schedules.ts
+  s_e381e485077b84::t_236f4c0b071c3b 1-256
+worker/src/search.ts
+  s_e381e485077b84::t_f434ad4f55a9da 1-168
+worker/src/sites.ts
+  s_e381e485077b84::t_dd47684b7b8578 8,43,46,82-83,103,111,119-120,123-126,131,201-206,217-262,281-282,284-286,288-290,292,306-309,313,321,330-331,333-335,342
+worker/src/trash.ts
+  s_e381e485077b84::t_9dca19d9ed3271 1-120
+worker/src/tree.ts
+  s_e381e485077b84::t_dcd236f5d34d40 1-78
+worker/src/webdav.ts
+  s_e381e485077b84::t_acb5c27ea30f1d 1-184
+worker/test/files-api.test.ts
+  s_e381e485077b84::t_a97e7f7acc4b94 13,31,34-37,58-66,92-108,126-177
+worker/test/quota.test.ts
+  s_e381e485077b84::t_85bdf31482417c 1-38
+worker/test/schedules.test.ts
+  s_e381e485077b84::t_51abcc9417839b 1-72
+worker/test/search.test.ts
+  s_e381e485077b84::t_478f2054b1c798 1-55
+worker/test/sites.test.ts
+  s_e381e485077b84::t_51d0d99e38d89a 7,48,56,65,72-87,89,96,101-106,109,115-134
+worker/test/trash.test.ts
+  s_e381e485077b84::t_91e3de74eb88e1 1-65
+worker/test/tree.test.ts
+  s_e381e485077b84::t_a9f8381475a6d9 1-47
+worker/test/webdav.test.ts
+  s_e381e485077b84::t_231e7ffe7e8bdb 1-72
+worker/test/webhooks.test.ts
+  s_e381e485077b84::t_b75fa93f435d0a 1-111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c407f6a35537cd12adb7cd167db1750c6822d648",
+  "prompts": {},
+  "sessions": {
+    "s_e381e485077b84": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08aa0daacffejmkJ8qy2F936Tn",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
