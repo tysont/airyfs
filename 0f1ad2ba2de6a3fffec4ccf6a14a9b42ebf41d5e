@@ -1,0 +1,735 @@
+.dev.vars.example
+  s_0e08240248c09e::t_0e9cb0258b48ea 1-2
+.gitignore
+  s_0e08240248c09e::t_a8d0d9a94a6928 4-8,10-11,13
+agentfs/UPSTREAM.manifest
+  s_9831b2295ac1b6::t_731e7e2ba947a3 1-7
+agentfs/build.sh
+  s_0e08240248c09e::t_9e3651a7a8e80c 1-68
+agentfs/patches/0001-rust-migrate-turso-to-libsql.patch
+  s_43a8febd7cdba2::t_594b99e87fba5a 1-9852
+agentfs/patches/0002-rust-add-direct-remote-libsql.patch
+  s_43a8febd7cdba2::t_47a5819327c87c 1-290
+agentfs/patches/0003-rust-fix-remote-pragma-execution.patch
+  s_43a8febd7cdba2::t_046fec7316cca2 1-75
+agentfs/patches/0004-document-libsql-fork-changes.patch
+  s_43a8febd7cdba2::t_2b388799c7013e 1-87
+agentfs/patches/0005-backport-upstream-clippy-fixes.patch
+  s_43a8febd7cdba2::t_674cb797072330 1-26
+agentfs/patches/0006-rust-1.88-file-prefix-compatibility.patch
+  s_43a8febd7cdba2::t_759f85b807ff4b 1-23
+agentfs/patches/0007-libsql-encryption-test-cipher.patch
+  s_43a8febd7cdba2::t_0b573f458d4295 1-13
+agentfs/patches/0008-configurable-fuse-cache-ttl.patch
+  s_0e08240248c09e::t_e707bd7c4e5910 1-245
+agentfs/upstream/.claude/commands/generate-py-sdk.md
+  s_43a8febd7cdba2::t_a93eb6c88b97c3 1-68
+agentfs/upstream/.claude/commands/refactor-py-sdk.md
+  s_43a8febd7cdba2::t_119908e4a10739 1-23
+agentfs/upstream/.devcontainer/Dockerfile
+  s_43a8febd7cdba2::t_3de1a0c2a7d232 1-144
+agentfs/upstream/.devcontainer/Dockerfile.squid
+  s_43a8febd7cdba2::t_99aff710b0eae0 1-2
+agentfs/upstream/.devcontainer/devcontainer.json
+  s_43a8febd7cdba2::t_8879f980d914b1 1-45
+agentfs/upstream/.devcontainer/docker-compose.yml
+  s_43a8febd7cdba2::t_b69e44e35632c0 1-60
+agentfs/upstream/.devcontainer/squid.conf
+  s_43a8febd7cdba2::t_29c63c90000e1b 1-38
+agentfs/upstream/.github/assets/agentfs-arch.svg
+  s_43a8febd7cdba2::t_34ff2a87e233eb 1-4
+agentfs/upstream/.github/workflows/build-setup.yml
+  s_43a8febd7cdba2::t_2341c73e12f783 1-2
+agentfs/upstream/.github/workflows/python.yml
+  s_43a8febd7cdba2::t_7ae31ae9984e5e 1-68
+agentfs/upstream/.github/workflows/release.yml
+  s_43a8febd7cdba2::t_cb94a6391d1d2e 1-379
+agentfs/upstream/.github/workflows/rust.yml
+  s_43a8febd7cdba2::t_fdac80157df7e0 1-155
+agentfs/upstream/.github/workflows/typescript.yml
+  s_43a8febd7cdba2::t_21ce2b9ad6b958 1-135
+agentfs/upstream/.gitignore
+  s_43a8febd7cdba2::t_b4bc286304320a 1-28
+agentfs/upstream/CHANGELOG.md
+  s_43a8febd7cdba2::t_40b5355416bf27 1-357
+agentfs/upstream/MANUAL.md
+  s_43a8febd7cdba2::t_36526352140a5a 1-371
+agentfs/upstream/README.md
+  s_43a8febd7cdba2::t_1fa846b36c46e6 1-211
+agentfs/upstream/SPEC.md
+  s_43a8febd7cdba2::t_e864f9d047dd6c 1-736
+agentfs/upstream/TESTING.md
+  s_43a8febd7cdba2::t_a4d1fd65184218 1-54
+agentfs/upstream/cli/.gitignore
+  s_43a8febd7cdba2::t_f77597fe6ef7e4 1
+agentfs/upstream/cli/CONTRIBUTING.md
+  s_43a8febd7cdba2::t_a1960759c8eec6 1-7
+agentfs/upstream/cli/Cargo.lock
+  s_43a8febd7cdba2::t_0acfdc7fe0aace 1-3884
+agentfs/upstream/cli/Cargo.toml
+  s_43a8febd7cdba2::t_c1cb50a058b01f 1-86
+agentfs/upstream/cli/build.rs
+  s_43a8febd7cdba2::t_abd0c58bcd033d 1-32
+agentfs/upstream/cli/perf/simulate-npm-workload.sh
+  s_43a8febd7cdba2::t_8bda0cc093acd0 1-314
+agentfs/upstream/cli/perf/syscall/Makefile
+  s_43a8febd7cdba2::t_74dd7e95ec7f0e 1-14
+agentfs/upstream/cli/perf/syscall/hello.txt
+  s_43a8febd7cdba2::t_cd182e68f60016 1
+agentfs/upstream/cli/perf/syscall/perf-open-close.c
+  s_43a8febd7cdba2::t_65d277ffc87b95 1-84
+agentfs/upstream/cli/perf/syscall/perf-statx.c
+  s_43a8febd7cdba2::t_6adf20e1bb668f 1-86
+agentfs/upstream/cli/perf/syscall/run.sh
+  s_43a8febd7cdba2::t_1f5743b2140899 1-87
+agentfs/upstream/cli/rust-toolchain.toml
+  s_43a8febd7cdba2::t_b720e40c7fd669 1-3
+agentfs/upstream/cli/scripts/fmt-imports
+  s_43a8febd7cdba2::t_06c08d54ed28f5 1-3
+agentfs/upstream/cli/scripts/mount.fuse.agentfs
+  s_43a8febd7cdba2::t_1246992c6fc3f9 1-14
+agentfs/upstream/cli/src/cmd/completions.rs
+  s_43a8febd7cdba2::t_2701d33126fcff 1-208
+agentfs/upstream/cli/src/cmd/exec.rs
+  s_43a8febd7cdba2::t_9948d861113d7e 1-121
+agentfs/upstream/cli/src/cmd/fs.rs
+  s_43a8febd7cdba2::t_1f1d6284dfc8c4 1-478
+agentfs/upstream/cli/src/cmd/init.rs
+  s_43a8febd7cdba2::t_32db94e5e673b0 1-272
+agentfs/upstream/cli/src/cmd/mcp_server.rs
+  s_43a8febd7cdba2::t_6e3a8e99cc8ca3 1-956
+agentfs/upstream/cli/src/cmd/migrate.rs
+  s_43a8febd7cdba2::t_417ea7df8f3552 1-446
+agentfs/upstream/cli/src/cmd/mod.rs
+  s_43a8febd7cdba2::t_4ec97732f89a0e 1-27
+agentfs/upstream/cli/src/cmd/mount.rs
+  s_43a8febd7cdba2::t_0ce81917a3a977 1-628
+agentfs/upstream/cli/src/cmd/mount_stub.rs
+  s_43a8febd7cdba2::t_60f6c5af4d8718 1-43
+agentfs/upstream/cli/src/cmd/nfs.rs
+  s_43a8febd7cdba2::t_49bf351835afb6 1-115
+agentfs/upstream/cli/src/cmd/ps.rs
+  s_43a8febd7cdba2::t_a892924f15b810 1-229
+agentfs/upstream/cli/src/cmd/run.rs
+  s_43a8febd7cdba2::t_86063ba1e36191 1-44
+agentfs/upstream/cli/src/cmd/run_darwin.rs
+  s_43a8febd7cdba2::t_ff5ec94eab0dc1 1-471
+agentfs/upstream/cli/src/cmd/run_linux.rs
+  s_43a8febd7cdba2::t_c07fcc9a90a4ef 1-49
+agentfs/upstream/cli/src/cmd/run_not_supported.rs
+  s_43a8febd7cdba2::t_1f6b2e61111394 1-21
+agentfs/upstream/cli/src/cmd/run_windows.rs
+  s_43a8febd7cdba2::t_f77f91006677dd 1-22
+agentfs/upstream/cli/src/cmd/sync.rs
+  s_43a8febd7cdba2::t_88543812a010be 1-46
+agentfs/upstream/cli/src/cmd/timeline.rs
+  s_43a8febd7cdba2::t_1a42fa2beb012e 1-331
+agentfs/upstream/cli/src/daemon.rs
+  s_43a8febd7cdba2::t_e7bd59f3e48809 1-259
+agentfs/upstream/cli/src/fuse.rs
+  s_43a8febd7cdba2::t_adae96e801845d 1-1217
+agentfs/upstream/cli/src/fuser/channel.rs
+  s_43a8febd7cdba2::t_894d182f1acb6a 1-78
+agentfs/upstream/cli/src/fuser/deferred_notify.rs
+  s_43a8febd7cdba2::t_d6c40dc5ce51f9 1-43
+agentfs/upstream/cli/src/fuser/ll/argument.rs
+  s_43a8febd7cdba2::t_5593ca0c160a5d 1-161
+agentfs/upstream/cli/src/fuser/ll/fuse_abi.rs
+  s_43a8febd7cdba2::t_6fb32dacbc5e06 1-1001
+agentfs/upstream/cli/src/fuser/ll/mod.rs
+  s_43a8febd7cdba2::t_1a53cb78a923e5 1-306
+agentfs/upstream/cli/src/fuser/ll/notify.rs
+  s_43a8febd7cdba2::t_66cffd2e57e70d 1-205
+agentfs/upstream/cli/src/fuser/ll/reply.rs
+  s_43a8febd7cdba2::t_4da8d5f3c825fa 1-896
+agentfs/upstream/cli/src/fuser/ll/request.rs
+  s_43a8febd7cdba2::t_1355d2db49d6f8 1-2312
+agentfs/upstream/cli/src/fuser/mnt/fuse_pure.rs
+  s_43a8febd7cdba2::t_a1ead2f4b13ace 1-662
+agentfs/upstream/cli/src/fuser/mnt/mod.rs
+  s_43a8febd7cdba2::t_568e4a25383aa5 1-51
+agentfs/upstream/cli/src/fuser/mnt/mount_options.rs
+  s_43a8febd7cdba2::t_996fdb7c58281e 1-239
+agentfs/upstream/cli/src/fuser/mod.rs
+  s_43a8febd7cdba2::t_4f3a52fd517dca 1-820
+agentfs/upstream/cli/src/fuser/notify.rs
+  s_43a8febd7cdba2::t_b6825f17378758 1-131
+agentfs/upstream/cli/src/fuser/reply.rs
+  s_43a8febd7cdba2::t_e1090fe5764150 1-1120
+agentfs/upstream/cli/src/fuser/request.rs
+  s_43a8febd7cdba2::t_adeb5f5463824b 1-655
+agentfs/upstream/cli/src/fuser/session.rs
+  s_43a8febd7cdba2::t_bf0483b1fc1240 1-334
+agentfs/upstream/cli/src/lib.rs
+  s_43a8febd7cdba2::t_83f2171e25a029 1-25
+agentfs/upstream/cli/src/main.rs
+  s_43a8febd7cdba2::t_f9017d79f2b338 1-364
+agentfs/upstream/cli/src/mount/fuse.rs
+  s_43a8febd7cdba2::t_aab5e8f3aab2fe 1-266
+agentfs/upstream/cli/src/mount/mod.rs
+  s_43a8febd7cdba2::t_70c371788da584 1-236
+agentfs/upstream/cli/src/mount/nfs.rs
+  s_43a8febd7cdba2::t_3c814d606b7f37 1-184
+agentfs/upstream/cli/src/nfs.rs
+  s_43a8febd7cdba2::t_9bed66cc6ec538 1-563
+agentfs/upstream/cli/src/nfsserve/config.rs
+  s_43a8febd7cdba2::t_6fc4a7ee872ed4 1
+agentfs/upstream/cli/src/nfsserve/context.rs
+  s_43a8febd7cdba2::t_7c8aba49cdb9c8 1-26
+agentfs/upstream/cli/src/nfsserve/fs_util.rs
+  s_43a8febd7cdba2::t_b43ad5b673f8bd 1-181
+agentfs/upstream/cli/src/nfsserve/mod.rs
+  s_43a8febd7cdba2::t_ca466aef9cabce 1-24
+agentfs/upstream/cli/src/nfsserve/mount.rs
+  s_43a8febd7cdba2::t_7cb813ae405970 1-39
+agentfs/upstream/cli/src/nfsserve/mount_handlers.rs
+  s_43a8febd7cdba2::t_4958014c1b7402 1-215
+agentfs/upstream/cli/src/nfsserve/nfs.rs
+  s_43a8febd7cdba2::t_aa9407c07f34ca 1-566
+agentfs/upstream/cli/src/nfsserve/nfs_handlers.rs
+  s_43a8febd7cdba2::t_3485dca1c279a6 1-2998
+agentfs/upstream/cli/src/nfsserve/permissions.rs
+  s_43a8febd7cdba2::t_a8ac565a6218c5 1-308
+agentfs/upstream/cli/src/nfsserve/portmap.rs
+  s_43a8febd7cdba2::t_23633771f77990 1-24
+agentfs/upstream/cli/src/nfsserve/portmap_handlers.rs
+  s_43a8febd7cdba2::t_7ae221f9283267 1-96
+agentfs/upstream/cli/src/nfsserve/rpc.rs
+  s_43a8febd7cdba2::t_f7c0ee183e8423 1-509
+agentfs/upstream/cli/src/nfsserve/rpcwire.rs
+  s_43a8febd7cdba2::t_26c6af6643bc17 1-218
+agentfs/upstream/cli/src/nfsserve/tcp.rs
+  s_43a8febd7cdba2::t_9aeb9584184069 1-232
+agentfs/upstream/cli/src/nfsserve/transaction_tracker.rs
+  s_43a8febd7cdba2::t_6a7caffa523f45 1-63
+agentfs/upstream/cli/src/nfsserve/vfs.rs
+  s_43a8febd7cdba2::t_9a0274452a2ccd 1-317
+agentfs/upstream/cli/src/nfsserve/write_counter.rs
+  s_43a8febd7cdba2::t_c4309fc37b55e1 1-43
+agentfs/upstream/cli/src/nfsserve/xdr.rs
+  s_43a8febd7cdba2::t_19a2e2ac55bbc2 1-234
+agentfs/upstream/cli/src/opts.rs
+  s_43a8febd7cdba2::t_98b9ff311d0343 1-479
+agentfs/upstream/cli/src/sandbox/darwin.rs
+  s_43a8febd7cdba2::t_01ddb741c6bfdf 1-287
+agentfs/upstream/cli/src/sandbox/linux.rs
+  s_43a8febd7cdba2::t_00c6f6021266bf 1-1039
+agentfs/upstream/cli/src/sandbox/linux_ptrace.rs
+  s_43a8febd7cdba2::t_b2e505d40b9d5c 1-50
+agentfs/upstream/cli/src/sandbox/mod.rs
+  s_43a8febd7cdba2::t_e9114680f5ba16 1-58
+agentfs/upstream/cli/tests/.gitignore
+  s_43a8febd7cdba2::t_af9db88ccb159e 1-3
+agentfs/upstream/cli/tests/all.sh
+  s_43a8febd7cdba2::t_9a5a5081ae1a04 1-26
+agentfs/upstream/cli/tests/syscall/Makefile
+  s_43a8febd7cdba2::t_2a8e8e7c5396a2 1-48
+agentfs/upstream/cli/tests/syscall/main.c
+  s_43a8febd7cdba2::t_2109cec956be56 1-84
+agentfs/upstream/cli/tests/syscall/test-append.c
+  s_43a8febd7cdba2::t_1a209d7142fcd8 1-223
+agentfs/upstream/cli/tests/syscall/test-close.c
+  s_43a8febd7cdba2::t_ce1e6ec002f871 1-34
+agentfs/upstream/cli/tests/syscall/test-common.h
+  s_43a8febd7cdba2::t_2d198e5a6ff1e0 1-62
+agentfs/upstream/cli/tests/syscall/test-copyup-inode-stability.c
+  s_43a8febd7cdba2::t_06885378ef6645 1-592
+agentfs/upstream/cli/tests/syscall/test-copyup-permissions.c
+  s_43a8febd7cdba2::t_4cf593b2c29ba0 1-97
+agentfs/upstream/cli/tests/syscall/test-create-existing.c
+  s_43a8febd7cdba2::t_8cd33f99107ead 1-58
+agentfs/upstream/cli/tests/syscall/test-dup.c
+  s_43a8febd7cdba2::t_9e9cdd723f9b5c 1-51
+agentfs/upstream/cli/tests/syscall/test-dup2.c
+  s_43a8febd7cdba2::t_22561cb499db16 1-55
+agentfs/upstream/cli/tests/syscall/test-fstat.c
+  s_43a8febd7cdba2::t_9e1c7e2c73b666 1-47
+agentfs/upstream/cli/tests/syscall/test-getdents64.c
+  s_43a8febd7cdba2::t_40107126bc54f4 1-66
+agentfs/upstream/cli/tests/syscall/test-link.c
+  s_43a8febd7cdba2::t_939baa24e81a5e 1-109
+agentfs/upstream/cli/tests/syscall/test-lstat.c
+  s_43a8febd7cdba2::t_4ebb702bfee1a6 1-52
+agentfs/upstream/cli/tests/syscall/test-mkfifo.c
+  s_43a8febd7cdba2::t_9954f7f358cb35 1-145
+agentfs/upstream/cli/tests/syscall/test-mknod.c
+  s_43a8febd7cdba2::t_ad0500c2be6c44 1-140
+agentfs/upstream/cli/tests/syscall/test-open-readonly.c
+  s_43a8febd7cdba2::t_ff967215c044a8 1-38
+agentfs/upstream/cli/tests/syscall/test-openat.c
+  s_43a8febd7cdba2::t_48af617b770201 1-37
+agentfs/upstream/cli/tests/syscall/test-pread-sparse.c
+  s_43a8febd7cdba2::t_246e734feb4524 1-137
+agentfs/upstream/cli/tests/syscall/test-read.c
+  s_43a8febd7cdba2::t_b241dac704d814 1-41
+agentfs/upstream/cli/tests/syscall/test-rename.c
+  s_43a8febd7cdba2::t_cb3dcd5ac43de8 1-105
+agentfs/upstream/cli/tests/syscall/test-stat.c
+  s_43a8febd7cdba2::t_629e9bcc83b246 1-42
+agentfs/upstream/cli/tests/syscall/test-unlink.c
+  s_43a8febd7cdba2::t_048dd109a9c6e7 1-68
+agentfs/upstream/cli/tests/syscall/test-write.c
+  s_43a8febd7cdba2::t_532087d881c030 1-47
+agentfs/upstream/cli/tests/test-fuse-cache-invalidation.sh
+  s_43a8febd7cdba2::t_fc4ae882fd8f85 1-189
+agentfs/upstream/cli/tests/test-init.sh
+  s_43a8febd7cdba2::t_e28720133df2cd 1-68
+agentfs/upstream/cli/tests/test-linux-syscalls.sh
+  s_43a8febd7cdba2::t_db2326d20efbc1 1-46
+agentfs/upstream/cli/tests/test-mount.sh
+  s_43a8febd7cdba2::t_fb575f29b4a61c 1-140
+agentfs/upstream/cli/tests/test-overlay-delta-in-base-dir.sh
+  s_43a8febd7cdba2::t_8d9aa1550151eb 1-165
+agentfs/upstream/cli/tests/test-overlay-whiteout.sh
+  s_43a8febd7cdba2::t_55ee90e6abc2b2 1-128
+agentfs/upstream/cli/tests/test-run-bash.sh
+  s_43a8febd7cdba2::t_bb1e3ab4e9b57d 1-27
+agentfs/upstream/cli/tests/test-run-experimental-syscalls.sh
+  s_43a8febd7cdba2::t_c300fdf27ef2a5 1-61
+agentfs/upstream/cli/tests/test-run-git.sh
+  s_43a8febd7cdba2::t_d7516db24648a3 1-34
+agentfs/upstream/cli/tests/test-run-syscalls.sh
+  s_43a8febd7cdba2::t_a413462a7c7ae0 1-86
+agentfs/upstream/cli/tests/test-symlinks.sh
+  s_43a8febd7cdba2::t_b357bcaee8d744 1-79
+agentfs/upstream/cli/tests/test_fd.c
+  s_43a8febd7cdba2::t_7e08f128a4c409 1-66
+agentfs/upstream/dist-workspace.toml
+  s_43a8febd7cdba2::t_ef5bd67bd2e102 1-21
+agentfs/upstream/examples/ai-sdk-just-bash/.gitignore
+  s_43a8febd7cdba2::t_dbdbf878b87ff1 1-3
+agentfs/upstream/examples/ai-sdk-just-bash/README.md
+  s_43a8febd7cdba2::t_6a6bc2fdbe7a5b 1-53
+agentfs/upstream/examples/ai-sdk-just-bash/agent.ts
+  s_43a8febd7cdba2::t_d2bd79de2cabc9 1-153
+agentfs/upstream/examples/ai-sdk-just-bash/main.ts
+  s_43a8febd7cdba2::t_5f7c8ad184772b 1-27
+agentfs/upstream/examples/ai-sdk-just-bash/package-lock.json
+  s_43a8febd7cdba2::t_749a12af6f4745 1-1137
+agentfs/upstream/examples/ai-sdk-just-bash/package.json
+  s_43a8febd7cdba2::t_7890c15ea4d911 1-22
+agentfs/upstream/examples/ai-sdk-just-bash/shell.ts
+  s_43a8febd7cdba2::t_b566461982c221 1-67
+agentfs/upstream/examples/ai-sdk-just-bash/tsconfig.json
+  s_43a8febd7cdba2::t_710b02584ec548 1-13
+agentfs/upstream/examples/claude-agent/research-assistant/.env.example
+  s_43a8febd7cdba2::t_59163c5feee0f4 1-5
+agentfs/upstream/examples/claude-agent/research-assistant/.gitignore
+  s_43a8febd7cdba2::t_fd3c2f3023649d 1-27
+agentfs/upstream/examples/claude-agent/research-assistant/README.md
+  s_43a8febd7cdba2::t_a452e250e4000d 1-17
+agentfs/upstream/examples/claude-agent/research-assistant/package-lock.json
+  s_43a8febd7cdba2::t_4d188fffc0b580 1-905
+agentfs/upstream/examples/claude-agent/research-assistant/package.json
+  s_43a8febd7cdba2::t_3e22fee1a983c6 1-40
+agentfs/upstream/examples/claude-agent/research-assistant/src/agent.ts
+  s_43a8febd7cdba2::t_994843bc0a1ed9 1-90
+agentfs/upstream/examples/claude-agent/research-assistant/src/cli.ts
+  s_43a8febd7cdba2::t_efb5d03783f840 1-26
+agentfs/upstream/examples/claude-agent/research-assistant/src/tools/pdf-tool.ts
+  s_43a8febd7cdba2::t_2296493cbb30ac 1-76
+agentfs/upstream/examples/claude-agent/research-assistant/src/tools/semantic-tool.ts
+  s_43a8febd7cdba2::t_274a71d673a8b9 1-178
+agentfs/upstream/examples/claude-agent/research-assistant/src/utils/agentfs.ts
+  s_43a8febd7cdba2::t_2d78672c07421c 1-11
+agentfs/upstream/examples/claude-agent/research-assistant/src/utils/pdf.ts
+  s_43a8febd7cdba2::t_e352ebcf00e5f9 1-149
+agentfs/upstream/examples/claude-agent/research-assistant/tsconfig.json
+  s_43a8febd7cdba2::t_177a6aa5750ef0 1-20
+agentfs/upstream/examples/cloudflare/.gitignore
+  s_43a8febd7cdba2::t_4892ac965e8f55 1-3
+agentfs/upstream/examples/cloudflare/README.md
+  s_43a8febd7cdba2::t_aeeb8c01698796 1-42
+agentfs/upstream/examples/cloudflare/package-lock.json
+  s_43a8febd7cdba2::t_66df0154a7eefe 1-2330
+agentfs/upstream/examples/cloudflare/package.json
+  s_43a8febd7cdba2::t_0447b14b3851e9 1-23
+agentfs/upstream/examples/cloudflare/src/index.ts
+  s_43a8febd7cdba2::t_2fd7fef11a7b07 1-111
+agentfs/upstream/examples/cloudflare/tsconfig.json
+  s_43a8febd7cdba2::t_d96281272b7742 1-13
+agentfs/upstream/examples/cloudflare/wrangler.toml
+  s_43a8febd7cdba2::t_713e7229b3220f 1-14
+agentfs/upstream/examples/firecracker/.gitignore
+  s_43a8febd7cdba2::t_1ee0bb2f1abb5e 1-20
+agentfs/upstream/examples/firecracker/README.md
+  s_43a8febd7cdba2::t_00267ad7a3fc91 1-39
+agentfs/upstream/examples/firecracker/build-kernel.sh
+  s_43a8febd7cdba2::t_bc3c5297f8001a 1-49
+agentfs/upstream/examples/firecracker/build-rootfs.sh
+  s_43a8febd7cdba2::t_b538e1bbd2ec49 1-71
+agentfs/upstream/examples/firecracker/firecracker.sh
+  s_43a8febd7cdba2::t_ab8e001f9c9338 1-102
+agentfs/upstream/examples/mastra/research-assistant/.gitignore
+  s_43a8febd7cdba2::t_15e861bf7b8709 1-11
+agentfs/upstream/examples/mastra/research-assistant/README.md
+  s_43a8febd7cdba2::t_bd2e8a391f01b0 1-17
+agentfs/upstream/examples/mastra/research-assistant/cli/ask.ts
+  s_43a8febd7cdba2::t_b0b3aee438eebf 1-45
+agentfs/upstream/examples/mastra/research-assistant/package-lock.json
+  s_43a8febd7cdba2::t_90bf2ad4da0ad5 1-10040
+agentfs/upstream/examples/mastra/research-assistant/package.json
+  s_43a8febd7cdba2::t_ce122a186237a9 1-35
+agentfs/upstream/examples/mastra/research-assistant/src/mastra/agents/research-agent.ts
+  s_43a8febd7cdba2::t_709a82fbc942c3 1-58
+agentfs/upstream/examples/mastra/research-assistant/src/mastra/index.ts
+  s_43a8febd7cdba2::t_893b7b0b1c1747 1-28
+agentfs/upstream/examples/mastra/research-assistant/src/mastra/scorers/lexical-scorer.ts
+  s_43a8febd7cdba2::t_28ad8933ce4498 1-65
+agentfs/upstream/examples/mastra/research-assistant/src/mastra/tools/pdf-tool.ts
+  s_43a8febd7cdba2::t_979518a0350ffb 1-74
+agentfs/upstream/examples/mastra/research-assistant/src/mastra/tools/semantic-tool.ts
+  s_43a8febd7cdba2::t_85e3b2dda0c4da 1-179
+agentfs/upstream/examples/mastra/research-assistant/src/mastra/utils/agentfs.ts
+  s_43a8febd7cdba2::t_798be3a22e58fb 1-13
+agentfs/upstream/examples/mastra/research-assistant/src/mastra/utils/pdf.ts
+  s_43a8febd7cdba2::t_8894095cda121e 1-151
+agentfs/upstream/examples/mastra/research-assistant/src/mastra/workflows/research-workflow.ts
+  s_43a8febd7cdba2::t_170fe10c6fecdd 1-77
+agentfs/upstream/examples/mastra/research-assistant/tsconfig.json
+  s_43a8febd7cdba2::t_762af8750c2396 1-17
+agentfs/upstream/examples/openai-agents/research-assistant/.env.example
+  s_43a8febd7cdba2::t_3fde9f9f554476 1-5
+agentfs/upstream/examples/openai-agents/research-assistant/.gitignore
+  s_43a8febd7cdba2::t_80dc938f58dfc6 1-8
+agentfs/upstream/examples/openai-agents/research-assistant/README.md
+  s_43a8febd7cdba2::t_dcc82f879f31b2 1-17
+agentfs/upstream/examples/openai-agents/research-assistant/package-lock.json
+  s_43a8febd7cdba2::t_84dae19f2b228e 1-1961
+agentfs/upstream/examples/openai-agents/research-assistant/package.json
+  s_43a8febd7cdba2::t_8e767e3eec7d3a 1-40
+agentfs/upstream/examples/openai-agents/research-assistant/src/agent.ts
+  s_43a8febd7cdba2::t_54e28c1e39a124 1-49
+agentfs/upstream/examples/openai-agents/research-assistant/src/cli.ts
+  s_43a8febd7cdba2::t_cfb30649c2ba89 1-32
+agentfs/upstream/examples/openai-agents/research-assistant/src/tools/pdf-tool.ts
+  s_43a8febd7cdba2::t_217095c1bc094a 1-63
+agentfs/upstream/examples/openai-agents/research-assistant/src/tools/semantic-tool.ts
+  s_43a8febd7cdba2::t_aa9e8a573f0ec4 1-174
+agentfs/upstream/examples/openai-agents/research-assistant/src/utils/agentfs.ts
+  s_43a8febd7cdba2::t_995740240efac0 1-11
+agentfs/upstream/examples/openai-agents/research-assistant/src/utils/pdf.ts
+  s_43a8febd7cdba2::t_7beb9fc2fad126 1-149
+agentfs/upstream/examples/openai-agents/research-assistant/tsconfig.json
+  s_43a8febd7cdba2::t_1f02a0750fbcbd 1-21
+agentfs/upstream/licenses/LICENSE-fuser.md
+  s_43a8febd7cdba2::t_6857db37de4330 1-23
+agentfs/upstream/licenses/LICENSE-nfsserve.md
+  s_43a8febd7cdba2::t_afb7f7f6b7ca8a 1-28
+agentfs/upstream/sandbox/.gitignore
+  s_43a8febd7cdba2::t_31430ce1721fbb 1
+agentfs/upstream/sandbox/Cargo.lock
+  s_43a8febd7cdba2::t_c924aaed00ccaa 1-3724
+agentfs/upstream/sandbox/Cargo.toml
+  s_43a8febd7cdba2::t_07ed4f4e20d0f3 1-23
+agentfs/upstream/sandbox/src/lib.rs
+  s_43a8febd7cdba2::t_144b0bfddcf785 1-16
+agentfs/upstream/sandbox/src/sandbox/mod.rs
+  s_43a8febd7cdba2::t_57da42d9c643e4 1-130
+agentfs/upstream/sandbox/src/syscall/file.rs
+  s_43a8febd7cdba2::t_9cffa33032ce98 1-1876
+agentfs/upstream/sandbox/src/syscall/mod.rs
+  s_43a8febd7cdba2::t_b52cbf39177109 1-517
+agentfs/upstream/sandbox/src/syscall/process.rs
+  s_43a8febd7cdba2::t_58ac15203e37c5 1-122
+agentfs/upstream/sandbox/src/syscall/stat.rs
+  s_43a8febd7cdba2::t_82105a1a5e714f 1-550
+agentfs/upstream/sandbox/src/syscall/xattr.rs
+  s_43a8febd7cdba2::t_ef2ac930d57d40 1-42
+agentfs/upstream/sandbox/src/vfs/bind.rs
+  s_43a8febd7cdba2::t_168921e3c64e56 1-127
+agentfs/upstream/sandbox/src/vfs/fdtable.rs
+  s_43a8febd7cdba2::t_dc55a6316b15f7 1-766
+agentfs/upstream/sandbox/src/vfs/file.rs
+  s_43a8febd7cdba2::t_7f6235e8b21fc0 1-62
+agentfs/upstream/sandbox/src/vfs/mod.rs
+  s_43a8febd7cdba2::t_7ee00062ed1cf4 1-127
+agentfs/upstream/sandbox/src/vfs/mount.rs
+  s_43a8febd7cdba2::t_bdf8710d0b8984 1-368
+agentfs/upstream/sandbox/src/vfs/sqlite.rs
+  s_43a8febd7cdba2::t_ce0f72d239a9fa 1-744
+agentfs/upstream/scripts/install-deps.sh
+  s_43a8febd7cdba2::t_e39b9224aa91d8 1-46
+agentfs/upstream/scripts/update-version.py
+  s_43a8febd7cdba2::t_a378db14d88ca9 1-433
+agentfs/upstream/sdk/go/README.md
+  s_43a8febd7cdba2::t_14b4a4a011a7ad 1-512
+agentfs/upstream/sdk/go/SPEC_TESTS.md
+  s_43a8febd7cdba2::t_c2f57655991274 1-413
+agentfs/upstream/sdk/go/agentfs.go
+  s_43a8febd7cdba2::t_c6ca5c857a9bd6 1-266
+agentfs/upstream/sdk/go/agentfs_test.go
+  s_43a8febd7cdba2::t_7dccabf9d800b9 1-2423
+agentfs/upstream/sdk/go/benchmark_test.go
+  s_43a8febd7cdba2::t_e8f0976a598933 1-793
+agentfs/upstream/sdk/go/constants.go
+  s_43a8febd7cdba2::t_565a81f085ccdb 1-78
+agentfs/upstream/sdk/go/errors.go
+  s_43a8febd7cdba2::t_b7177c7c5792fa 1-189
+agentfs/upstream/sdk/go/file.go
+  s_43a8febd7cdba2::t_e42e4768f156c4 1-430
+agentfs/upstream/sdk/go/file_streaming_test.go
+  s_43a8febd7cdba2::t_e213e9cedefe72 1-590
+agentfs/upstream/sdk/go/filesystem.go
+  s_43a8febd7cdba2::t_e760fa9cbfb948 1-1132
+agentfs/upstream/sdk/go/go.mod
+  s_43a8febd7cdba2::t_bea13a32a2b6c2 1-21
+agentfs/upstream/sdk/go/go.sum
+  s_43a8febd7cdba2::t_48e0f93bd10d3b 1-39
+agentfs/upstream/sdk/go/interfaces.go
+  s_43a8febd7cdba2::t_0c2cc2e1de0427 1-135
+agentfs/upstream/sdk/go/internal/cache/cache.go
+  s_43a8febd7cdba2::t_d97cab9b98f572 1-42
+agentfs/upstream/sdk/go/internal/cache/lru.go
+  s_43a8febd7cdba2::t_9670f10b35ce7e 1-121
+agentfs/upstream/sdk/go/internal/cache/lru_test.go
+  s_43a8febd7cdba2::t_d30ddf0af9f121 1-247
+agentfs/upstream/sdk/go/iofs.go
+  s_43a8febd7cdba2::t_34f0200f658350 1-476
+agentfs/upstream/sdk/go/iofs_test.go
+  s_43a8febd7cdba2::t_9a4efccbb09b71 1-568
+agentfs/upstream/sdk/go/kvstore.go
+  s_43a8febd7cdba2::t_e718354efd7aa5 1-238
+agentfs/upstream/sdk/go/kvstore_generic_test.go
+  s_43a8febd7cdba2::t_e7fc9cfee3c58d 1-360
+agentfs/upstream/sdk/go/overlay.go
+  s_43a8febd7cdba2::t_6a495dff03a71e 1-1414
+agentfs/upstream/sdk/go/overlay_test.go
+  s_43a8febd7cdba2::t_ebdaaf08770503 1-1643
+agentfs/upstream/sdk/go/pool_test.go
+  s_43a8febd7cdba2::t_a4ef0621e8f3ae 1-169
+agentfs/upstream/sdk/go/schema.go
+  s_43a8febd7cdba2::t_f117440405832b 1-369
+agentfs/upstream/sdk/go/spec_test.go
+  s_43a8febd7cdba2::t_1ceb9911bff656 1-2954
+agentfs/upstream/sdk/go/symlink_test.go
+  s_43a8febd7cdba2::t_cfae6a3a83e753 1-384
+agentfs/upstream/sdk/go/toolcalls.go
+  s_43a8febd7cdba2::t_6546c46ddfc2ff 1-285
+agentfs/upstream/sdk/go/types.go
+  s_43a8febd7cdba2::t_2577673c309e00 1-199
+agentfs/upstream/sdk/python/.gitignore
+  s_43a8febd7cdba2::t_d03c88dfd260a9 1-66
+agentfs/upstream/sdk/python/MANIFEST.in
+  s_43a8febd7cdba2::t_5fecc311153110 1-5
+agentfs/upstream/sdk/python/README.md
+  s_43a8febd7cdba2::t_2aa86d3052f04e 1-190
+agentfs/upstream/sdk/python/agentfs_sdk/__init__.py
+  s_43a8febd7cdba2::t_e9439272256245 1-30
+agentfs/upstream/sdk/python/agentfs_sdk/agentfs.py
+  s_43a8febd7cdba2::t_cd9145b6ce1ea8 1-126
+agentfs/upstream/sdk/python/agentfs_sdk/constants.py
+  s_43a8febd7cdba2::t_1518ed4f9d76ce 1-13
+agentfs/upstream/sdk/python/agentfs_sdk/errors.py
+  s_43a8febd7cdba2::t_f3200a46196772 1-60
+agentfs/upstream/sdk/python/agentfs_sdk/filesystem.py
+  s_43a8febd7cdba2::t_9569539fde7ffd 1-1136
+agentfs/upstream/sdk/python/agentfs_sdk/guards.py
+  s_43a8febd7cdba2::t_ee5e7f5a9b0022 1-199
+agentfs/upstream/sdk/python/agentfs_sdk/kvstore.py
+  s_43a8febd7cdba2::t_263d3d708c27e5 1-136
+agentfs/upstream/sdk/python/agentfs_sdk/toolcalls.py
+  s_43a8febd7cdba2::t_86c4a479ad7aeb 1-413
+agentfs/upstream/sdk/python/examples/filesystem_demo.py
+  s_43a8febd7cdba2::t_b49e085ccba435 1-59
+agentfs/upstream/sdk/python/examples/kvstore_demo.py
+  s_43a8febd7cdba2::t_3aea3ca2b3b253 1-103
+agentfs/upstream/sdk/python/examples/toolcalls_demo.py
+  s_43a8febd7cdba2::t_f9c449d615da0c 1-114
+agentfs/upstream/sdk/python/pyproject.toml
+  s_43a8febd7cdba2::t_0b3aeb8c5f5e94 1-65
+agentfs/upstream/sdk/python/tests/__init__.py
+  s_43a8febd7cdba2::t_a527d86f966684 1
+agentfs/upstream/sdk/python/tests/test_agentfs.py
+  s_43a8febd7cdba2::t_b94e4ee3d3a812 1-138
+agentfs/upstream/sdk/python/tests/test_basic.py
+  s_43a8febd7cdba2::t_c9a1155b8247e6 1-148
+agentfs/upstream/sdk/python/tests/test_filesystem.py
+  s_43a8febd7cdba2::t_6ffb2d0ffbc54c 1-1253
+agentfs/upstream/sdk/python/tests/test_kvstore.py
+  s_43a8febd7cdba2::t_96b7b7e265df41 1-314
+agentfs/upstream/sdk/python/tests/test_toolcalls.py
+  s_43a8febd7cdba2::t_28140a9d44a813 1-474
+agentfs/upstream/sdk/python/uv.lock
+  s_43a8febd7cdba2::t_e260e34c253f4c 1-259
+agentfs/upstream/sdk/rust/.gitignore
+  s_43a8febd7cdba2::t_29a6fd9a42c6f5 1-4
+agentfs/upstream/sdk/rust/Cargo.lock
+  s_43a8febd7cdba2::t_ea78b133c68462 1-3167
+agentfs/upstream/sdk/rust/Cargo.toml
+  s_43a8febd7cdba2::t_79d4ebdc37cb17 1-40
+agentfs/upstream/sdk/rust/benches/overlayfs.rs
+  s_43a8febd7cdba2::t_07a5df56ca4d14 1-52
+agentfs/upstream/sdk/rust/benches/workload.rs
+  s_43a8febd7cdba2::t_0b13805280937b 1-458
+agentfs/upstream/sdk/rust/src/connection_pool.rs
+  s_43a8febd7cdba2::t_1485ee2ee90de3 1-254
+agentfs/upstream/sdk/rust/src/error.rs
+  s_43a8febd7cdba2::t_d785b37400664f 1-78
+agentfs/upstream/sdk/rust/src/filesystem/agentfs.rs
+  s_43a8febd7cdba2::t_dac71c4e3f374b 1-4918
+agentfs/upstream/sdk/rust/src/filesystem/hostfs_darwin.rs
+  s_43a8febd7cdba2::t_f1a370adc70363 1-986
+agentfs/upstream/sdk/rust/src/filesystem/hostfs_linux.rs
+  s_43a8febd7cdba2::t_f0f5e48a3f96be 1-1069
+agentfs/upstream/sdk/rust/src/filesystem/mod.rs
+  s_43a8febd7cdba2::t_d63f6f91c1ff55 1-321
+agentfs/upstream/sdk/rust/src/filesystem/overlayfs.rs
+  s_43a8febd7cdba2::t_c9a4d4412cc7c1 1-2834
+agentfs/upstream/sdk/rust/src/kvstore.rs
+  s_43a8febd7cdba2::t_fa6dbe14abd9d5 1-120
+agentfs/upstream/sdk/rust/src/lib.rs
+  s_43a8febd7cdba2::t_76bc98177a0994 1-922
+agentfs/upstream/sdk/rust/src/schema.rs
+  s_43a8febd7cdba2::t_4ea826a37a0876 1-119
+agentfs/upstream/sdk/rust/src/toolcalls.rs
+  s_43a8febd7cdba2::t_2a9b62934ef10d 1-497
+agentfs/upstream/sdk/typescript/.gitignore
+  s_43a8febd7cdba2::t_8f853aa2624c0e 1-27
+agentfs/upstream/sdk/typescript/examples/filesystem/index.ts
+  s_43a8febd7cdba2::t_2aacaeea39bb1a 1-49
+agentfs/upstream/sdk/typescript/examples/filesystem/package.json
+  s_43a8febd7cdba2::t_65995701c791fb 1-13
+agentfs/upstream/sdk/typescript/examples/kvstore/index.ts
+  s_43a8febd7cdba2::t_3992beb6369860 1-93
+agentfs/upstream/sdk/typescript/examples/kvstore/package.json
+  s_43a8febd7cdba2::t_5a5b6efdfdb318 1-13
+agentfs/upstream/sdk/typescript/examples/toolcalls/index.ts
+  s_43a8febd7cdba2::t_1db6f7897beca3 1-104
+agentfs/upstream/sdk/typescript/package-lock.json
+  s_43a8febd7cdba2::t_85352e165aed6a 1-2145
+agentfs/upstream/sdk/typescript/package.json
+  s_43a8febd7cdba2::t_70223bc22a5a67 1-83
+agentfs/upstream/sdk/typescript/src/agentfs.ts
+  s_43a8febd7cdba2::t_5ff070d3e5b53e 1-54
+agentfs/upstream/sdk/typescript/src/errors.ts
+  s_43a8febd7cdba2::t_176a2d57c813ce 1-53
+agentfs/upstream/sdk/typescript/src/filesystem/agentfs.ts
+  s_43a8febd7cdba2::t_ac9390a2529f8b 1-1201
+agentfs/upstream/sdk/typescript/src/filesystem/index.ts
+  s_43a8febd7cdba2::t_99d1f1f29ab349 1-20
+agentfs/upstream/sdk/typescript/src/filesystem/interface.ts
+  s_43a8febd7cdba2::t_b1542ab0ff2d65 1-233
+agentfs/upstream/sdk/typescript/src/guards.ts
+  s_43a8febd7cdba2::t_ab53180d6857bf 1-194
+agentfs/upstream/sdk/typescript/src/index_browser.ts
+  s_43a8febd7cdba2::t_ac6debfcfd2c85 1-24
+agentfs/upstream/sdk/typescript/src/index_node.ts
+  s_43a8febd7cdba2::t_83fb0f46384af9 1-77
+agentfs/upstream/sdk/typescript/src/integrations/cloudflare/agentfs.ts
+  s_43a8febd7cdba2::t_6574b062392ecd 1-1381
+agentfs/upstream/sdk/typescript/src/integrations/cloudflare/index.ts
+  s_43a8febd7cdba2::t_4968103d5d613e 1-38
+agentfs/upstream/sdk/typescript/src/integrations/just-bash/AgentFs.test.ts
+  s_43a8febd7cdba2::t_bd6d11b16dd6ff 1-687
+agentfs/upstream/sdk/typescript/src/integrations/just-bash/AgentFs.ts
+  s_43a8febd7cdba2::t_526412f72024d2 1-561
+agentfs/upstream/sdk/typescript/src/integrations/just-bash/index.ts
+  s_43a8febd7cdba2::t_71ab1d264e1b28 1-2
+agentfs/upstream/sdk/typescript/src/integrations/serverless/adapter.ts
+  s_43a8febd7cdba2::t_1bcd6731f358c2 1-196
+agentfs/upstream/sdk/typescript/src/integrations/serverless/index.ts
+  s_43a8febd7cdba2::t_36745aabbd872f 1-32
+agentfs/upstream/sdk/typescript/src/kvstore.ts
+  s_43a8febd7cdba2::t_bedd5a87a4cc83 1-76
+agentfs/upstream/sdk/typescript/src/toolcalls.ts
+  s_43a8febd7cdba2::t_c712364e8590bb 1-256
+agentfs/upstream/sdk/typescript/tests/filesystem.test.ts
+  s_43a8febd7cdba2::t_53857533adb568 1-1026
+agentfs/upstream/sdk/typescript/tests/index.test.ts
+  s_43a8febd7cdba2::t_443d1876def3ff 1-100
+agentfs/upstream/sdk/typescript/tests/kvstore.test.ts
+  s_43a8febd7cdba2::t_05a4bfc58926b6 1-210
+agentfs/upstream/sdk/typescript/tests/serverless.test.ts
+  s_43a8febd7cdba2::t_6010fc700044f9 1-69
+agentfs/upstream/sdk/typescript/tests/toolcalls.test.ts
+  s_43a8febd7cdba2::t_466cb16806169b 1-323
+agentfs/upstream/sdk/typescript/tests/tsconfig.json
+  s_43a8febd7cdba2::t_6009b7a74857a0 1-11
+agentfs/upstream/sdk/typescript/tests_browser/filesystem.test.ts
+  s_43a8febd7cdba2::t_a06924586f4320 1-784
+agentfs/upstream/sdk/typescript/tests_browser/index.test.ts
+  s_43a8febd7cdba2::t_51f516903e66c8 1-41
+agentfs/upstream/sdk/typescript/tests_browser/kvstore.test.ts
+  s_43a8febd7cdba2::t_17be26d59a9ba0 1-194
+agentfs/upstream/sdk/typescript/tests_browser/toolcalls.test.ts
+  s_43a8febd7cdba2::t_7bcf061b8665eb 1-304
+agentfs/upstream/sdk/typescript/tsconfig.json
+  s_43a8febd7cdba2::t_c55d48fdca45dc 1-26
+agentfs/upstream/sdk/typescript/vitest.browser.config.ts
+  s_43a8febd7cdba2::t_d4510d90b53e1b 1-22
+agentfs/upstream/sdk/typescript/vitest.config.ts
+  s_43a8febd7cdba2::t_f6a4258fe83e09 1-15
+container/Dockerfile
+  s_0e08240248c09e::t_1fcb9636b4426a 21-22
+container/scripts/build-agentfs.sh
+  s_9831b2295ac1b6::t_a7d074b31a41c2 1-3,5,8
+container/src/command-server.ts
+  s_7014343c99198c::t_c26805bd0a5d1c 12,75-76,84,92,107-116,118,120
+docs/CHUNK_SIZE_BENCHMARK.md
+  s_0e08240248c09e::t_d4f9d26f7504c3 1-39
+docs/IMPLEMENTATION_PLAN.md
+  s_0e08240248c09e::t_91225877176e24 574,579,587,662
+scripts/cloud/deploy.mjs
+  s_0e08240248c09e::t_6f364acca08254 1-221
+scripts/cloud/deploy.test.mjs
+  s_0e08240248c09e::t_7084eb5150500a 1-74
+worker/bench/chunk-size.bench.ts
+  s_0e08240248c09e::t_f2bbc0f43b1170 1-28
+worker/package-lock.json
+  s_43a8febd7cdba2::t_6e25f66ab70a5f 10-11,22-54,177,1723-1724,1793-1817,1826-1828,1846
+worker/package.json
+  s_0e08240248c09e::t_b252b2b3e12a63 5-11,13-14,18-19
+worker/src/files-api.ts
+  s_0e08240248c09e::t_81708297cc4fc8 1-547
+worker/src/mutation-journal.ts
+  s_0e08240248c09e::t_ee24e07fa97243 1-48
+worker/src/schema.ts
+  s_0e08240248c09e::t_b83e5528ad7fc6 10-18,21,27,44,51,53-54,62,68,72-75,78,84,90,93,99,101-113,118,121,133,137,141-142,144-195,197-202,205-213,216-235,238-283
+worker/test/chunk-size.test.ts
+  s_0e08240248c09e::t_8e9c3c85510eaa 1-45
+worker/test/schema.test.ts
+  s_0e08240248c09e::t_e1728372b33fee 6-14,86,88,95,130,201-278
+worker/wrangler.jsonc
+  s_0e08240248c09e::t_4d78d9e65c337e 6-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "435796e6a9e5054880ec4bd98c96247148c9f91d",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_43a8febd7cdba2": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0943b1590ffe0hfwoCWWSOp3ho",
+        "model": "gpt-5.6"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_7014343c99198c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_092491f8bffea9LEQfOfjoHxGw",
+        "model": "gpt-5.6"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_9831b2295ac1b6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_092b1a18affe43du4VfLkCFF8q",
+        "model": "gpt-5.6"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
