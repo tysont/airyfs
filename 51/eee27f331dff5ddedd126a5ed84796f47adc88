@@ -1,0 +1,35 @@
+container/package-lock.json
+  s_e75ddacbc6cd54::t_cc6b993d598730 8-10,26-41
+container/package.json
+  s_e75ddacbc6cd54::t_2dbebb64cc4aaa 12-14
+container/src/command-server.ts
+  s_e381e485077b84::t_0d5f549435ea12 8-9,72,88,132,140,144,221,230-231,290-291,396-399
+container/src/pty-server.test.ts
+  s_e381e485077b84::t_773302ab06ec30 1-71
+container/src/pty-server.ts
+  s_e381e485077b84::t_8286f0b6c36037 1-128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "51eee27f331dff5ddedd126a5ed84796f47adc88",
+  "prompts": {},
+  "sessions": {
+    "s_e381e485077b84": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08aa0daacffejmkJ8qy2F936Tn",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
