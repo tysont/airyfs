@@ -3,9 +3,6 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-04-01",
   "compatibility_flags": ["nodejs_compat"],
-  "vars": {
-    "AIRYFS_ENVIRONMENT": "local"
-  },
   "workers_dev": false,
   "preview_urls": false,
   "containers": [
@@ -28,5 +25,47 @@
       "tag": "v1",
       "new_sqlite_classes": ["AiryFS"]
     }
-  ]
+  ],
+  "env": {
+    "int": {
+      "workers_dev": true,
+      "preview_urls": false,
+      "containers": [
+        {
+          "name": "airyfs-int-airyfs",
+          "class_name": "AiryFS",
+          "image": "../container/Dockerfile",
+          "max_instances": 50
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "AiryFS",
+            "class_name": "AiryFS"
+          }
+        ]
+      }
+    },
+    "prod": {
+      "workers_dev": true,
+      "preview_urls": false,
+      "containers": [
+        {
+          "name": "airyfs-prod-airyfs",
+          "class_name": "AiryFS",
+          "image": "../container/Dockerfile",
+          "max_instances": 50
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "AiryFS",
+            "class_name": "AiryFS"
+          }
+        ]
+      }
+    }
+  }
 }

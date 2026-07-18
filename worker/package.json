@@ -3,12 +3,11 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev --local --name airyfs-local --persist-to ../.airyfs/local",
-    "cloud:render": "node ../scripts/cloud/deploy.mjs render",
-    "cloud:check": "node ../scripts/cloud/deploy.mjs check",
-    "deploy": "node ../scripts/cloud/deploy.mjs deploy",
-    "deploy:int": "node ../scripts/cloud/deploy.mjs deploy int",
-    "deploy:prod": "node ../scripts/cloud/deploy.mjs deploy prod",
-    "test:cloud": "node --test ../scripts/cloud/deploy.test.mjs",
+    "deploy:check": "node ../scripts/deploy.mjs check",
+    "deploy": "node ../scripts/deploy.mjs deploy",
+    "deploy:int": "node ../scripts/deploy.mjs deploy int",
+    "deploy:prod": "node ../scripts/deploy.mjs deploy prod",
+    "test:deploy": "node --test ../scripts/deploy.test.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "benchmark:chunks": "vitest bench --run bench/chunk-size.bench.ts"

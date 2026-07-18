@@ -447,6 +447,8 @@ Every bridge request has a 30-second response deadline and an 8 MiB frame limit.
 
 The bridge returns `503` with `Retry-After` when the Durable Object TCP connection is absent or admission is full. Pipeline transport failures become `502` responses to the libSQL client. A volume permits one active `exec`; overlapping commands receive `503 EXEC_BUSY` so one command cannot replace another command's TCP session.
 
+See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transport invariants, cancellation behavior, and bounds.
+
 ## API
 
 ### Resource-Oriented HTTP API
@@ -670,7 +672,7 @@ The repository includes a pristine pinned AgentFS snapshot and the ordered AiryF
 ./agentfs/build.sh
 ```
 
-The script verifies every patch, tests the TypeScript SDK and Rust crates, uses Rust 1.88 in Docker, and writes `container/bin/agentfs`. The compatibility entrypoint `./container/scripts/build-agentfs.sh` delegates to the same build. Networks using a private TLS root can provide it to the build Container:
+The script verifies every patch, tests the TypeScript SDK and Rust crates, uses Rust 1.88 in Docker, and writes `container/bin/agentfs`. Networks using a private TLS root can provide it to the build Container:
 
 ```bash
 DOCKER_CA_CERT=/path/to/root.crt ./agentfs/build.sh
@@ -680,7 +682,7 @@ See [`docs/AGENTFS_PATCHES.md`](docs/AGENTFS_PATCHES.md) for upstream refresh an
 
 ### Deploy
 
-AiryFS generates one account-pinned Wrangler config per environment. Worker names, Durable Object namespaces, and Container applications are isolated as `airyfs-<env>` and `airyfs-<env>-airyfs`; local development uses `airyfs-local` with state under `.airyfs/local` and never binds remote resources.
+The checked-in Wrangler configuration defines isolated `int` and `prod` environments. Wrangler names their Workers `airyfs-int` and `airyfs-prod`; their Durable Object namespaces and Container applications remain separate. Local development uses `airyfs-local` with state under `.airyfs/local` and never binds remote resources.
 
 Keep `CLOUDFLARE_API_TOKEN` in the shell environment. Set `CLOUDFLARE_ACCOUNT_ID` in the shell or a gitignored root `.dev.vars` (see `.dev.vars.example`). Set `AIRYFS_AUTH_SECRET` as a Worker secret in environments that require HTTP authentication. The deploy helper rejects an explicit/ambient account disagreement and passes the resolved account to Wrangler, avoiding membership-based account discovery.
 
@@ -691,9 +693,8 @@ export CLOUDFLARE_API_TOKEN=your-api-token
 # Local-only Worker, DO SQLite, and Container state
 npm run dev
 
-# Render and validate an isolated integration deployment
-npm run cloud:render -- int
-npm run cloud:check -- int --allow-dirty
+# Validate the integration deployment without publishing
+npm run deploy:check -- int --allow-dirty
 
 # Deploy integration from a dirty development tree
 npm run deploy:int -- --allow-dirty
@@ -702,7 +703,9 @@ npm run deploy:int -- --allow-dirty
 npm run deploy:prod -- --allow-prod
 ```
 
-Generated `worker/wrangler.generated.<env>.jsonc` files and local deployment locks are ignored. Same-environment deploys are serialized, Container rollout is immediate, and each push uses a temporary Docker configuration without OS credential helpers. Production rejects `--allow-dirty`; dry runs do not require `--allow-prod`.
+The deployment helper accepts only `int` and `prod`. Same-environment deploys are serialized, Container rollout is immediate, and each push uses a temporary Docker configuration without OS credential helpers. Production deployments reject `--allow-dirty`; dry runs may inspect a dirty tree and do not require `--allow-prod`.
+
+Use the package scripts for cloud deployments. Invoking Wrangler directly bypasses the clean-tree, production-confirmation, account-consistency, locking, and Docker credential safeguards.
 
 Wrangler builds and publishes the environment-specific Container image, then deploys the Worker and SQLite-backed Durable Object class. Integration and production can coexist in one account without sharing Worker, Durable Object, or Container identities.
 
@@ -731,7 +734,7 @@ npm test
 npm run typecheck
 ```
 
-The 256 Worker tests cover Hrana framing and execution, transport bounds, schema migration, locking, binary/range streaming, archives and transactional tree import, authentication and capability scope, snapshots, resumable uploads and checksums, streaming exec ownership, durable jobs, trigger-driven change feeds, open-handle leases, chunk-size boundaries, and POSIX-style HTTP errors. `npm run test:cloud` covers rendering, account selection, environment validation, production guards, and Docker credential isolation.
+The 256 Worker tests cover Hrana framing and execution, transport bounds, schema migration, locking, binary/range streaming, archives and transactional tree import, authentication and capability scope, snapshots, resumable uploads and checksums, streaming exec ownership, durable jobs, trigger-driven change feeds, open-handle leases, chunk-size boundaries, and POSIX-style HTTP errors. `npm run test:deploy` covers account selection, fixed environment targeting, production guards, and Docker configuration sanitization.
 
 ### Container Build
 
@@ -814,9 +817,11 @@ airyfs/
     src/
       command-server.ts         Setup, mount, exec, and health endpoints
       bridge.ts                 HTTP/libSQL to framed TCP bridge
-    scripts/
-      build-agentfs.sh          Linux AgentFS build
     Dockerfile
+  agentfs/
+    upstream/                    Pristine pinned AgentFS source
+    patches/                     Ordered AiryFS compatibility patches
+    build.sh                     Patch verification, tests, and Linux build
   cli/
     src/                         Typed API client, sessions, commands, and shell
     test/                        Unit and mock-server integration tests
@@ -826,8 +831,9 @@ airyfs/
   e2e/
     test.sh                     Deployed end-to-end tests
     features.mjs                Deployed new-feature smoke tests
-  docs/
-    CHUNK_SIZE_BENCHMARK.md
+  docs/                         Design and operational notes
+  scripts/
+    deploy.mjs                  Guarded int/prod deployment
 ```
 
 ## License

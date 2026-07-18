@@ -10,4 +10,3 @@ container/bin/
 agentfs/.build/
 agentfs/.target/
 .env
-worker/wrangler.generated.*.jsonc

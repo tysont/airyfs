@@ -1,27 +1,25 @@
-// ABOUTME: Hermetic tests for AiryFS environment rendering and deployment guardrails.
+// ABOUTME: Hermetic tests for AiryFS deployment configuration and guardrails.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
+  REPO_ROOT,
   assertDeployAllowed,
-  generateConfig,
   parseDotEnv,
   resolveAccountId,
   sanitizeDockerConfig,
   validateEnvName,
+  wranglerArgs,
 } from './deploy.mjs';
 
-const base = {
-  name: 'airyfs',
-  vars: { AIRYFS_ENVIRONMENT: 'local' },
-  containers: [{ class_name: 'AiryFS', image: '../container/Dockerfile' }],
-  durable_objects: { bindings: [{ name: 'AiryFS', class_name: 'AiryFS' }] },
-};
+const wrangler = JSON.parse(readFileSync(join(REPO_ROOT, 'worker', 'wrangler.jsonc'), 'utf8'));
 
-test('validates safe environment names', () => {
+test('accepts only configured deployment environments', () => {
   assert.equal(validateEnvName('int'), 'int');
   assert.equal(validateEnvName('prod'), 'prod');
-  for (const value of ['', 'Prod', 'bad--name', '-bad', 'a'.repeat(21)]) {
+  for (const value of ['', 'Prod', 'staging', '-bad']) {
     assert.throws(() => validateEnvName(value));
   }
 });
@@ -42,16 +40,24 @@ test('rejects explicit and ambient account disagreement', () => {
   }), /disagreement/);
 });
 
-test('generates isolated worker identity while preserving bindings', () => {
-  const generated = generateConfig(base, 'int', 'account');
-  assert.equal(generated.account_id, 'account');
-  assert.equal(generated.name, 'airyfs-int');
-  assert.equal(generated.vars.AIRYFS_ENVIRONMENT, 'int');
-  assert.equal(generated.workers_dev, true);
-  assert.equal(generated.preview_urls, false);
-  assert.deepEqual(generated.containers, base.containers);
-  assert.deepEqual(generated.durable_objects, base.durable_objects);
-  assert.equal(base.name, 'airyfs');
+test('targets the native Wrangler environment with immediate Container rollout', () => {
+  assert.deepEqual(wranglerArgs('int'), [
+    'wrangler', 'deploy', '--env', 'int', '--containers-rollout', 'immediate',
+  ]);
+  assert.deepEqual(wranglerArgs('prod', { dryRun: true }), [
+    'wrangler', 'deploy', '--env', 'prod', '--containers-rollout', 'immediate', '--dry-run',
+  ]);
+});
+
+test('pins Worker, Container, binding, and migration identities', () => {
+  assert.equal(wrangler.name, 'airyfs');
+  assert.deepEqual(wrangler.migrations, [{ tag: 'v1', new_sqlite_classes: ['AiryFS'] }]);
+  for (const env of ['int', 'prod']) {
+    const config = wrangler.env[env];
+    assert.equal(config.containers[0].name, `airyfs-${env}-airyfs`);
+    assert.equal(config.containers[0].class_name, 'AiryFS');
+    assert.deepEqual(config.durable_objects.bindings, [{ name: 'AiryFS', class_name: 'AiryFS' }]);
+  }
 });
 
 test('removes Docker keychain helpers while preserving static configuration', () => {
@@ -67,8 +73,9 @@ test('removes Docker keychain helpers while preserving static configuration', ()
 
 test('guards production and dirty deployments', () => {
   assert.throws(() => assertDeployAllowed('prod', {}, true), /--allow-prod/);
-  assert.throws(() => assertDeployAllowed('prod', { allowProd: true, allowDirty: true }, false), /never accepts/);
+  assert.throws(() => assertDeployAllowed('prod', { allowProd: true, allowDirty: true }, false), /never accept/);
   assert.throws(() => assertDeployAllowed('int', {}, false), /dirty tree/);
   assert.doesNotThrow(() => assertDeployAllowed('int', { allowDirty: true }, false));
   assert.doesNotThrow(() => assertDeployAllowed('prod', { dryRun: true }, true));
+  assert.doesNotThrow(() => assertDeployAllowed('prod', { dryRun: true, allowDirty: true }, false));
 });

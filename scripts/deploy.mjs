@@ -1,4 +1,4 @@
-// ABOUTME: Generates isolated Wrangler configs and safely deploys named AiryFS environments.
+// ABOUTME: Safely deploys the fixed Wrangler integration and production environments.
 // ABOUTME: Pins account credentials, guards production, and serializes same-env mutations.
 
 import { execFileSync } from 'node:child_process';
@@ -9,20 +9,20 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
+  existsSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-export const REPO_ROOT = resolve(SCRIPT_DIR, '../..');
+export const REPO_ROOT = resolve(SCRIPT_DIR, '..');
 const WORKER_DIR = join(REPO_ROOT, 'worker');
-const BASE_CONFIG = join(WORKER_DIR, 'wrangler.jsonc');
+const DEPLOY_ENVIRONMENTS = new Set(['int', 'prod']);
 
 export function validateEnvName(env) {
-  if (typeof env !== 'string' || !/^[a-z](?:[a-z0-9-]*[a-z0-9])?$/.test(env)
-    || env.length > 20 || env.includes('--')) {
-    throw new Error('environment must be a lowercase [a-z0-9-] token, start with a letter, and be at most 20 characters');
+  if (!DEPLOY_ENVIRONMENTS.has(env)) {
+    throw new Error('environment must be int or prod');
   }
   return env;
 }
@@ -55,28 +55,12 @@ export function resolveAccountId({ explicit, processEnv = process.env, devVars =
   return accountId;
 }
 
-export function generateConfig(base, env, accountId) {
-  validateEnvName(env);
-  return {
-    ...structuredClone(base),
-    account_id: accountId,
-    name: `airyfs-${env}`,
-    vars: { ...(base.vars ?? {}), AIRYFS_ENVIRONMENT: env },
-    workers_dev: true,
-    preview_urls: false,
-  };
-}
-
 export function sanitizeDockerConfig(config) {
   const sanitized = { ...(config ?? {}) };
   delete sanitized.credsStore;
   delete sanitized.credHelpers;
   delete sanitized.currentContext;
   return sanitized;
-}
-
-export function generatedConfigPath(env, workerDir = WORKER_DIR) {
-  return join(workerDir, `wrangler.generated.${validateEnvName(env)}.jsonc`);
 }
 
 function readDevVars(root = REPO_ROOT) {
@@ -88,17 +72,6 @@ function readDevVars(root = REPO_ROOT) {
   }
 }
 
-export function render(env, { accountId, root = REPO_ROOT, workerDir = WORKER_DIR } = {}) {
-  const resolvedAccount = resolveAccountId({
-    explicit: accountId,
-    devVars: readDevVars(root),
-  });
-  const base = JSON.parse(readFileSync(join(workerDir, 'wrangler.jsonc'), 'utf8'));
-  const output = generatedConfigPath(env, workerDir);
-  writeFileSync(output, `${JSON.stringify(generateConfig(base, env, resolvedAccount), null, 2)}\n`);
-  return { accountId: resolvedAccount, output };
-}
-
 function gitIsClean(root = REPO_ROOT) {
   return execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim() === '';
 }
@@ -107,8 +80,8 @@ export function assertDeployAllowed(env, opts, clean) {
   if (env === 'prod' && !opts.allowProd && !opts.dryRun) {
     throw new Error('refusing to deploy prod without --allow-prod');
   }
-  if (env === 'prod' && opts.allowDirty) {
-    throw new Error('prod never accepts --allow-dirty');
+  if (env === 'prod' && opts.allowDirty && !opts.dryRun) {
+    throw new Error('prod deployments never accept --allow-dirty');
   }
   if (!opts.allowDirty && !clean) {
     throw new Error('refusing to deploy from a dirty tree; use --allow-dirty for non-prod');
@@ -150,7 +123,8 @@ function withIsolatedDockerConfig(operation) {
       `${JSON.stringify(sanitizeDockerConfig(source), null, 2)}\n`,
       { mode: 0o600 }
     );
-    symlinkSync(join(homedir(), '.docker', 'cli-plugins'), join(directory, 'cli-plugins'), 'dir');
+    const plugins = join(homedir(), '.docker', 'cli-plugins');
+    if (existsSync(plugins)) symlinkSync(plugins, join(directory, 'cli-plugins'), 'dir');
     return operation(directory, dockerHost);
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -160,24 +134,32 @@ function withIsolatedDockerConfig(operation) {
 export function deploy(env, opts = {}) {
   validateEnvName(env);
   assertDeployAllowed(env, opts, gitIsClean(opts.root));
-
-  const rendered = render(env, opts);
+  const accountId = resolveAccountId({
+    explicit: opts.accountId,
+    devVars: readDevVars(opts.root),
+  });
   const run = () => withIsolatedDockerConfig((dockerConfig, dockerHost) => {
-    const args = ['wrangler', 'deploy', '-c', rendered.output, '--containers-rollout', 'immediate'];
-    if (opts.dryRun) args.push('--dry-run');
+    const args = wranglerArgs(env, opts);
     execFileSync('npx', args, {
       cwd: opts.workerDir ?? WORKER_DIR,
       env: {
         ...process.env,
-        CLOUDFLARE_ACCOUNT_ID: rendered.accountId,
+        CLOUDFLARE_ACCOUNT_ID: accountId,
         DOCKER_CONFIG: dockerConfig,
         DOCKER_HOST: dockerHost,
       },
       stdio: 'inherit',
     });
-    return rendered;
+    return { accountId, env };
   });
   return opts.dryRun ? run() : withEnvLock(env, run);
+}
+
+export function wranglerArgs(env, opts = {}) {
+  validateEnvName(env);
+  const args = ['wrangler', 'deploy', '--env', env, '--containers-rollout', 'immediate'];
+  if (opts.dryRun) args.push('--dry-run');
+  return args;
 }
 
 function parseArgs(argv) {
@@ -200,13 +182,8 @@ function parseArgs(argv) {
 
 export function main(argv = process.argv.slice(2)) {
   const { command, env, opts } = parseArgs(argv);
-  if (!command || !env || !['render', 'check', 'deploy'].includes(command)) {
-    throw new Error('usage: deploy.mjs <render|check|deploy> <env> [--dry-run] [--allow-dirty] [--allow-prod] [--account-id ID]');
-  }
-  if (command === 'render') {
-    const result = render(env, opts);
-    console.log(`rendered ${result.output}`);
-    return;
+  if (!command || !env || !['check', 'deploy'].includes(command)) {
+    throw new Error('usage: deploy.mjs <check|deploy> <int|prod> [--dry-run] [--allow-dirty] [--allow-prod] [--account-id ID]');
   }
   deploy(env, { ...opts, dryRun: command === 'check' ? true : opts.dryRun });
 }

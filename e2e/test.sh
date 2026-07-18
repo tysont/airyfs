@@ -149,10 +149,10 @@ echo "4. Transport admission"
 
 EXEC_ONE_FILE=$(mktemp)
 curl -sf --max-time 30 -X POST "$BASE/exec?volume=$VOL" \
-  -H "Content-Type: application/json" -d '{"command":"printf ready > /volume/phase4-ready; sleep 3; printf phase4"}' > "$EXEC_ONE_FILE" &
+  -H "Content-Type: application/json" -d '{"command":"printf ready > /volume/transport-ready; sleep 3; printf complete"}' > "$EXEC_ONE_FILE" &
 EXEC_ONE_PID=$!
 for _ in $(seq 1 50); do
-  [ "$(curl -s "$BASE/fs/read?volume=$VOL&path=/phase4-ready")" = "ready" ] && break
+  [ "$(curl -s "$BASE/fs/read?volume=$VOL&path=/transport-ready")" = "ready" ] && break
   sleep 0.1
 done
 EXEC_BUSY_RESPONSE=$(curl -s --max-time 15 -w $'\n%{http_code}' -X POST "$BASE/exec?volume=$VOL" \
@@ -162,7 +162,7 @@ EXEC_BUSY=${EXEC_BUSY_RESPONSE%$'\n'*}
 wait "$EXEC_ONE_PID"
 EXEC_ONE=$(<"$EXEC_ONE_FILE")
 rm -f "$EXEC_ONE_FILE"
-check_contains "first concurrent exec completes" '"stdout":"phase4"' "$EXEC_ONE"
+check_contains "first concurrent exec completes" '"stdout":"complete"' "$EXEC_ONE"
 check "overlapping exec returns 503" "503" "$EXEC_BUSY_STATUS"
 check_contains "overlapping exec is rejected" '"code":"EXEC_BUSY"' "$EXEC_BUSY"
 
