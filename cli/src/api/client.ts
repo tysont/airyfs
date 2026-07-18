@@ -39,6 +39,8 @@ import type {
   TreeViewResponse,
   TrashEntry,
   RestoredTrashEntry,
+  ServiceRecord,
+  CreateServiceInput,
   UploadCompleteResult,
   UploadStatus,
   UsageInfo,
@@ -297,6 +299,16 @@ export class AiryFSClient {
     url.search = new URLSearchParams({ ticket }).toString();
     return connectPty(url, WebSocketImpl);
   }
+
+  async listServices(): Promise<ServiceRecord[]> { return this.json<ServiceRecord[]>(`${this.volumeBase}/services`); }
+  async createService(input: CreateServiceInput): Promise<ServiceRecord> {
+    return this.json<ServiceRecord>(`${this.volumeBase}/services`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+    });
+  }
+  async startService(name: string): Promise<ServiceRecord> { return this.json<ServiceRecord>(`${this.volumeBase}/services/${encodeURIComponent(name)}/start`, { method: 'POST' }); }
+  async stopService(name: string): Promise<ServiceRecord> { return this.json<ServiceRecord>(`${this.volumeBase}/services/${encodeURIComponent(name)}/stop`, { method: 'POST' }); }
+  async deleteService(name: string): Promise<ServiceRecord> { return this.json<ServiceRecord>(`${this.volumeBase}/services/${encodeURIComponent(name)}`, { method: 'DELETE' }); }
 
   // --- Durable jobs -------------------------------------------------------
 

@@ -161,6 +161,9 @@ airyfs ls ../tests
 | `trash purge <id>` | Permanently delete a trash entry |
 | `undo` | Restore the most recently trashed path |
 | `exec --pty <command>` | Run an interactive command with raw input and terminal resizing |
+| `service create <name> <command...>` | Create a persistent preview; use `--public`, `--cwd`, and `--env` |
+| `service list` | List allocated preview services and desired state |
+| `service start|stop|delete <name>` | Manage preview service lifecycle |
 | `volume quota` | Show quotas; set with `--bytes`, `--inodes`, or `unlimited` |
 
 `cat` emits raw bytes and therefore cannot be combined with `--json` or `--quiet`. Use `get` for binary files that should not be written directly to the terminal.

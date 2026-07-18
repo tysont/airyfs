@@ -560,6 +560,8 @@ Volumes are mountable over WebDAV at `/dav/<volume>/`. The dependency-free adapt
 
 `airy exec --pty <command>` runs interactive terminal applications against the mounted volume. The CLI obtains a 30-second single-use ticket, upgrades to a binary WebSocket, forwards raw terminal input and resize events, and restores local terminal mode on every exit path. PTY sessions share the volume's single execution slot with buffered, streaming, and durable commands.
 
+Preview services persist a command definition in Durable Object SQLite while the process remains disposable Container compute. `airy service create web --public -- node server.js` allocates `$PORT` from 5000–5015, starts independently of foreground exec/PTY work, and publishes at `/p/<volume>/web/`. Enabled services restart lazily after Container sleep or replacement when the next proxy request arrives. Commands must listen on `$PORT`; public exposure is opt-in.
+
 ```sh
 # macOS Finder: Go > Connect to Server
 https://example.workers.dev/dav/my-volume/

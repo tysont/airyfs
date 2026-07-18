@@ -53,6 +53,23 @@ export interface TrashEntry {
 }
 
 export interface RestoredTrashEntry extends TrashEntry { restoredPath: string }
+export interface ServiceRecord {
+  name: string;
+  command: string;
+  cwd: string;
+  env: Record<string, string>;
+  port: number;
+  enabled: boolean;
+  public: boolean;
+  createdAt: number;
+}
+export interface CreateServiceInput {
+  name: string;
+  command: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  public?: boolean;
+}
 
 export interface TreeSummary {
   files: number;

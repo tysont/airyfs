@@ -25,6 +25,8 @@ import type {
   RestoredTrashEntry,
   SnapshotDiffEntry,
   SnapshotInfo,
+  ServiceRecord,
+  CreateServiceInput,
   TreeSummary,
   TreeViewResponse,
   UploadCompleteResult,
@@ -221,6 +223,34 @@ export class AiryFSClient {
 
   createPtyTicket(): Promise<{ ticket: string; expiresAt: number }> {
     return this.json<{ ticket: string; expiresAt: number }>(`${this.volumeBase}/exec/pty-ticket`, { method: 'POST' });
+  }
+
+  listServices(): Promise<ServiceRecord[]> {
+    return this.json<ServiceRecord[]>(`${this.volumeBase}/services`);
+  }
+
+  getService(name: string): Promise<ServiceRecord> {
+    return this.json<ServiceRecord>(`${this.volumeBase}/services/${encodeURIComponent(name)}`);
+  }
+
+  createService(input: CreateServiceInput): Promise<ServiceRecord> {
+    return this.json<ServiceRecord>(`${this.volumeBase}/services`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  startService(name: string): Promise<ServiceRecord> {
+    return this.json<ServiceRecord>(`${this.volumeBase}/services/${encodeURIComponent(name)}/start`, { method: 'POST' });
+  }
+
+  stopService(name: string): Promise<ServiceRecord> {
+    return this.json<ServiceRecord>(`${this.volumeBase}/services/${encodeURIComponent(name)}/stop`, { method: 'POST' });
+  }
+
+  deleteService(name: string): Promise<ServiceRecord> {
+    return this.json<ServiceRecord>(`${this.volumeBase}/services/${encodeURIComponent(name)}`, { method: 'DELETE' });
   }
 
   beginUpload(path: string, size: number, checksum: string): Promise<UploadStatus> {

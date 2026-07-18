@@ -56,6 +56,7 @@ export function registerCommands(program: Command, runtime: Runtime): void {
   registerExecCommand(program, runtime);
   registerJobCommands(program, runtime);
   registerScheduleCommands(program, runtime);
+  registerServiceCommands(program, runtime);
   registerWatchCommand(program, runtime);
   registerWebhookCommands(program, runtime);
   registerVolumeCommands(program, runtime);
@@ -77,6 +78,54 @@ export function registerCommands(program: Command, runtime: Runtime): void {
       if (initialSession) await runtime.sessions.resolve(initialSession);
       const { runShell } = await import('../shell.js');
       await runShell(runtime, initialSession);
+    }));
+}
+
+function registerServiceCommands(program: Command, runtime: Runtime): void {
+  const service = program.command('service').description('Manage persistent Container preview services');
+  service.command('create')
+    .argument('<name>')
+    .argument('<command...>')
+    .option('--cwd <path>', 'remote working directory', '.')
+    .option('--env <KEY=VALUE>', 'environment variable', collectOption, [])
+    .option('--public', 'publish without authentication')
+    .description('Create and start a preview service; command must bind $PORT')
+    .action(async (name, parts: string[], options, command) => perform(runtime, command, async (context) => {
+      const env: Record<string, string> = {};
+      for (const assignment of options.env as string[]) {
+        const split = assignment.indexOf('=');
+        if (split < 1) throw new ConfigError(`Invalid --env value: ${assignment}`);
+        env[assignment.slice(0, split)] = assignment.slice(split + 1);
+      }
+      const record = await context.client().createService({
+        name, command: commandForExec(parts), cwd: context.path(options.cwd), env, public: Boolean(options.public),
+      });
+      const url = record.public ? `${context.endpoint}/p/${encodeURIComponent(context.volume)}/${encodeURIComponent(record.name)}/` : null;
+      const suffix = url ? ` at ${url}` : '';
+      context.output.success(`Created preview service ${record.name} on $PORT=${record.port}${suffix}`, { ...record, url });
+    }));
+
+  service.command('list', { isDefault: true })
+    .description('List preview services')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const records = await context.client().listServices();
+      if (context.output.json) context.output.value(records);
+      else context.output.table(['Name', 'Port', 'Enabled', 'Public', 'Directory', 'Command'], records.map((record) => [
+        record.name, record.port, record.enabled ? 'yes' : 'no', record.public ? 'yes' : 'no', record.cwd, truncateCommand(record.command),
+      ]));
+    }));
+
+  for (const action of ['start', 'stop'] as const) {
+    service.command(action).argument('<name>').description(`${action} a preview service`)
+      .action(async (name, _options, command) => perform(runtime, command, async (context) => {
+        const record = action === 'start' ? await context.client().startService(name) : await context.client().stopService(name);
+        context.output.success(`${action === 'start' ? 'Started' : 'Stopped'} preview service ${name}`, record);
+      }));
+  }
+  service.command('delete').alias('rm').argument('<name>').description('Stop and delete a preview service')
+    .action(async (name, _options, command) => perform(runtime, command, async (context) => {
+      const record = await context.client().deleteService(name);
+      context.output.success(`Deleted preview service ${name}`, record);
     }));
 }
 

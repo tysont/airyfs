@@ -70,6 +70,12 @@ describe('AiryFSClient', () => {
     expect(execEvents).toHaveLength(2);
     await client.cancelExec('run');
     await client.createPtyTicket();
+    await client.listServices();
+    await client.getService('dev server');
+    await client.createService({ name: 'dev', command: 'npm start', public: true });
+    await client.startService('dev server');
+    await client.stopService('dev server');
+    await client.deleteService('dev server');
     await client.beginUpload('/big', 3, 'a'.repeat(64));
     await client.uploadStatus('/big');
     await client.appendUpload('/big', 0, 'b'.repeat(64), new Uint8Array([1, 2, 3]));
@@ -112,6 +118,8 @@ describe('AiryFSClient', () => {
     expect(requests.some((request) => request.url.includes('/snapshots/snap%20id/diff?against=other'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/perf?volume=my+volume'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/kv/set?volume=my+volume&key=a+b'))).toBe(true);
+    expect(requests.some((request) => request.url.endsWith('/services/dev%20server/start') && request.method === 'POST')).toBe(true);
+    expect(requests.some((request) => request.url.endsWith('/services/dev%20server') && request.method === 'DELETE')).toBe(true);
   });
 
   it('normalizes structured API errors and transport failures', async () => {

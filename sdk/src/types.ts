@@ -195,6 +195,23 @@ export interface PtySession {
   close(): void;
 }
 export interface OpenPtyOptions { webSocket?: typeof WebSocket }
+export interface ServiceRecord {
+  name: string;
+  command: string;
+  cwd: string;
+  env: Record<string, string>;
+  port: number;
+  enabled: boolean;
+  public: boolean;
+  createdAt: number;
+}
+export interface CreateServiceInput {
+  name: string;
+  command: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  public?: boolean;
+}
 export interface WaitForJobOptions {
   interval?: number;
   after?: number;
