@@ -1708,7 +1708,7 @@ export class AiryFS extends Container<Env> {
       throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'POST' });
     }
     const body = await readJsonObject(request);
-    return Response.json(await searchVolume(this.filesystem(), this.access, {
+    return Response.json(await searchVolume(this.filesystem(), this.ctx.storage.sql, this.access, {
       mode: body.mode,
       path: body.path,
       pattern: body.pattern,

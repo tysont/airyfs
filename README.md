@@ -546,7 +546,7 @@ Content-addressed assets are immutable through the asset API and stored by SHA-2
 
 Scheduled jobs use five-field UTC cron expressions or `@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly` aliases. `airy schedule create build '*/15 * * * *' --cwd /site npm run build` persists the schedule and submits each occurrence through the existing durable, idempotent job queue. A crash after submission is safe: the occurrence's idempotency key is derived from the schedule and scheduled timestamp. Creating or changing schedules requires `admin` access because execution can continue after the caller's token expires.
 
-Server-side search reads AgentFS directly without starting the Container. `airy find /src --name config`, `airy glob '**/*.test.ts' /src`, and `airy grep needle /src --ignore-case` share bounded traversal. Grep skips binary files and files over 10 MiB, scans at most 100 MiB per request, and returns line/column metadata. All modes cap traversal at 100,000 entries and results at 1,000.
+Server-side search does not start the Container. `airy find /src --name config` uses a transactionally maintained FTS5 trigram index for basename substring lookup, including files written through FUSE. `airy glob '**/*.test.ts' /src` and `airy grep needle /src --ignore-case` traverse AgentFS directly. Grep skips binary files and files over 10 MiB, scans at most 100 MiB per request, and returns line/column metadata. Traversal modes cap work at 100,000 entries; every mode caps results at 1,000.
 
 `airy tree /src --depth 3` renders a structured server-side walk without starting the Container. The API returns path, depth, type, and logical size for up to 100,000 entries, with explicit truncation metadata.
 

@@ -36,6 +36,85 @@ export interface SearchInput {
   limit?: unknown;
 }
 
+export interface SearchSql {
+  exec(query: string, ...bindings: unknown[]): { toArray(): Record<string, unknown>[] };
+}
+
+interface FindRow {
+  path: string;
+  mode: number;
+}
+
+const S_IFMT = 0o170000;
+const S_IFDIR = 0o040000;
+const S_IFLNK = 0o120000;
+
+function resultType(mode: number): SearchResult['type'] {
+  if ((mode & S_IFMT) === S_IFDIR) return 'directory';
+  if ((mode & S_IFMT) === S_IFLNK) return 'symlink';
+  return 'file';
+}
+
+function ftsPhrase(pattern: string): string {
+  return `"${pattern.replace(/"/g, '""')}"`;
+}
+
+async function findNames(
+  fs: FileSystem,
+  sql: SearchSql,
+  access: VolumeAccessCoordinator,
+  root: string,
+  pattern: string,
+  ignoreCase: boolean,
+  resultLimit: number,
+): Promise<SearchResponse> {
+  const release = await access.acquireRead(root);
+  try {
+    const rootIno = (await fs.stat(root)).ino;
+    const useFts = [...pattern].length >= 3;
+    const match = useFts
+      ? `fs_dentry_fts MATCH ?${ignoreCase ? '' : ' AND instr(subtree.name, ?) > 0'}`
+      : `${ignoreCase ? 'instr(lower(subtree.name), lower(?))' : 'instr(subtree.name, ?)'} > 0`;
+    const bindings: unknown[] = [];
+    if (useFts) {
+      bindings.push(ftsPhrase(pattern));
+      if (!ignoreCase) bindings.push(pattern);
+    } else bindings.push(pattern);
+    bindings.push(rootIno, root, root, rootIno);
+    if (root === '/') bindings.push('/.airyfs-trash', '/.airyfs-trash/%');
+    bindings.push(resultLimit + 1);
+
+    const rows = sql.exec(`WITH RECURSIVE
+    candidates(id, name, parent_ino, ino) AS (
+      SELECT d.id, d.name, d.parent_ino, d.ino
+      FROM fs_dentry d
+      ${useFts ? 'JOIN fs_dentry_fts ON fs_dentry_fts.rowid = d.id' : ''}
+      WHERE ${match.replaceAll('subtree.name', 'd.name')}
+    ),
+    paths(id, ino, parent_ino, path, depth) AS (
+      SELECT id, ino, parent_ino, '/' || name, 1 FROM candidates
+      UNION ALL
+      SELECT paths.id, paths.ino, parent.parent_ino, '/' || parent.name || paths.path, paths.depth + 1
+      FROM paths JOIN fs_dentry parent ON parent.ino = paths.parent_ino
+      WHERE paths.parent_ino != ?
+    )
+    SELECT CASE WHEN ? = '/' THEN paths.path ELSE ? || paths.path END AS path, inode.mode
+    FROM paths JOIN fs_inode inode ON inode.ino = paths.ino
+    WHERE paths.parent_ino = ?
+      ${root === '/' ? 'AND paths.path != ? AND paths.path NOT LIKE ?' : ''}
+    ORDER BY paths.depth, paths.path
+    LIMIT ?`, ...bindings).toArray() as unknown as FindRow[];
+    const truncated = rows.length > resultLimit;
+    const results = rows.slice(0, resultLimit).map((row) => ({
+      path: row.path,
+      type: resultType(Number(row.mode)),
+    }));
+    return { results, truncated, scannedEntries: rows.length, scannedBytes: 0 };
+  } finally {
+    release();
+  }
+}
+
 function limit(value: unknown): number {
   if (value === undefined) return DEFAULT_LIMIT;
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > MAX_LIMIT) {
@@ -106,6 +185,7 @@ async function grepFile(
 
 export async function search(
   fs: FileSystem,
+  sql: SearchSql,
   access: VolumeAccessCoordinator,
   input: SearchInput,
 ): Promise<SearchResponse> {
@@ -117,10 +197,13 @@ export async function search(
   }
   const root = normalizePath(typeof input.path === 'string' ? input.path : '/');
   const resultLimit = limit(input.limit);
+  if (input.mode === 'find') {
+    return findNames(fs, sql, access, root, input.pattern, input.ignoreCase === true, resultLimit);
+  }
   let matcher: RegExp;
   try {
     if (input.mode === 'glob') matcher = globRegex(input.pattern.replace(/^\/+/, ''));
-    else if (input.mode === 'grep' && input.regex === true) matcher = new RegExp(input.pattern, input.ignoreCase === true ? 'i' : '');
+    else if (input.regex === true) matcher = new RegExp(input.pattern, input.ignoreCase === true ? 'i' : '');
     else matcher = new RegExp(input.pattern.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&'), input.ignoreCase === true ? 'i' : '');
   } catch (error) {
     throw new HttpError(400, 'INVALID_PATTERN', error instanceof Error ? error.message : String(error));
@@ -147,10 +230,7 @@ export async function search(
         const type = pathType(entry);
         if (type === 'directory') queue.push(path);
         const relative = path.slice(root === '/' ? 1 : root.length + 1);
-        if (input.mode === 'find') {
-          matcher.lastIndex = 0;
-          if (matcher.test(entry.name)) results.push({ path, type });
-        } else if (input.mode === 'glob') {
+        if (input.mode === 'glob') {
           if (matcher.test(relative)) results.push({ path, type });
         } else if (type === 'file' && scannedBytes < MAX_SCAN_BYTES) {
           scannedBytes += await grepFile(fs, path, matcher, results, resultLimit);

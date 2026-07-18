@@ -60,6 +60,26 @@ const DDL_STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_fs_dentry_parent ON fs_dentry(parent_ino, name)`,
 
+  // Trigram FTS keeps basename substring lookup off the filesystem traversal
+  // path. The rowid matches fs_dentry.id so joins can recover hierarchy/type.
+  `CREATE VIRTUAL TABLE IF NOT EXISTS fs_dentry_fts USING fts5(
+    name,
+    tokenize='trigram'
+  )`,
+  `CREATE TRIGGER IF NOT EXISTS trg_fs_dentry_fts_insert
+    AFTER INSERT ON fs_dentry BEGIN
+      INSERT INTO fs_dentry_fts(rowid, name) VALUES (NEW.id, NEW.name);
+    END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_fs_dentry_fts_delete
+    AFTER DELETE ON fs_dentry BEGIN
+      DELETE FROM fs_dentry_fts WHERE rowid = OLD.id;
+    END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_fs_dentry_fts_update
+    AFTER UPDATE OF name ON fs_dentry BEGIN
+      DELETE FROM fs_dentry_fts WHERE rowid = OLD.id;
+      INSERT INTO fs_dentry_fts(rowid, name) VALUES (NEW.id, NEW.name);
+    END`,
+
   // File content in immutable, per-volume chunks
   `CREATE TABLE IF NOT EXISTS fs_data (
     ino INTEGER NOT NULL,
@@ -222,6 +242,7 @@ export const SCHEMA_TABLES = [
   'fs_config',
   'fs_inode',
   'fs_dentry',
+  'fs_dentry_fts',
   'fs_data',
   'fs_symlink',
   'fs_whiteout',
@@ -254,6 +275,12 @@ export function initSchema(sql: SqlExec, transactionSync?: TransactionSync): voi
     for (const stmt of DDL_STATEMENTS) {
       sql.exec(stmt);
     }
+
+    // Backfill volumes created before the FTS index was introduced. Triggers
+    // keep all subsequent dentry mutations synchronized transactionally.
+    sql.exec(`INSERT INTO fs_dentry_fts(rowid, name)
+      SELECT id, name FROM fs_dentry
+      WHERE id NOT IN (SELECT rowid FROM fs_dentry_fts)`);
 
     migrateInodeColumns(sql);
     migrateWhiteouts(sql);
