@@ -239,6 +239,20 @@ describe('completeShellLine', () => {
       .toEqual([[], '1']);
     expect(await completeShellLine('put local.txt do', sessions, 'sample', ['put'], [], list))
       .toEqual([['document.txt'], 'do']);
+    // push completes only the remote (2nd) positional; pull completes the remote (1st).
+    expect(await completeShellLine('push ./local do', sessions, 'sample', ['push'], [], list))
+      .toEqual([['document.txt'], 'do']);
+    expect(await completeShellLine('pull do', sessions, 'sample', ['pull'], [], list))
+      .toEqual([['document.txt'], 'do']);
+    expect(await completeShellLine('pull remotedir lo', sessions, 'sample', ['pull'], [], list))
+      .toEqual([[], 'lo']);
+    // Snapshot names/ids must never be path-completed.
+    expect(await completeShellLine('snapshot diff doc', sessions, 'sample', ['snapshot'], [], list))
+      .toEqual([[], 'doc']);
+    expect(await completeShellLine('snapshot restore doc', sessions, 'sample', ['snapshot'], [], list))
+      .toEqual([[], 'doc']);
+    expect(await completeShellLine('snap rm doc', sessions, 'sample', ['snap'], [], list))
+      .toEqual([[], 'doc']);
   });
 
   it('completes paths inside an open quote', async () => {

@@ -159,6 +159,7 @@ export async function completeShellLine(
   const remotePathPositions: Record<string, number[]> = {
     cd: [1], ls: [1], cat: [1], get: [1], put: [2], write: [1], mkdir: [1], rm: [1],
     mv: [1, 2], cp: [1, 2], ln: [1, 2], readlink: [1], truncate: [1], stat: [1],
+    push: [2], pull: [1],
   };
   const position = args.slice(1).filter((argument) => !argument.startsWith('-')).length + 1;
   if (!remotePathPositions[args[0]]?.includes(position) || token.value.startsWith('-') || !sessionName) {

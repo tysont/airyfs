@@ -84,7 +84,7 @@ export async function createContext(runtime: Runtime, options: GlobalOptions): P
     cwd: named.session.cwd,
     shellMode: runtime.shellMode ?? false,
     client() {
-      return new AiryFSClient(endpoint, volume);
+      return new AiryFSClient(endpoint, volume, undefined, named.session.token);
     },
     path(input = '.') {
       return resolveRemotePath(named.session.cwd, input);

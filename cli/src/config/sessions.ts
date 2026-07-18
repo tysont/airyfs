@@ -112,6 +112,20 @@ export class SessionManager {
     });
   }
 
+  async setToken(name: string, token: string): Promise<NamedSession> {
+    const trimmed = token.trim();
+    if (!trimmed) throw new ConfigError('Token cannot be empty');
+    return this.updateSession(name, (session) => {
+      session.token = trimmed;
+    });
+  }
+
+  async clearToken(name: string): Promise<NamedSession> {
+    return this.updateSession(name, (session) => {
+      delete session.token;
+    });
+  }
+
   private async updateSession(name: string, mutate: (session: AiryFSSession) => void): Promise<NamedSession> {
     let updated!: AiryFSSession;
     await this.store.update((config) => {

@@ -41,6 +41,15 @@ describe('filesystem HTTP API', () => {
     expect(parseV1Route('/v1/volumes/my%20volume')).toEqual({
       volume: 'my volume', resource: 'volume', path: '/',
     });
+    expect(parseV1Route('/v1/volumes/vol/snapshots')).toEqual({
+      volume: 'vol', resource: 'snapshots', path: '/',
+    });
+    expect(parseV1Route('/v1/volumes/vol/snapshots/nightly')).toEqual({
+      volume: 'vol', resource: 'snapshots', path: '/nightly',
+    });
+    expect(parseV1Route('/v1/volumes/vol/changes/src')).toEqual({
+      volume: 'vol', resource: 'changes', path: '/src',
+    });
     expect(parseV1Route('/fs/read')).toBeNull();
     expect(() => parseV1Route('/v1/volumes/test/unknown')).toThrow(HttpError);
     expect(() => parseV1Route('/v1/volumes/test/usage/extra')).toThrow(HttpError);

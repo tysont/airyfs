@@ -1,14 +1,15 @@
 # AiryFS
 
-AiryFS is a durable, programmable filesystem for Cloudflare Durable Objects. It supports three ways to work with the same volume:
+AiryFS is a durable, programmable filesystem for Cloudflare Durable Objects. It supports four ways to work with the same volume:
 
 1. **AgentFS inside the Durable Object:** application code uses the full AgentFS filesystem directly against `ctx.storage.sql`, with optional Linux execution through an attached Container.
-2. **Web APIs and Workers RPC:** remote applications stream files, inspect metadata, mutate paths, and run commands without adopting a filesystem SDK.
-3. **The `airyfs` CLI:** developers use named sessions, familiar filesystem commands, Git and other Container tools, diagnostics, and an interactive shell from a local terminal.
+2. **Web APIs and Workers RPC:** remote applications stream files, inspect metadata, mutate paths, and run commands.
+3. **The TypeScript SDK:** Node, browser, and Worker applications use a complete typed client plus async iterators for exec, durable jobs, and change feeds.
+4. **The `airyfs` CLI:** developers use named sessions, familiar filesystem commands, bulk transfers, snapshots, durable jobs, watch feeds, diagnostics, and an interactive shell.
 
 The filesystem is an application primitive owned by the Durable Object, not a disk hidden behind a compute environment. Durable Object methods can create, inspect, transform, and coordinate files through AgentFS. HTTP, RPC, and CLI clients operate on the same state. When a workload needs Git, Python, a compiler, a test runner, or another Linux tool, AiryFS mounts that state at `/volume` in an attached Container and runs the real program there.
 
-The Durable Object's SQLite database is the only persistent store for the volume. AiryFS does not copy the filesystem into a Container disk, synchronize a second database, or persist file data in object storage or another service.
+The Durable Object's SQLite database is the only persistent store for the volume. The complete persistent filesystem, coordination state, snapshots, uploads, jobs, and change history are self-contained within that Durable Object. AiryFS does not copy the filesystem into a Container disk, synchronize a second database, or persist file data in object storage or another service.
 
 ```text
 Durable Object methods / HTTP / Workers RPC / airyfs CLI
@@ -20,24 +21,24 @@ Durable Object methods / HTTP / Workers RPC / airyfs CLI
                 only persistent source          data + invalidation
 ```
 
-AgentFS provides the filesystem semantics and native TypeScript interface inside the Durable Object. AiryFS adds coordinated HTTP and RPC access, a local CLI, and on-demand real-process execution. Direct filesystem calls do not start the Container. Execution starts or reconnects the Container, mounts the same SQLite-backed volume through FUSE, and runs with `/volume` as the working directory.
+AgentFS provides the filesystem semantics and native TypeScript interface inside the Durable Object. AiryFS adds coordinated HTTP and RPC access, a universal TypeScript SDK, a local CLI, and on-demand real-process execution. Direct filesystem calls do not start the Container. Execution starts or reconnects the Container, mounts the same SQLite-backed volume through FUSE, and runs with `/volume` as the working directory.
 
 ## What You Can Build
 
-- **Coding-agent workspaces:** let an agent manage source files directly in its Durable Object, use AgentFS with a virtual shell for lightweight operations, invoke a real Container for Git, package managers, compilers, and tests, then return artifacts through the web API.
+- **Coding-agent workspaces:** let an agent manage source files through the Durable Object API or TypeScript SDK, invoke a real Container for Git, package managers, compilers, and tests, then return artifacts through the same volume.
 - **Document and data transformation:** accept inputs through a Durable Object method or HTTP upload, inspect and organize them without starting compute, run existing conversion tools in the Container, and stream results back from the same volume.
 - **Repository automation:** maintain durable per-repository state, update individual files directly, and attach disposable compute only for operations such as checkout, diff, lint, build, or test.
 - **Per-user application storage with execution:** give each user or job an isolated filesystem that application code can query and mutate, while retaining the option to run general-purpose software against it.
 - **Durable workflow workspaces:** preserve intermediate files across retries, Container sleep, and Container replacement without adding a separate synchronization or recovery system.
 
-AgentFS's Cloudflare filesystem can already be passed to integrations such as its `just-bash` adapter for virtual command execution inside a Worker or Durable Object. With AiryFS, those same AgentFS-managed files can also be mounted into the attached Container when the workload needs native binaries or full Linux process execution.
-
 ## Core Properties
 
 - **One volume, one Durable Object:** each volume name maps to an isolated Durable Object and SQLite database.
+- **Self-contained durable state:** the filesystem and all AiryFS coordination records live in that Durable Object; no external storage service is required.
 - **SQLite-only persistence:** all persistent file content, metadata, links, and directory entries live in Durable Object SQLite.
-- **Three product surfaces, one schema:** Durable Object code, web APIs, and the CLI all read and mutate the same AgentFS tables; Container tools see those tables through FUSE.
+- **Four product surfaces, one schema:** Durable Object code, web APIs/SDK, and the CLI all read and mutate the same AgentFS tables; Container tools see those tables through FUSE.
 - **Container on demand:** reads, writes, listings, and metadata operations do not require a Container. Container-backed execution, including CLI `warm`, starts or reconnects it.
+- **Container compute scales to zero:** after the configured inactivity timeout, the Container sleeps and its compute charges stop; the next `exec` remounts the durable volume.
 - **Ephemeral compute:** destroying or evicting the Container does not destroy the volume. The next `exec` remounts it from Durable Object SQLite.
 - **Normal tools:** software inside the Container sees `/volume` as a mounted filesystem and can use standard file APIs without a AiryFS-specific SDK.
 
@@ -48,7 +49,7 @@ Volume bytes necessarily travel to the Container when a process reads them throu
 AiryFS fits workloads that need the filesystem to be directly programmable state, externally accessible state, and an execution workspace:
 
 - Durable Object applications that model source trees, documents, generated artifacts, or task state as files and directories.
-- Agent workspaces that use AgentFS APIs or a virtual shell for common operations, then need native tools for the rest.
+- Agent workspaces that use the direct APIs or TypeScript SDK for file operations, then need native tools for execution.
 - Build and transformation jobs that need fast ingestion and retrieval around a smaller amount of Container execution.
 - Per-user, per-repository, or per-task workspaces that need isolation through one Durable Object per volume.
 - Stateful automation where Container compute can disappear but the workspace and intermediate files must remain.
@@ -67,9 +68,17 @@ AiryFS is not optimized for workloads dominated by thousands of sequential metad
 | File mutations | Atomic replacement after a complete upload, delete, copy, rename, and truncate |
 | Directory operations | Create, list with metadata, remove, and recursive remove |
 | Links | Create symbolic links and read link targets |
-| Workers RPC | String and binary streams, stat, detailed listing, mutations, links, usage, database information, lifecycle, and exec |
-| CLI | Named endpoint/volume sessions, remote working directories, streaming file commands, Container exec, diagnostics, JSON output, and an interactive shell with completion |
-| Container execution | Run shell commands with `cwd=/volume`, a five-minute timeout, and captured stdout/stderr |
+| Authentication | Optional root bearer auth plus signed, expiring, revocable capabilities scoped by volume, operation, and path |
+| Bulk transfer | Transactional streaming directory push/pull using the dependency-free AiryFS archive format |
+| Snapshots | Named full-volume capture, list, exact diff, restore, delete, and cross-volume clone |
+| Large files | Persistent resumable uploads, range-resumed downloads, per-chunk and full-file SHA-256 verification |
+| Execution | Buffered or live NDJSON stdout/stderr, process-group cancellation, and at-most-once command admission |
+| Durable jobs | Idempotent queued commands with persisted status, binary logs, cancellation, orphan recovery, and output limits |
+| Change feeds | Ordered create, modify, remove, and rename events from both direct API and FUSE writers, with retention-gap detection |
+| Workers RPC | Streams, metadata, mutations, trees, uploads, snapshots, jobs, changes, usage, lifecycle, and exec |
+| TypeScript SDK | Complete typed HTTP client plus watch, job-follow/wait, exec-id, and resumable Blob helpers |
+| CLI | Sessions, remote cwd, file and tree transfer, snapshots, jobs, watch, auth, diagnostics, JSON output, and interactive shell |
+| Container execution | Run shell commands with `cwd=/volume`, a five-minute timeout, streaming output, and cancellation |
 | Standard tooling | Git, Python, shell utilities, and other programs included in the Container image |
 | Lifecycle | Single-flight startup, FUSE readiness checks, failed-mount cleanup, TCP reconnects, and explicit Container destruction |
 | Concurrency | Path-scoped direct-access locks, a volume-wide lock for FUSE SQL mutations, and journal-driven FUSE cache invalidation |
@@ -94,7 +103,7 @@ A Container-local workspace is convenient for execution, but it makes the Contai
 
 Persisting that workspace commonly adds an external mounted filesystem, object store, network volume, or clone/synchronization process. That creates another dependency and another consistency boundary: the application must reason about upload completion, visibility of writes, rename and delete behavior, partial synchronization, retries, conflicts, and recovery after compute disappears. It can also move all file access through the Container or through a remote storage protocol even when the Durable Object only needs a small read or metadata operation.
 
-AiryFS keeps compute disposable and makes the Durable Object's existing SQLite storage authoritative. The Container is a filesystem client, not the owner of persistent state. There is no clone-back phase and no second durable copy to reconcile. Direct operations stay inside the Durable Object; only workloads that actually need Linux execution pay the Container and FUSE path. Container loss requires a remount, not data synchronization or filesystem recovery.
+AiryFS keeps compute disposable and makes the Durable Object's existing SQLite storage authoritative. The Container is a filesystem client, not the owner of persistent state. There is no clone-back phase and no second durable copy to reconcile. Direct operations stay inside the Durable Object; only workloads that need Linux execution start the separately billed Container and FUSE path. Container loss requires a remount, not data synchronization or filesystem recovery.
 
 ### Compared with an object-backed filesystem interface
 
@@ -117,9 +126,9 @@ AiryFS uses AgentFS in two different runtimes:
 - The vendored AgentFS Cloudflare adapter runs directly inside the Durable Object against `ctx.storage.sql`.
 - The AgentFS Rust SDK and CLI run inside the Container and expose the same database through FUSE.
 
-The AgentFS Cloudflare integration demonstrates direct filesystem access backed by Durable Object SQLite. AiryFS extends that model into a complete service with direct and FUSE data paths exposed through three product surfaces. It adds named volume routing, a resource-oriented HTTP API, Workers RPC methods, the CLI, streaming and range handling, mutation coordination, schema migration, Container startup and health management, an HTTP-to-TCP bridge, a Hrana server backed by `ctx.storage.sql`, and an on-demand FUSE mount.
+The AgentFS Cloudflare integration demonstrates direct filesystem access backed by Durable Object SQLite. AiryFS extends that model into a complete service with direct and FUSE data paths exposed through four product surfaces. It adds named volume routing, a resource-oriented HTTP API, Workers RPC methods, the TypeScript SDK, the CLI, streaming and range handling, mutation coordination, schema migration, Container startup and health management, an HTTP-to-TCP bridge, a Hrana server backed by `ctx.storage.sql`, and an on-demand FUSE mount.
 
-AiryFS is not a replacement for AgentFS. It is the Cloudflare Durable Object and Container architecture around AgentFS that makes both technical data paths and all three product surfaces operate on one persistent database.
+AiryFS is not a replacement for AgentFS. It is the Cloudflare Durable Object and Container architecture around AgentFS that makes both technical data paths and all four product surfaces operate on one persistent database.
 
 ### Why AiryFS Patches AgentFS
 
@@ -193,8 +202,6 @@ This method can also be called over Workers RPC on a `AiryFS` stub. The direct o
 
 The underlying AgentFS interface includes `readFile`, `writeFile`, `readdir`, `readdirPlus`, `stat`, `lstat`, `mkdir`, `rm`, `rename`, `copyFile`, `symlink`, `readlink`, `access`, `statfs`, and random-access handles through `open`; file handles provide operations such as `truncate(size)`.
 
-For a lightweight virtual shell that stays in the Worker runtime, AgentFS can also back its existing `just-bash` integration. AiryFS complements that path rather than replacing it: use virtual execution for supported shell operations and attach the Container when the workload needs native binaries, system packages, or full process behavior.
-
 ### 2. Use The Web APIs
 
 The resource-oriented HTTP API supports binary streaming, metadata, path mutations, execution, and diagnostics. Ordinary file operations do not start the Container.
@@ -239,7 +246,49 @@ export default {
 
 The string methods are convenient for small text files. `readFileStream` and `writeFileStream` provide binary streaming, while metadata and mutation methods expose the rest of the filesystem surface.
 
-### 3. Use The CLI
+### 3. Use The TypeScript SDK
+
+The dependency-free `airyfs-sdk` package uses web-standard `fetch`, streams, `Blob`, and Web Crypto APIs. It runs in Node.js 22+, modern browsers, and Workers:
+
+```bash
+cd sdk
+npm ci
+npm run build
+```
+
+```typescript
+import {
+  AiryFSClient,
+  waitForJob,
+  watchChanges,
+} from 'airyfs-sdk';
+
+const client = new AiryFSClient(
+  'https://your-worker.workers.dev',
+  'project',
+  { token: process.env.AIRYFS_TOKEN },
+);
+
+await client.makeDirectory('/src');
+await client.writeFile('/src/main.ts', 'console.log("hello")\n');
+
+const submitted = await client.submitJob('node src/main.ts', '/');
+const { job } = await waitForJob(client, submitted.id, {
+  onLog(entry) {
+    const bytes = Uint8Array.from(atob(entry.data), character => character.charCodeAt(0));
+    console.log(new TextDecoder().decode(bytes));
+  },
+});
+
+const controller = new AbortController();
+for await (const change of watchChanges(client, { path: '/src', signal: controller.signal })) {
+  console.log(change.type, change.oldPath, change.path);
+}
+```
+
+`AiryFSClient` exposes files, directories, path operations, tree archives, buffered and streaming exec, resumable upload primitives, checksums, durable jobs and logs, snapshots, change feeds, auth/capabilities, usage, diagnostics, lifecycle, and KV state. High-level helpers manage long-poll cursors, job output, exec IDs, and resumable `Blob` uploads.
+
+### 4. Use The CLI
 
 The TypeScript CLI requires Node.js 22 or newer. It combines the HTTP filesystem API and Container execution behind named local sessions:
 
@@ -258,11 +307,15 @@ airyfs volume create --chunk-size 256k
 
 airyfs mkdir -p /src
 airyfs put /tmp/airyfs-main.py /src/main.py
+airyfs push ./project /project --replace
 airyfs cd /src
 airyfs cat main.py
 
 airyfs warm
 airyfs exec python3 main.py
+airyfs job submit --wait python3 main.py
+airyfs snapshot create before-refactor --note "known good"
+airyfs watch /src
 airyfs status
 airyfs shell
 ```
@@ -278,7 +331,7 @@ See [`cli/README.md`](cli/README.md) for the full CLI usage guide, including com
 Each volume is one instance of the `AiryFS` Durable Object class and one attached Container instance.
 
 ```text
-HTTP clients / airyfs CLI ----> Worker volume router ----+
+HTTP clients / TypeScript SDK / airyfs CLI -> Worker router +
                                                        |
 Durable Object methods / Workers RPC ------------------+
                                                        |
@@ -292,7 +345,7 @@ Durable Object methods / Workers RPC ------------------+
                   ctx.storage.sql                               against ctx.storage.sql
              only persistent state                                ^              ^
                          |                                        | data         | invalidation
-          HTTP / RPC / CLI file commands                          v              v
+          HTTP / RPC / SDK / CLI commands                        v              v
                                                         Attached Container bridges
                                                          HTTP :8080 -> TCP :9000
                                                          HTTP :8081 -> TCP :9001
@@ -327,7 +380,7 @@ The Container image, process state, and files outside `/volume` are ephemeral. `
 
 `POST /destroy?volume=V` destroys only the Container. It does not delete the Durable Object or its SQLite data. Direct access continues to work, and a later `exec` starts a new Container and mounts the existing volume. Lifecycle cleanup closes both bridge channels and uses ownership tokens so an older request cannot clear a newer command's state.
 
-The Durable Object requests automatic Container sleep after 30 minutes of inactivity. A direct filesystem request does not wake the Container. The next `exec` after sleep starts a new session and remounts the persistent volume.
+The Durable Object requests automatic Container sleep after 30 minutes of inactivity. A direct filesystem request does not wake the Container. Once the Container sleeps, its compute charges stop and Container compute has scaled to zero; the next `exec` starts a new session and remounts the persistent volume.
 
 ## Protocol And Data Path
 
@@ -415,7 +468,32 @@ The bridge returns `503` with `Retry-After` when the Durable Object TCP connecti
 | `POST` | `/v1/volumes/V/operations/symlink` | Link `{"target":"/a","path":"/b"}` |
 | `POST` | `/v1/volumes/V/operations/readlink` | Read `{"path":"/b"}` |
 | `POST` | `/v1/volumes/V/operations/truncate` | Resize `{"path":"/a","size":4096}` |
-| `POST` | `/v1/volumes/V/exec` | Execute `{"command":"python3 main.py"}` |
+| `POST` | `/v1/volumes/V/operations/checksum` | Stream a file through server-side SHA-256 |
+| `GET` | `/v1/volumes/V/trees/path` | Stream a directory as a AiryFS archive |
+| `PUT` | `/v1/volumes/V/trees/path?replace=true` | Transactionally import a AiryFS archive |
+| `POST` | `/v1/volumes/V/exec` | Execute and return buffered stdout/stderr |
+| `POST` | `/v1/volumes/V/exec?stream=true` | Stream `start`, base64 stdout/stderr, and `exit` NDJSON events |
+| `POST` | `/v1/volumes/V/exec/cancel` | Cancel a streaming exec by its start-event ID |
+| `POST` | `/v1/volumes/V/uploads/path` | Begin or resume a checksummed upload |
+| `GET` | `/v1/volumes/V/uploads/path` | Return durable upload status and offset |
+| `PATCH` | `/v1/volumes/V/uploads/path` | Append one checksummed chunk at `Upload-Offset` |
+| `PUT` | `/v1/volumes/V/uploads/path` | Verify and atomically publish a complete upload |
+| `DELETE` | `/v1/volumes/V/uploads/path` | Abort an upload and remove its hidden partial file |
+| `GET` | `/v1/volumes/V/snapshots` | List named full-volume snapshots |
+| `POST` | `/v1/volumes/V/snapshots` | Create a snapshot with optional name and note |
+| `GET` | `/v1/volumes/V/snapshots/ID/diff?against=live` | Diff against live state or another snapshot |
+| `POST` | `/v1/volumes/V/snapshots/ID/restore` | Restore a snapshot and recycle the Container |
+| `POST` | `/v1/volumes/V/snapshots/ID/clone` | Clone into another volume; root access required |
+| `DELETE` | `/v1/volumes/V/snapshots/ID` | Delete snapshot metadata and payload |
+| `GET` | `/v1/volumes/V/jobs?status=running` | List durable jobs, optionally by status |
+| `POST` | `/v1/volumes/V/jobs` | Submit an idempotent durable job |
+| `GET` | `/v1/volumes/V/jobs/ID` | Return durable job state and terminal result |
+| `GET` | `/v1/volumes/V/jobs/ID/logs?after=N` | Page persisted binary-safe stdout/stderr |
+| `POST` | `/v1/volumes/V/jobs/ID/cancel` | Cancel queued or running work |
+| `GET` | `/v1/volumes/V/changes/path?since=N&wait=25000` | Read or long-poll ordered filesystem changes |
+| `GET` | `/v1/volumes/V/capabilities` | Return auth mode and caller identity |
+| `POST` | `/v1/volumes/V/capabilities` | Mint a scoped capability using root access |
+| `DELETE` | `/v1/volumes/V/capabilities/ID` | Revoke a capability using root access |
 | `GET` | `/v1/volumes/V/usage` | Return filesystem, SQLite, Container, and Hrana usage |
 
 Filesystem failures return structured JSON with stable POSIX-style codes and appropriate HTTP statuses.
@@ -445,7 +523,11 @@ The `AiryFS` class exposes methods for applications that already hold a Durable 
 - `statPath`, `listDir`, and `listDirDetailed`
 - `makeDir`, `removePath`, `renamePath`, and `copyPath`
 - `createSymlink` and `readSymlink`
-- `usage`, `dbInfo`, `exec`, and `destroyContainer`
+- `exportTreeStream`, `importTreeStream`, and `checksum`
+- `beginUpload`, `uploadStatus`, `appendUpload`, `completeUpload`, and `abortUpload`
+- `createSnapshot`, `listSnapshots`, `diffSnapshot`, `restoreSnapshot`, `deleteSnapshot`, `exportSnapshotStream`, and `cloneSnapshot`
+- `submitJob`, `listJobs`, `getJob`, `getJobLogs`, `cancelJob`, and `runNextJob`
+- `getChanges`, `usage`, `dbInfo`, `exec`, `execStream`, `cancelExec`, and `destroyContainer`
 
 ### Compatibility Endpoints
 
@@ -478,6 +560,12 @@ The compatibility file endpoints use the same binary-safe streaming, range, atom
 
 The response contains `exitCode`, `stdout`, and `stderr`. A dead FUSE daemon produces a structured `503` instead of running the command in an unmounted directory. Startup has a separate 60-second bound. The retry-safe `:` preflight also uses that shorter bound so an abandoned warmup cannot retain the execution lock for the full command timeout.
 
+Streaming exec emits bounded NDJSON lines with a generated execution ID, base64 stdout/stderr chunks, and one terminal exit event. Cancellation sends `SIGTERM` to the process group and escalates to `SIGKILL`; disconnecting the streaming client also terminates the admitted process. Interactive and durable commands share one execution slot.
+
+Durable jobs persist before scheduling and require an `Idempotency-Key` over HTTP. The queue claims one job at a time, persists binary stdout/stderr as ordered BLOB rows, caps retained output at 50 MiB, supports queued/running cancellation, and marks orphaned running jobs failed before recycling their Container. Retrying the same idempotency key returns and reschedules the existing queued job rather than duplicating execution.
+
+The change feed uses SQLite triggers on AgentFS inode and dentry tables, so it observes both direct API mutations and writes originating through Container/FUSE. Per-volume sequence numbers order create, modify, remove, and rename events. The latest 10,000 sequence values are retained; clients receive `gap: true` when their cursor predates that window and should resynchronize before continuing.
+
 ### Usage And Health
 
 `GET /v1/volumes/V/usage` and `GET /usage?volume=V` return:
@@ -504,6 +592,11 @@ AgentFS stores the filesystem as normalized SQLite tables:
 - `fs_whiteout`, `fs_overlay_config`, and `fs_origin` support overlay metadata.
 - `fs_mutation_journal` records direct writes, deletes, renames, copies, links, directory changes, and truncation for active FUSE cache invalidation.
 - `fs_open_inode` records persistent, expiring open-handle leases so a direct unlink or streaming rename-over retains a file that a remote FUSE handle is still reading. A trigger on `fs_inode` deletion cascades chunk, symlink, and lease cleanup atomically.
+- `fs_snapshot` and snapshot payload tables store immutable full-volume metadata and file chunks for diff, restore, export, and clone.
+- `fs_upload` stores durable resumable-upload identity, target, expected size/checksum, and current offset; partial bytes remain in hidden AgentFS files until publish or abort.
+- `fs_job` and `fs_job_log` store durable execution admission, state, terminal results, cancellation intent, and binary output.
+- `fs_change_sequence` and `fs_change_feed` provide an ordered, bounded mutation feed without changing AgentFS or perturbing `last_insert_rowid()`.
+- `capability_revocations` stores revoked signed capability IDs.
 - `kv_store` stores application key-value records.
 - `tool_calls` stores AgentFS tool-call records.
 
@@ -519,6 +612,12 @@ The two paths have different cost profiles by design.
 | First `exec` | Starts the Container, bridge, TCP session, and FUSE mount |
 | Warm `exec` | Reuses the running Container and mounted volume, then reattaches the request-scoped Hrana data channel |
 | FUSE file operation | Adds a Container-to-DO round trip and SQL execution |
+
+### Billing Model
+
+AiryFS does not make Durable Object usage free. Cloudflare bills SQLite-backed Durable Objects for requests, active compute duration, rows read and written, and stored SQL data. An inactive Durable Object that is eligible for hibernation does not incur duration charges, but its stored data remains billable. During Container execution, AiryFS keeps outbound TCP bridge connections open; active outbound connections prevent hibernation and can continue DO duration billing. See Cloudflare's [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/) for current included usage and rates.
+
+Containers are billed separately for provisioned memory and disk while running and for active CPU usage. Charges start when the Container is requested or manually started and stop after it sleeps. AiryFS therefore scales Container compute to zero between execution sessions while leaving the self-contained Durable Object volume available to direct APIs. See Cloudflare's [Containers pricing](https://developers.cloudflare.com/containers/pricing/) for current rates and included usage.
 
 Development measurements have typically shown direct file operations below 100 ms, a warm `exec` in roughly 2-10 seconds, and a cold mount around 30 seconds. Metadata-heavy programs can be much slower because every FUSE operation crosses the Container-to-Durable Object boundary; an integration Git commit has taken more than two minutes while a subsequent clean `git status` took about 21 seconds. Deployment location, Container state, command behavior, and syscall count all affect these numbers.
 
@@ -537,15 +636,22 @@ AiryFS coordinates direct access and FUSE mutations, but it does not yet impleme
 - FUSE writes use a volume-wide lock because Hrana SQL statements do not carry normalized filesystem paths.
 - AiryFS remote mounts use bounded one-second entry and attribute caches, disable FUSE writeback caching in bounded mode, and poll direct-mutation journal rows every 100 milliseconds in batches of up to 256. Entry invalidations run through FUSE's deferred notification queue on a transport channel independent from ordinary FUSE SQL. Visibility remains asynchronous and the five-second deployed gate includes reconnect and exec overhead.
 - File replacement through the HTTP streaming API is atomic after upload completion.
+- Directory archive imports stage the complete tree and publish it under a write lock; failed publication rolls back the previous target.
+- Snapshot create, diff, restore, delete, and root clone use whole-volume coordination. Restore and clone replace the live namespace and recycle attached compute before later execution.
+- Resumable uploads enforce sequential offsets, 1 MiB chunks, per-chunk SHA-256, and full-file SHA-256 before atomic publication.
 - Open inodes survive concurrent removal. A live remote FUSE handle pins its inode in `fs_open_inode`, so a direct unlink or streaming rename-over drops the pathname immediately but retains the inode and its data until the handle closes or its 120-second lease expires. A heartbeat renews live handles and aborts the mount if renewal fails for too long (kept below the TTL) so a handle never outlasts its lease. Cleanup of a stale lease left by a mount that vanished is lazy: its inode is reaped when a bounded mount next runs its heartbeat reap, not by a proactive alarm. See [`docs/OPEN_INODE_LEASES.md`](docs/OPEN_INODE_LEASES.md).
 - Durable Object SQLite does not support an explicit transaction spanning separate Hrana requests. `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, and `RELEASE` are compatibility no-ops. Batch locking prevents interleaving but does not provide rollback across separate remote requests.
 - Hrana integer bindings are limited to JavaScript's safe integer range because Durable Object SQLite bindings do not accept `bigint`.
 
 ## Security
 
-This repository does not currently define an authentication or authorization model. The `exec` endpoint runs arbitrary shell commands in the attached Container, and volume APIs permit reading and modifying persistent data.
+Authentication is opt-in. Set `AIRYFS_AUTH_SECRET` to require `Authorization: Bearer ...` on HTTP requests. The configured value is the root administrative credential and the HMAC-SHA256 signing key for scoped capabilities. Leave it unset only for trusted local/test deployments.
 
-Do not expose a deployment to untrusted callers without adding appropriate authentication, authorization, volume access controls, request limits, and command-execution policy for the intended product. Those controls are intentionally left as a deployment and product decision rather than embedded as a generic example mechanism.
+Root callers can mint expiring capabilities restricted to one volume, a subset of `read`, `write`, `exec`, and `admin`, and normalized path prefixes. Every capability request verifies its signature, expiry, volume, operation, path scope, and revocation state. Capability IDs can be revoked immediately. Cross-volume snapshot clone remains root-only because a capability is bound to one source volume.
+
+The CLI stores an optional bearer token in its named session and sends it on every request. The TypeScript SDK accepts `token` and additional default headers through `AiryFSClient` options. Tokens are credentials: do not commit them, put them in URLs, or pass them through untrusted command arguments.
+
+Authentication does not make arbitrary execution safe for mutually untrusted users who share a volume. `exec` and durable jobs run shell commands in the attached Container with access to the complete mounted volume. Deployments still need an appropriate identity, command policy, request limits, and volume-isolation model for their product.
 
 ## Deployment
 
@@ -576,7 +682,7 @@ See [`docs/AGENTFS_PATCHES.md`](docs/AGENTFS_PATCHES.md) for upstream refresh an
 
 AiryFS generates one account-pinned Wrangler config per environment. Worker names, Durable Object namespaces, and Container applications are isolated as `airyfs-<env>` and `airyfs-<env>-airyfs`; local development uses `airyfs-local` with state under `.airyfs/local` and never binds remote resources.
 
-Keep `CLOUDFLARE_API_TOKEN` in the shell environment. Set `CLOUDFLARE_ACCOUNT_ID` in the shell or a gitignored root `.dev.vars` (see `.dev.vars.example`). The deploy helper rejects an explicit/ambient account disagreement and passes the resolved account to Wrangler, avoiding membership-based account discovery.
+Keep `CLOUDFLARE_API_TOKEN` in the shell environment. Set `CLOUDFLARE_ACCOUNT_ID` in the shell or a gitignored root `.dev.vars` (see `.dev.vars.example`). Set `AIRYFS_AUTH_SECRET` as a Worker secret in environments that require HTTP authentication. The deploy helper rejects an explicit/ambient account disagreement and passes the resolved account to Wrangler, avoiding membership-based account discovery.
 
 ```bash
 cd worker
@@ -625,7 +731,7 @@ npm test
 npm run typecheck
 ```
 
-The 82 Worker tests cover Hrana framing and execution, transport frame limits, schema creation and migration, stored SQL, locking, binary streaming, ranges, atomic replacement, metadata operations, direct truncation, mutation journaling, open-handle lease retention, chunk-size boundaries, and POSIX-style HTTP errors. `npm run test:cloud` runs seven deployment-helper tests covering rendering, account selection, environment validation, production guards, and Docker credential isolation.
+The 256 Worker tests cover Hrana framing and execution, transport bounds, schema migration, locking, binary/range streaming, archives and transactional tree import, authentication and capability scope, snapshots, resumable uploads and checksums, streaming exec ownership, durable jobs, trigger-driven change feeds, open-handle leases, chunk-size boundaries, and POSIX-style HTTP errors. `npm run test:cloud` covers rendering, account selection, environment validation, production guards, and Docker credential isolation.
 
 ### Container Build
 
@@ -635,7 +741,7 @@ npm run build
 npm test
 ```
 
-The Container suite runs six bridge tests covering bounded admission, FIFO response handling, cancellation, connection-generation replacement, request limits, and oversized response headers.
+The 18 Container tests cover bounded bridge admission, FIFO response handling, cancellation, connection-generation replacement, request limits, streaming exec events, process-group termination, disconnect cleanup, and buffered/streaming slot coordination.
 
 ### CLI Tests
 
@@ -646,7 +752,18 @@ npm test
 npm run build
 ```
 
-The 56 CLI tests use isolated temporary configuration and a local mock server. They cover session concurrency, streaming transfers, command dispatch, safe startup retries, at-most-once user-command submission after ambiguous failures, concise HTML gateway errors, interactive shell behavior, and context-aware completion. They do not access `~/.airyfs` or a deployed endpoint.
+The 169 CLI tests use isolated temporary configuration and local mock servers. They cover session concurrency and auth migration, streaming and resumable files, transactional tree transfer, snapshots, streaming/cancellable exec, durable jobs, change watching, safe startup retries, at-most-once command submission after ambiguous failures, concise gateway errors, shell behavior, and completion. They do not access `~/.airyfs` or a deployed endpoint.
+
+### TypeScript SDK Tests
+
+```bash
+cd sdk
+npm test
+npm run typecheck
+npm run build
+```
+
+The SDK contract suite exercises every HTTP resource family, bearer/default headers, structured errors, path normalization, bounded NDJSON, change-feed iteration, durable job waiting/log following, exec start IDs, and resumable Blob uploads. Its build emits strict ESM JavaScript, declarations, and source maps without runtime dependencies.
 
 ### AgentFS Tests
 
@@ -656,9 +773,10 @@ The vendored Rust SDK and CLI test suites run in a Linux build environment with 
 
 ```bash
 AIRYFS_URL=https://your-worker.workers.dev ./e2e/test.sh
+AIRYFS_URL=https://your-worker.workers.dev node ./e2e/features.mjs
 ```
 
-The end-to-end flow covers direct write to FUSE read, direct mutation invalidation, FUSE write to direct read, Git on the same mixed-access volume, open-handle leases (a held FUSE read that survives a direct unlink and a streaming rename-over), and persistence across Container destruction.
+The original end-to-end flow covers direct write to FUSE read, direct mutation invalidation, FUSE write to direct read, Git on the same mixed-access volume, open-handle leases (a held FUSE read that survives a direct unlink and a streaming rename-over), and persistence across Container destruction. The feature smoke covers change feeds, tree archives, snapshots and cloning, resumable uploads, streaming execution admission and cancellation, and durable jobs.
 
 Remote mounts use a 1-second entry and attribute TTL plus journal-driven invalidation, and lease open handles so live reads survive concurrent direct removal. See [`docs/FUSE_CACHE_TTL.md`](docs/FUSE_CACHE_TTL.md), [`docs/MUTATION_INVALIDATION.md`](docs/MUTATION_INVALIDATION.md), and [`docs/OPEN_INODE_LEASES.md`](docs/OPEN_INODE_LEASES.md) for the implementation and deployed measurements.
 
@@ -682,6 +800,14 @@ airyfs/
       hrana-server.ts           Hrana execution against Durable Object SQLite
       hrana-protocol.ts         Protocol types and frame serialization
       schema.ts                 AgentFS schema initialization and migrations
+      auth.ts                   Root and scoped-capability authentication
+      archive.ts                Streaming AiryFS tree archive protocol
+      snapshots.ts              Full-volume capture, diff, restore, and export
+      uploads.ts                Durable resumable upload sessions
+      jobs.ts                   Durable queue, state machine, and persisted logs
+      change-feed.ts            Trigger-driven ordered filesystem changes
+      container-http-stream.ts  Unbuffered Container exec transport
+      sse-stream.ts             Internal SSE to public NDJSON translation
     test/                       Vitest unit tests
     wrangler.jsonc              Worker, Container, and Durable Object config
   container/
@@ -694,8 +820,12 @@ airyfs/
   cli/
     src/                         Typed API client, sessions, commands, and shell
     test/                        Unit and mock-server integration tests
+  sdk/
+    src/                         Universal typed client, DTOs, and async workflows
+    test/                        Full API and high-level helper contract tests
   e2e/
     test.sh                     Deployed end-to-end tests
+    features.mjs                Deployed new-feature smoke tests
   docs/
     CHUNK_SIZE_BENCHMARK.md
 ```

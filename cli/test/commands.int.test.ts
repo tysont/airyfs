@@ -27,6 +27,9 @@ let retryCommandAttempts = 0;
 let ambiguousCommandAttempts = 0;
 let busyCommandAttempts = 0;
 let transportCommandAttempts = 0;
+const cancelRequests: string[] = [];
+let hangingResponse: ServerResponse | null = null;
+let hangingId = '';
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', 'http://localhost');
@@ -111,7 +114,7 @@ describe('commands', () => {
   });
 
   it('executes in the session cwd and propagates the remote exit code', async () => {
-    const result = await invoke(['exec', 'git', 'status']);
+    const result = await invoke(['exec', '--no-stream', 'git', 'status']);
 
     expect(result.code).toBe(7);
     expect(result.stdout).toContain('remote stdout');
@@ -133,7 +136,7 @@ describe('commands', () => {
     warmExecAttempts = 0;
     retryCommandAttempts = 0;
 
-    const result = await invoke(['exec', '--timeout', '2s', 'retry-command']);
+    const result = await invoke(['exec', '--no-stream', '--timeout', '2s', 'retry-command']);
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('recovered');
@@ -164,7 +167,7 @@ describe('commands', () => {
   it('retries a user command only when the server reports it was not admitted', async () => {
     busyCommandAttempts = 0;
 
-    const result = await invoke(['exec', '--timeout', '2s', 'busy-command']);
+    const result = await invoke(['exec', '--no-stream', '--timeout', '2s', 'busy-command']);
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('admitted');
@@ -182,12 +185,78 @@ describe('commands', () => {
   });
 
   it('passes command options through exec after the first positional argument', async () => {
-    await invoke(['exec', 'tool', '--json', '--timeout', 'remote-value']);
+    await invoke(['exec', '--no-stream', 'tool', '--json', '--timeout', 'remote-value']);
 
     const exec = requests.slice().reverse().find((request) => request.path === '/v1/volumes/vol/exec');
     expect(JSON.parse(exec?.body || '{}').command).toBe(
       "cd -- /volume/src && tool --json --timeout remote-value",
     );
+  });
+
+  it('streams live output and adopts the remote exit code by default', async () => {
+    const result = await invoke(['exec', 'stream-cmd']);
+
+    expect(result.code).toBe(5);
+    expect(result.stdout).toContain('remote stream');
+    expect(result.stderr).toContain('remote warn');
+    const streamRequest = requests.slice().reverse()
+      .find((request) => request.path === '/v1/volumes/vol/exec?stream=true');
+    expect(JSON.parse(streamRequest?.body || '{}').command).toBe('cd -- /volume/src && stream-cmd');
+  });
+
+  it('decodes binary stdout bytes straight to the output stream', async () => {
+    const result = await invokeBinary(['exec', 'stream-binary']);
+
+    expect(result.code).toBe(0);
+    expect(Uint8Array.from(result.stdout)).toEqual(Uint8Array.from([0, 255, 10, 13, 42, 128]));
+  });
+
+  it('keeps global --json buffered as a single ExecResult object', async () => {
+    const before = requests.length;
+    const result = await invoke(['--json', 'exec', 'git', 'status']);
+
+    expect(result.code).toBe(7);
+    expect(JSON.parse(result.stdout)).toEqual({ exitCode: 7, stdout: 'remote stdout\n', stderr: '' });
+    const streamRequest = requests.slice(before)
+      .find((request) => request.path === '/v1/volumes/vol/exec?stream=true');
+    expect(streamRequest).toBeUndefined();
+  });
+
+  it('cancels a streaming command once on interrupt and removes the SIGINT listener', async () => {
+    cancelRequests.length = 0;
+    hangingResponse = null;
+    const baseline = process.listenerCount('SIGINT');
+
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    const run = execute(['node', 'airyfs', '--session', 'test', 'exec', 'stream-hang'], {
+      sessions,
+      stdin: Readable.from(''),
+      stdout: sink(stdout),
+      stderr: sink(stderr),
+      shellMode: true,
+    });
+
+    // Wait for the server to send the start event and the client to record its id.
+    const added = await waitForNewSigintListener(baseline);
+    await waitFor(() => hangingResponse !== null);
+    await delay(50);
+
+    added();
+    const code = await run;
+
+    // cancelExec is fire-and-forget, so the POST may still be in flight here.
+    await waitFor(() => cancelRequests.length > 0);
+    expect(code).toBe(130);
+    expect(cancelRequests).toEqual(['hang-1']);
+    expect(process.listenerCount('SIGINT')).toBe(baseline);
+  });
+
+  it('removes the SIGINT listener after a normal streaming exec', async () => {
+    const baseline = process.listenerCount('SIGINT');
+    const result = await invoke(['exec', 'stream-cmd']);
+    expect(result.code).toBe(5);
+    expect(process.listenerCount('SIGINT')).toBe(baseline);
   });
 
   it('emits structured errors in JSON mode', async () => {
@@ -245,29 +314,61 @@ describe('commands', () => {
   });
 });
 
+function sink(chunks: Buffer[]): Writable {
+  return new Writable({
+    write(chunk, _encoding, callback) {
+      chunks.push(Buffer.from(chunk));
+      callback();
+    },
+  });
+}
+
 async function invoke(
   args: string[],
   stdin = '',
   sessionName: string | null = 'test',
   sessionOverride?: string | null,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  const result = await invokeBinary(args, stdin, sessionName, sessionOverride);
+  return { code: result.code, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+}
+
+async function invokeBinary(
+  args: string[],
+  stdin = '',
+  sessionName: string | null = 'test',
+  sessionOverride?: string | null,
+): Promise<{ code: number; stdout: Buffer; stderr: Buffer }> {
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
-  const output = (chunks: Buffer[]) => new Writable({
-    write(chunk, _encoding, callback) {
-      chunks.push(Buffer.from(chunk));
-      callback();
-    },
-  });
   const code = await execute(['node', 'airyfs', ...(sessionName ? ['--session', sessionName] : []), ...args], {
     sessions,
     stdin: Readable.from(stdin),
-    stdout: output(stdout),
-    stderr: output(stderr),
+    stdout: sink(stdout),
+    stderr: sink(stderr),
     shellMode: true,
     sessionOverride,
   });
-  return { code, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() };
+  return { code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('Timed out waiting for condition');
+    await delay(10);
+  }
+}
+
+/** Return the SIGINT listener the running exec adds, without emitting a real signal. */
+async function waitForNewSigintListener(baseline: number): Promise<() => void> {
+  await waitFor(() => process.listenerCount('SIGINT') > baseline);
+  const listeners = process.listeners('SIGINT');
+  return listeners[listeners.length - 1] as () => void;
 }
 
 async function route(
@@ -299,8 +400,17 @@ async function route(
     response.writeHead(200, { 'Content-Type': 'application/octet-stream' }).end('cat-body');
     return;
   }
+  if (request.method === 'POST' && url.pathname === '/v1/volumes/vol/exec/cancel') {
+    cancelRequests.push((JSON.parse(_body) as { id: string }).id);
+    if (hangingResponse && !hangingResponse.writableEnded) {
+      writeNdjson(hangingResponse, [{ type: 'exit', id: hangingId, exitCode: 143, signal: 'SIGTERM' }]);
+      hangingResponse = null;
+    }
+    return json(response, 200, { ok: true, canceled: true });
+  }
   if (request.method === 'POST' && url.pathname === '/v1/volumes/vol/exec') {
     const command = (JSON.parse(_body) as { command: string }).command;
+    const stream = url.searchParams.get('stream') === 'true';
     if (command === ':') {
       warmExecAttempts++;
       if (transientWarmFailures > 0) {
@@ -311,10 +421,6 @@ async function route(
         return;
       }
       return json(response, 200, { exitCode: 0, stdout: '', stderr: '' });
-    }
-    if (command.includes('retry-command')) {
-      retryCommandAttempts++;
-      return json(response, 200, { exitCode: 0, stdout: 'recovered\n', stderr: '' });
     }
     if (command.includes('ambiguous-command')) {
       ambiguousCommandAttempts++;
@@ -335,6 +441,32 @@ async function route(
       }
       return json(response, 200, { exitCode: 0, stdout: 'admitted\n', stderr: '' });
     }
+    if (command.includes('retry-command')) {
+      retryCommandAttempts++;
+      return json(response, 200, { exitCode: 0, stdout: 'recovered\n', stderr: '' });
+    }
+    if (stream && command.includes('stream-hang')) {
+      hangingId = 'hang-1';
+      response.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+      response.write(`${JSON.stringify({ type: 'start', id: hangingId })}\n`);
+      hangingResponse = response;
+      return;
+    }
+    if (stream && command.includes('stream-binary')) {
+      return writeNdjson(response, [
+        { type: 'start', id: 'bin-1' },
+        { type: 'stdout', id: 'bin-1', data: Buffer.from([0, 255, 10, 13, 42, 128]).toString('base64') },
+        { type: 'exit', id: 'bin-1', exitCode: 0 },
+      ]);
+    }
+    if (stream) {
+      return writeNdjson(response, [
+        { type: 'start', id: 'run-1' },
+        { type: 'stdout', id: 'run-1', data: Buffer.from('remote stream\n').toString('base64') },
+        { type: 'stderr', id: 'run-1', data: Buffer.from('remote warn\n').toString('base64') },
+        { type: 'exit', id: 'run-1', exitCode: 5 },
+      ]);
+    }
     return json(response, 200, { exitCode: 7, stdout: 'remote stdout\n', stderr: '' });
   }
   if (request.method === 'GET' && url.pathname.endsWith('/missing.txt')) {
@@ -349,6 +481,11 @@ function entry(name: string, type: 'file' | 'directory', size = 0): Record<strin
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
+}
+
+function writeNdjson(response: ServerResponse, events: unknown[]): void {
+  if (!response.headersSent) response.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+  response.end(events.map((event) => JSON.stringify(event)).join('\n') + '\n');
 }
 
 async function requestBody(request: IncomingMessage): Promise<string> {

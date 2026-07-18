@@ -2,12 +2,28 @@
 // ABOUTME: Uses v1 filesystem routes and legacy diagnostic routes behind one interface.
 
 import { AiryFSTransportError, responseError } from './errors.js';
+import { decodeNdjsonStream } from './ndjson.js';
 import { encodeRemotePath } from './paths.js';
 import type {
+  AuthStatus,
+  ChangePage,
+  ChangeQuery,
+  ChecksumResult,
   DatabaseInfo,
   DirectoryEntry,
+  ExecEvent,
   ExecResult,
+  Job,
+  JobLogPage,
+  JobStatus,
+  MintCapabilityInput,
+  MintedCapability,
   PerfInfo,
+  SnapshotDiffEntry,
+  SnapshotInfo,
+  TreeSummary,
+  UploadCompleteResult,
+  UploadStatus,
   UsageInfo,
   VolumeInfo,
 } from './types.js';
@@ -21,6 +37,7 @@ export class AiryFSClient {
     readonly endpoint: string,
     readonly volume: string,
     private readonly fetchImpl: Fetch = fetch,
+    private readonly token?: string,
   ) {
     this.volumeBase = `/v1/volumes/${encodeURIComponent(volume)}`;
   }
@@ -94,6 +111,76 @@ export class AiryFSClient {
     await this.operation('truncate', { path, size });
   }
 
+  /** Compute the server-side streaming SHA-256 of a remote file. */
+  async checksum(path: string): Promise<ChecksumResult> {
+    return this.operation<ChecksumResult>('checksum', { path });
+  }
+
+  // --- Resumable uploads (the route path is the final target) -------------
+
+  /** Create or resume a resumable upload session for `path`. */
+  async beginUpload(path: string, size: number, checksum: string): Promise<UploadStatus> {
+    return this.json<UploadStatus>(this.resourcePath('uploads', path), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ size, checksum }),
+    });
+  }
+
+  /** Return the current status of an upload session. */
+  async uploadStatus(path: string): Promise<UploadStatus> {
+    return this.json<UploadStatus>(this.resourcePath('uploads', path));
+  }
+
+  /** Append one bounded, checksummed chunk at `offset`; returns the new status. */
+  async appendUpload(
+    path: string,
+    offset: number,
+    chunkSha256: string,
+    data: Uint8Array,
+  ): Promise<UploadStatus> {
+    return this.json<UploadStatus>(this.resourcePath('uploads', path), {
+      method: 'PATCH',
+      headers: {
+        'Upload-Offset': String(offset),
+        'X-AiryFS-Chunk-SHA256': chunkSha256,
+        'Content-Type': 'application/octet-stream',
+      },
+      body: data,
+    });
+  }
+
+  /** Complete a fully-received upload, publishing it over its target. */
+  async completeUpload(path: string): Promise<UploadCompleteResult> {
+    return this.json<UploadCompleteResult>(this.resourcePath('uploads', path), { method: 'PUT' });
+  }
+
+  /** Abort an upload, removing its temp file and session. */
+  async abortUpload(path: string): Promise<void> {
+    await this.request(this.resourcePath('uploads', path), { method: 'DELETE' });
+  }
+
+  /** Stream a directory subtree as a AiryFS archive (pull). */
+  async exportTree(path: string): Promise<Response> {
+    return this.request(this.resourcePath('trees', path));
+  }
+
+  /** Import a AiryFS archive into a target directory (push); returns a summary. */
+  async importTree(
+    path: string,
+    body: NonNullable<RequestInit['body']>,
+    replace = false,
+  ): Promise<TreeSummary> {
+    const url = new URL(this.url(this.resourcePath('trees', path)));
+    if (replace) url.searchParams.set('replace', 'true');
+    const response = await this.requestUrl(url, {
+      method: 'PUT',
+      body,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    return response.json() as Promise<TreeSummary>;
+  }
+
   async exec(command: string, signal?: AbortSignal): Promise<ExecResult> {
     return this.json<ExecResult>(`${this.volumeBase}/exec`, {
       method: 'POST',
@@ -101,6 +188,86 @@ export class AiryFSClient {
       body: JSON.stringify({ command }),
       signal,
     });
+  }
+
+  /**
+   * Run a command and stream its NDJSON events. Awaiting this resolves once the
+   * server accepts the request (connection or admission errors throw here); the
+   * returned iterable then yields events until the terminal `exit`.
+   */
+  async execStream(command: string, signal?: AbortSignal): Promise<AsyncIterable<ExecEvent>> {
+    const url = new URL(this.url(`${this.volumeBase}/exec`));
+    url.searchParams.set('stream', 'true');
+    const response = await this.requestUrl(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+      signal,
+    });
+    if (!response.body) return emptyEvents();
+    return decodeNdjsonStream<ExecEvent>(response.body);
+  }
+
+  /** Request cancellation of a streaming command by its start-event id. */
+  async cancelExec(id: string): Promise<void> {
+    await this.request(`${this.volumeBase}/exec/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+  }
+
+  // --- Durable jobs -------------------------------------------------------
+
+  /**
+   * Submit a durable job. An Idempotency-Key makes retries safe: repeating the
+   * same key returns the existing job rather than enqueuing a duplicate. One is
+   * generated by default.
+   */
+  async submitJob(
+    command: string,
+    cwd?: string,
+    idempotencyKey: string = crypto.randomUUID(),
+  ): Promise<Job> {
+    return this.json<Job>(`${this.volumeBase}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify(cwd === undefined ? { command } : { command, cwd }),
+    });
+  }
+
+  /** List jobs newest-first, optionally filtered by status. */
+  async listJobs(status?: JobStatus): Promise<Job[]> {
+    const url = new URL(this.url(`${this.volumeBase}/jobs`));
+    if (status) url.searchParams.set('status', status);
+    return (await this.requestUrl(url)).json() as Promise<Job[]>;
+  }
+
+  /** Fetch a single job by id. */
+  async getJob(id: string): Promise<Job> {
+    return this.json<Job>(`${this.volumeBase}/jobs/${encodeURIComponent(id)}`);
+  }
+
+  /** Read a page of a job's persisted logs; `data` in each entry is base64. */
+  async getJobLogs(id: string, after?: number, limit?: number): Promise<JobLogPage> {
+    const url = new URL(this.url(`${this.volumeBase}/jobs/${encodeURIComponent(id)}/logs`));
+    if (after !== undefined) url.searchParams.set('after', String(after));
+    if (limit !== undefined) url.searchParams.set('limit', String(limit));
+    return (await this.requestUrl(url)).json() as Promise<JobLogPage>;
+  }
+
+  /** Request cancellation of a job by id; idempotent for terminal jobs. */
+  async cancelJob(id: string): Promise<Job> {
+    return this.json<Job>(`${this.volumeBase}/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+  }
+
+  /** Read or long-poll filesystem changes after an exclusive sequence cursor. */
+  async getChanges(options: ChangeQuery = {}): Promise<ChangePage> {
+    const url = new URL(this.url(this.resourcePath('changes', options.path ?? '/')));
+    if (options.since !== undefined) url.searchParams.set('since', String(options.since));
+    if (options.limit !== undefined) url.searchParams.set('limit', String(options.limit));
+    if (options.wait !== undefined) url.searchParams.set('wait', String(options.wait));
+    return (await this.requestUrl(url, { signal: options.signal })).json() as Promise<ChangePage>;
   }
 
   async usage(): Promise<UsageInfo> {
@@ -131,6 +298,67 @@ export class AiryFSClient {
     return (await this.requestUrl(url)).text();
   }
 
+  async authStatus(): Promise<AuthStatus> {
+    return this.json<AuthStatus>(`${this.volumeBase}/capabilities`);
+  }
+
+  async createCapability(input: MintCapabilityInput): Promise<MintedCapability> {
+    return this.json<MintedCapability>(`${this.volumeBase}/capabilities`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async revokeCapability(id: string): Promise<void> {
+    await this.request(`${this.volumeBase}/capabilities/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /** Capture a full-volume snapshot; an omitted name generates a server default. */
+  async createSnapshot(name?: string, note?: string): Promise<SnapshotInfo> {
+    const body: Record<string, string> = {};
+    if (name !== undefined) body.name = name;
+    if (note !== undefined) body.note = note;
+    return this.json<SnapshotInfo>(`${this.volumeBase}/snapshots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  async listSnapshots(): Promise<SnapshotInfo[]> {
+    return this.json<SnapshotInfo[]>(`${this.volumeBase}/snapshots`);
+  }
+
+  /** Diff a snapshot against the live volume (default) or another snapshot id/name. */
+  async diffSnapshot(id: string, against = 'live'): Promise<SnapshotDiffEntry[]> {
+    const url = new URL(this.url(`${this.volumeBase}/snapshots/${encodeURIComponent(id)}/diff`));
+    url.searchParams.set('against', against);
+    return (await this.requestUrl(url)).json() as Promise<SnapshotDiffEntry[]>;
+  }
+
+  async restoreSnapshot(id: string): Promise<SnapshotInfo> {
+    return this.json<SnapshotInfo>(`${this.volumeBase}/snapshots/${encodeURIComponent(id)}/restore`, {
+      method: 'POST',
+    });
+  }
+
+  async cloneSnapshot(id: string, targetVolume: string): Promise<TreeSummary> {
+    return this.json<TreeSummary>(`${this.volumeBase}/snapshots/${encodeURIComponent(id)}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetVolume }),
+    });
+  }
+
+  async deleteSnapshot(id: string): Promise<SnapshotInfo> {
+    return this.json<SnapshotInfo>(`${this.volumeBase}/snapshots/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
   private async operation<T = void>(name: string, body: Record<string, unknown>): Promise<T> {
     const response = await this.request(`${this.volumeBase}/operations/${name}`, {
       method: 'POST',
@@ -141,7 +369,7 @@ export class AiryFSClient {
     return response.json() as Promise<T>;
   }
 
-  private resourcePath(resource: 'files' | 'directories', path: string): string {
+  private resourcePath(resource: 'files' | 'directories' | 'trees' | 'uploads' | 'changes', path: string): string {
     const encoded = encodeRemotePath(path);
     return `${this.volumeBase}/${resource}${encoded ? `/${encoded}` : ''}`;
   }
@@ -171,7 +399,7 @@ export class AiryFSClient {
   private async requestUrl(url: URL, init?: RequestInit): Promise<Response> {
     let response: Response;
     try {
-      response = await this.fetchImpl(url, init);
+      response = await this.fetchImpl(url, this.withAuth(init));
     } catch (error) {
       throw new AiryFSTransportError(url.origin, error instanceof Error ? error.message : String(error));
     }
@@ -179,7 +407,19 @@ export class AiryFSClient {
     return response;
   }
 
+  /** Attach the session bearer credential to every request when one is configured. */
+  private withAuth(init?: RequestInit): RequestInit | undefined {
+    if (!this.token) return init;
+    const headers = new Headers(init?.headers);
+    headers.set('Authorization', `Bearer ${this.token}`);
+    return { ...init, headers };
+  }
+
   private url(path: string): string {
     return `${this.endpoint.replace(/\/$/, '')}${path}`;
   }
+}
+
+async function* emptyEvents(): AsyncGenerator<ExecEvent> {
+  // A response with no body yields no events; the caller treats it as no output.
 }

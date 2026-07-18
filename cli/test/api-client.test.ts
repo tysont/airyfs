@@ -101,6 +101,31 @@ describe('AiryFSClient', () => {
     expect(fetchMock.mock.calls[0][0].toString()).toBe('https://example.com/perf?volume=vol');
   });
 
+  it('builds encoded tree URLs and forwards the bearer token', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock, 'tok');
+
+    await client.exportTree('/my dir/sub');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/trees/my%20dir/sub');
+    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer tok');
+  });
+
+  it('sets replace=true and streams the import body', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ files: 1, directories: 0, symlinks: 0, bytes: 3 }),
+    );
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    const summary = await client.importTree('/app', new Uint8Array([1, 2, 3]), true);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/trees/app?replace=true');
+    expect(init).toMatchObject({ method: 'PUT', duplex: 'half' });
+    expect(summary).toMatchObject({ files: 1, bytes: 3 });
+  });
+
   it('throws a typed error for unsuccessful responses', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
       error: { code: 'EXEC_BUSY', message: 'busy' },
@@ -108,6 +133,71 @@ describe('AiryFSClient', () => {
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
 
     await expect(client.exec('true')).rejects.toBeInstanceOf(AiryFSApiError);
+  });
+
+  it('streams exec events from an NDJSON response with ?stream=true', async () => {
+    const body = [
+      '{"type":"start","id":"abc"}',
+      '{"type":"stdout","id":"abc","data":"aGk="}',
+      '{"type":"exit","id":"abc","exitCode":3}',
+    ].join('\n') + '\n';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(body, { headers: { 'Content-Type': 'application/x-ndjson' } }),
+    );
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    const events = [];
+    for await (const event of await client.execStream('echo hi')) events.push(event);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/exec?stream=true');
+    expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ command: 'echo hi' }) });
+    expect(events).toEqual([
+      { type: 'start', id: 'abc' },
+      { type: 'stdout', id: 'abc', data: 'aGk=' },
+      { type: 'exit', id: 'abc', exitCode: 3 },
+    ]);
+  });
+
+  it('throws before streaming when the server rejects the request', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+      error: { code: 'EXEC_BUSY', message: 'busy' },
+    }, { status: 503 }));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await expect(client.execStream('true')).rejects.toBeInstanceOf(AiryFSApiError);
+  });
+
+  it('posts the id to the cancel route', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ ok: true }));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.cancelExec('run-42');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/exec/cancel');
+    expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ id: 'run-42' }) });
+  });
+
+  it('builds an encoded long-poll change-feed request', async () => {
+    const page = { events: [], cursor: 42, latest: 42, oldest: 1, gap: false };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(page));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+    const signal = new AbortController().signal;
+
+    expect(await client.getChanges({
+      since: 41,
+      limit: 25,
+      path: '/my dir',
+      wait: 1000,
+      signal,
+    })).toEqual(page);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe(
+      'https://example.com/v1/volumes/vol/changes/my%20dir?since=41&limit=25&wait=1000',
+    );
+    expect(init?.signal).toBe(signal);
   });
 
   it('throws a typed error when fetch fails before receiving a response', async () => {
@@ -119,5 +209,189 @@ describe('AiryFSClient', () => {
       origin: 'https://example.com',
       message: 'Could not reach https://example.com: socket closed',
     } satisfies Partial<AiryFSTransportError>);
+  });
+});
+
+describe('AiryFSClient snapshots', () => {
+  const info = {
+    id: 'sid', name: 'nightly', note: null, createdAt: 1, chunkSize: 262144,
+    inodeCount: 3, fileCount: 1, directoryCount: 2, symlinkCount: 0, byteCount: 5,
+  };
+
+  it('creates a snapshot with an optional name and note', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(info, { status: 201 }));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    const created = await client.createSnapshot('nightly', 'before refactor');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/snapshots');
+    expect(init).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(String(init?.body))).toEqual({ name: 'nightly', note: 'before refactor' });
+    expect(created).toMatchObject({ id: 'sid', directoryCount: 2 });
+  });
+
+  it('omits name and note from the body when not provided', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(info, { status: 201 }));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.createSnapshot();
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({});
+  });
+
+  it('lists snapshots', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json([info]));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    const list = await client.listSnapshots();
+
+    expect(fetchMock.mock.calls[0][0].toString()).toBe('https://example.com/v1/volumes/vol/snapshots');
+    expect(list).toHaveLength(1);
+  });
+
+  it('diffs against live by default and against another snapshot when asked', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => Response.json([]));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.diffSnapshot('sid');
+    expect(fetchMock.mock.calls[0][0].toString())
+      .toBe('https://example.com/v1/volumes/vol/snapshots/sid/diff?against=live');
+
+    await client.diffSnapshot('sid', 'other');
+    expect(fetchMock.mock.calls[1][0].toString())
+      .toBe('https://example.com/v1/volumes/vol/snapshots/sid/diff?against=other');
+  });
+
+  it('restores a snapshot', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(info));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.restoreSnapshot('sid');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/snapshots/sid/restore');
+    expect(init).toMatchObject({ method: 'POST' });
+  });
+
+  it('clones a snapshot into a target volume', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ files: 1, directories: 2, symlinks: 0, bytes: 5 }),
+    );
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    const summary = await client.cloneSnapshot('sid', 'backup');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/snapshots/sid/clone');
+    expect(init).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(String(init?.body))).toEqual({ targetVolume: 'backup' });
+    expect(summary).toMatchObject({ files: 1 });
+  });
+
+  it('deletes a snapshot', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(info));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.deleteSnapshot('sid');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/snapshots/sid');
+    expect(init).toMatchObject({ method: 'DELETE' });
+  });
+
+  it('encodes ids in snapshot item routes', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(info));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.deleteSnapshot('a b');
+    expect(fetchMock.mock.calls[0][0].toString())
+      .toBe('https://example.com/v1/volumes/vol/snapshots/a%20b');
+  });
+});
+
+describe('AiryFSClient uploads and checksum', () => {
+  const status = {
+    id: 'uid', path: '/data/big.bin', size: 10, offset: 0,
+    checksum: 'a'.repeat(64), createdAt: 1, updatedAt: 1,
+  };
+
+  it('begins an upload with size and checksum at the target path', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(status, { status: 201 }));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.beginUpload('/data/big.bin', 10, 'a'.repeat(64));
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/uploads/data/big.bin');
+    expect(init).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(String(init?.body))).toEqual({ size: 10, checksum: 'a'.repeat(64) });
+  });
+
+  it('gets upload status', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(status));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.uploadStatus('/data/big.bin');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/uploads/data/big.bin');
+    expect(init?.method ?? 'GET').toBe('GET');
+  });
+
+  it('appends a chunk with offset and per-chunk checksum headers', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ ...status, offset: 4 }));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    const data = new Uint8Array([1, 2, 3, 4]);
+    const result = await client.appendUpload('/data/big.bin', 0, 'b'.repeat(64), data);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/uploads/data/big.bin');
+    expect(init).toMatchObject({ method: 'PATCH' });
+    const headers = new Headers(init?.headers);
+    expect(headers.get('Upload-Offset')).toBe('0');
+    expect(headers.get('X-AiryFS-Chunk-SHA256')).toBe('b'.repeat(64));
+    expect(init?.body).toBe(data);
+    expect(result.offset).toBe(4);
+  });
+
+  it('surfaces a stable offset mismatch as a typed error', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(
+      { error: { code: 'UPLOAD_OFFSET_MISMATCH', message: 'stale offset' } },
+      { status: 409, headers: { 'Upload-Offset': '4' } },
+    ));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await expect(client.appendUpload('/data/big.bin', 0, 'b'.repeat(64), new Uint8Array([1])))
+      .rejects.toMatchObject({ code: 'UPLOAD_OFFSET_MISMATCH', status: 409 });
+  });
+
+  it('completes and aborts an upload', async () => {
+    const completeMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+      ...status, offset: 10, type: 'file', mode: 0o100644, nlink: 1, uid: 0, gid: 0, atime: 0, mtime: 0, ctime: 0, ino: 2,
+    }));
+    const client = new AiryFSClient('https://example.com', 'vol', completeMock);
+    await client.completeUpload('/data/big.bin');
+    expect(completeMock.mock.calls[0][1]).toMatchObject({ method: 'PUT' });
+
+    const abortMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const abortClient = new AiryFSClient('https://example.com', 'vol', abortMock);
+    await abortClient.abortUpload('/data/big.bin');
+    expect(abortMock.mock.calls[0][1]).toMatchObject({ method: 'DELETE' });
+  });
+
+  it('requests a remote checksum via the operations route', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ algorithm: 'sha256', checksum: 'c'.repeat(64), size: 3, ino: 2 }),
+    );
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    const result = await client.checksum('/data/big.bin');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/operations/checksum');
+    expect(JSON.parse(String(init?.body))).toEqual({ path: '/data/big.bin' });
+    expect(result).toMatchObject({ algorithm: 'sha256', checksum: 'c'.repeat(64) });
   });
 });

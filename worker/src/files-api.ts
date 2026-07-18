@@ -3,6 +3,7 @@
 
 import { Buffer } from 'buffer';
 import type { FileHandle, FileSystem, Stats } from 'agentfs-sdk/cloudflare';
+import { sha256Path } from './checksum';
 
 const READ_CHUNK_SIZE = 256 * 1024;
 const WRITE_CHUNK_SIZE = 256 * 1024;
@@ -22,7 +23,7 @@ export interface StatsDto {
 
 export interface V1Route {
   volume: string;
-  resource: 'volume' | 'files' | 'directories' | 'operations' | 'exec' | 'usage';
+  resource: 'volume' | 'files' | 'directories' | 'trees' | 'operations' | 'exec' | 'usage' | 'capabilities' | 'snapshots' | 'uploads' | 'jobs' | 'changes';
   path: string;
 }
 
@@ -134,12 +135,16 @@ export function parseV1Route(pathname: string): V1Route | null {
   }
 
   const resource = parts[4];
-  if (!['files', 'directories', 'operations', 'exec', 'usage'].includes(resource)) {
+  if (!['files', 'directories', 'trees', 'operations', 'exec', 'usage', 'capabilities', 'snapshots', 'uploads', 'jobs', 'changes'].includes(resource)) {
     throw new HttpError(404, 'INVALID_ROUTE', `Unknown volume resource: ${resource}`);
   }
 
-  if ((resource === 'exec' || resource === 'usage') && parts.length > 5) {
+  if (resource === 'usage' && parts.length > 5) {
     throw new HttpError(404, 'INVALID_ROUTE', `${resource} does not accept a path suffix`);
+  }
+  // exec accepts no suffix (run) or exactly `cancel` (terminate a streaming run).
+  if (resource === 'exec' && parts.length > 5 && !(parts.length === 6 && parts[5] === 'cancel')) {
+    throw new HttpError(404, 'INVALID_ROUTE', 'exec only accepts the "cancel" suffix');
   }
 
   return {
@@ -430,6 +435,11 @@ export async function readCommandRequest(request: Request): Promise<string> {
   return requireString(body.command, 'command');
 }
 
+/** Parse a JSON object request body, rejecting malformed JSON with a stable error. */
+export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
+  return readJson<Record<string, unknown>>(request);
+}
+
 export async function readVolumeCreateRequest(request: Request): Promise<unknown> {
   if (!request.body) return undefined;
   return (await readJson<Record<string, unknown>>(request)).chunkSize;
@@ -441,6 +451,19 @@ async function withWrite<T>(
   operation: () => Promise<T>
 ): Promise<T> {
   const release = access ? await access.acquireWrite(paths) : () => undefined;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
+async function withRead<T>(
+  access: VolumeAccessCoordinator | undefined,
+  path: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const release = access ? await access.acquireRead(path) : () => undefined;
   try {
     return await operation();
   } finally {
@@ -475,7 +498,7 @@ export async function handleFilesystemRequest(
 
     if (route.resource === 'directories') {
       if (request.method === 'GET') {
-        const entries = await fs.readdirPlus(route.path);
+        const entries = await withRead(access, route.path, () => fs.readdirPlus(route.path));
         return Response.json(entries.map((entry) => ({
           name: entry.name,
           ...toStatsDto(entry.stats),
@@ -521,6 +544,9 @@ export async function handleFilesystemRequest(
       }
       if (operation === 'readlink') {
         return Response.json({ target: await fs.readlink(requireString(body.path, 'path')) });
+      }
+      if (operation === 'checksum') {
+        return Response.json(await sha256Path(fs, requireString(body.path, 'path'), access));
       }
       if (operation === 'truncate') {
         const path = requireString(body.path, 'path');

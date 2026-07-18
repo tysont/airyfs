@@ -1,2 +1,7 @@
 # Account-scoped deployment configuration. API tokens remain in the shell.
 CLOUDFLARE_ACCOUNT_ID=your-account-id
+
+# When set, AiryFS HTTP access requires a bearer credential. The value is the root
+# admin secret (Authorization: Bearer <secret>) and the key that signs scoped
+# capability tokens. Leave unset to preserve unauthenticated local/test access.
+# AIRYFS_AUTH_SECRET=choose-a-long-random-secret

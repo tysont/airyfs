@@ -2,16 +2,35 @@
 // ABOUTME: One-shot and interactive-shell execution share these same handlers.
 
 import { createReadStream, createWriteStream } from 'node:fs';
-import { access, link, rename as renameLocal, rm as removeLocal, stat as statLocal } from 'node:fs/promises';
-import { basename as localBasename } from 'node:path';
+import {
+  access,
+  link,
+  mkdir as mkdirLocal,
+  rename as renameLocal,
+  rm as removeLocal,
+  stat as statLocal,
+} from 'node:fs/promises';
+import { basename as localBasename, resolve as resolveLocal } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createInterface } from 'node:readline/promises';
 import { Command } from 'commander';
 import ora from 'ora';
+import { AiryFSClient } from '../api/client.js';
+import { createLocalTreeStream, extractLocalTree } from '../api/archive.js';
+import { resumableDownload, resumableUpload, type TransferProgress } from '../api/resume.js';
 import { AiryFSApiError, AiryFSTransportError } from '../api/errors.js';
 import { remoteBasename, remoteDirname } from '../api/paths.js';
-import type { DirectoryEntry, ExecResult } from '../api/types.js';
+import type {
+  ChangeEvent,
+  ChangePage,
+  DirectoryEntry,
+  ExecResult,
+  Job,
+  JobLogEntry,
+  JobStatus,
+  Operation,
+} from '../api/types.js';
 import {
   createContext,
   resolveRuntimeSession,
@@ -30,7 +49,12 @@ export function registerCommands(program: Command, runtime: Runtime): void {
   registerNavigationCommands(program, runtime);
   registerFileCommands(program, runtime);
   registerExecCommand(program, runtime);
+  registerJobCommands(program, runtime);
+  registerWatchCommand(program, runtime);
   registerVolumeCommands(program, runtime);
+  registerSnapshotCommands(program, runtime);
+  registerAuthCommands(program, runtime);
+  registerCapabilityCommands(program, runtime);
   registerDiagnosticCommands(program, runtime);
   registerKvCommands(program, runtime);
 
@@ -211,10 +235,27 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
     .argument('<remote>')
     .argument('[local]')
     .option('-f, --force', 'overwrite an existing local file')
+    .option('--resume', 'resumable, checksummed download with a partial sidecar')
     .description('Download a remote file')
     .action(async (remote, local, options, command) => perform(runtime, command, async (context) => {
       const remotePath = context.path(remote);
       const localPath = local || remoteBasename(remotePath);
+      if (options.resume) {
+        const spinner = createSpinner(context, `Downloading ${remotePath}`);
+        spinner?.start();
+        try {
+          const result = await resumableDownload(
+            context.client(), remotePath, localPath, { force: options.force },
+            (progress) => updateTransfer(spinner, `Downloading ${remotePath}`, progress),
+          );
+          spinner?.stop();
+          context.output.success(`Downloaded ${remotePath} to ${localPath}`, { remote: remotePath, local: localPath, ...result });
+        } catch (error) {
+          spinner?.stop();
+          throw error;
+        }
+        return;
+      }
       if (!options.force) {
         await access(localPath).then(() => {
           throw new ConfigError(`Local path already exists: ${localPath} (use --force to overwrite)`);
@@ -241,11 +282,28 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
   program.command('put')
     .argument('<local>')
     .argument('[remote]')
+    .option('--resume', 'resumable, checksummed upload in 1 MiB chunks')
     .description('Upload a local file')
-    .action(async (local, remote, _options, command) => perform(runtime, command, async (context) => {
+    .action(async (local, remote, options, command) => perform(runtime, command, async (context) => {
       const localStats = await statLocal(local);
       if (!localStats.isFile()) throw new ConfigError(`Local path is not a file: ${local}`);
       const remotePath = context.path(remote || localBasename(local));
+      if (options.resume) {
+        const spinner = createSpinner(context, `Uploading ${local}`);
+        spinner?.start();
+        try {
+          const result = await resumableUpload(
+            context.client(), local, localStats.size, remotePath,
+            (progress) => updateTransfer(spinner, `Uploading ${local}`, progress),
+          );
+          spinner?.stop();
+          context.output.success(`Uploaded ${local} to ${remotePath}`, result);
+        } catch (error) {
+          spinner?.stop();
+          throw error;
+        }
+        return;
+      }
       await context.client().writeFile(remotePath, createReadStream(local) as NonNullable<RequestInit['body']>);
       context.output.success(`Uploaded ${local} to ${remotePath}`, { local, remote: remotePath });
     }));
@@ -351,6 +409,84 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
     .action(async (path, _options, command) => perform(runtime, command, async (context) => {
       context.output.value(await statRemote(context, context.path(path)));
     }));
+
+  program.command('push')
+    .argument('<local-directory>')
+    .argument('[remote-directory]')
+    .option('--replace', 'replace an existing remote directory')
+    .description('Upload a local directory tree as a transactional archive')
+    .action(async (localDir, remote, options, command) => perform(runtime, command, async (context) => {
+      const localStats = await statLocal(localDir);
+      if (!localStats.isDirectory()) throw new ConfigError(`Local path is not a directory: ${localDir}`);
+      const defaultName = localBasename(resolveLocal(localDir));
+      const remotePath = context.path(remote || defaultName);
+      const body = createLocalTreeStream(localDir) as unknown as NonNullable<RequestInit['body']>;
+      const summary = await context.client().importTree(remotePath, body, Boolean(options.replace));
+      context.output.success(
+        `Pushed ${localDir} to ${remotePath} (${summarize(summary)})`,
+        { local: localDir, remote: remotePath, ...summary },
+      );
+    }));
+
+  program.command('pull')
+    .argument('<remote-directory>')
+    .argument('[local-directory]')
+    .option('-f, --force', 'replace an existing local directory')
+    .description('Download a remote directory tree as a transactional archive')
+    .action(async (remote, local, options, command) => perform(runtime, command, async (context) => {
+      const remotePath = context.path(remote);
+      const localPath = local || remoteBasename(remotePath);
+      const exists = await localExists(localPath);
+      if (exists && !options.force) {
+        throw new ConfigError(`Local path already exists: ${localPath} (use --force to overwrite)`);
+      }
+      const response = await context.client().exportTree(remotePath);
+      if (!response.body) throw new ConfigError('Server returned an empty archive');
+
+      const temporary = `${localPath}.airyfs-${process.pid}-${crypto.randomUUID()}.tmp`;
+      let summary;
+      try {
+        await mkdirLocal(temporary, { recursive: true });
+        summary = await extractLocalTree(response.body as ReadableStream<Uint8Array>, temporary);
+      } catch (error) {
+        await removeLocal(temporary, { recursive: true, force: true });
+        throw error;
+      }
+
+      const backup = `${localPath}.airyfs-backup-${process.pid}-${crypto.randomUUID()}`;
+      try {
+        if (exists) await renameLocal(localPath, backup);
+        try {
+          await renameLocal(temporary, localPath);
+        } catch (error) {
+          if (exists) await renameLocal(backup, localPath).catch(() => undefined);
+          throw error;
+        }
+      } catch (error) {
+        await removeLocal(temporary, { recursive: true, force: true });
+        throw error;
+      }
+      if (exists) await removeLocal(backup, { recursive: true, force: true });
+
+      context.output.success(
+        `Pulled ${remotePath} to ${localPath} (${summarize(summary)})`,
+        { remote: remotePath, local: localPath, ...summary },
+      );
+    }));
+}
+
+function summarize(summary: { files: number; directories: number; symlinks: number; bytes: number }): string {
+  return `${summary.files} files, ${summary.directories} dirs, ${summary.symlinks} symlinks, ${summary.bytes} bytes`;
+}
+
+async function localExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 function registerExecCommand(program: Command, runtime: Runtime): void {
@@ -376,6 +512,7 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
     .allowUnknownOption(true)
     .passThroughOptions()
     .option('--no-wait', 'fail immediately if another command is running')
+    .option('--no-stream', 'disable live streaming and buffer the full result (text mode)')
     .option('--timeout <duration>', 'maximum startup and busy-wait time', '90s')
     .description('Execute a command in the volume Container')
     .action(async (parts: string[], options, command) => perform(runtime, command, async (context) => {
@@ -384,28 +521,425 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
       const fullCommand = `cd -- ${shellQuote(remoteDirectory)} && ${commandText}`;
       const timeout = options.wait ? parseDuration(options.timeout) : 0;
       const deadline = Date.now() + timeout;
+      // Live streaming is the text-mode default; --json stays buffered so machine
+      // output remains a single ExecResult object, and --no-stream opts out.
+      const streaming = options.stream !== false && !context.output.json;
       const spinner = createSpinner(context, `Running in ${context.volume}:${context.cwd}`);
       spinner?.start();
-      let result: ExecResult;
       try {
         // Resolve startup failures with a retry-safe no-op before submitting the
         // user command, whose outcome can be ambiguous after a transport error.
         await execWithRetry(context, ':', deadline, true);
-        result = await execWithRetry(context, fullCommand, deadline, false);
+        if (streaming) {
+          await runStreamingExec(context, runtime, fullCommand, spinner);
+          return;
+        }
+        const result = await execWithRetry(context, fullCommand, deadline, false);
         spinner?.stop();
+        if (context.output.json) {
+          context.output.value(result);
+        } else {
+          context.output.text(result.stdout);
+          if (result.stderr) context.output.stderr.write(result.stderr);
+        }
+        runtime.exitCode = result.exitCode;
       } catch (error) {
         spinner?.stop();
         throw error;
       }
+    }));
+}
+
+/**
+ * Stream a command's output live, decoding base64 stdout/stderr to their raw
+ * streams and adopting the remote exit code. On SIGINT, once the start id is
+ * known, cancel the command once and abort the local stream; the SIGINT listener
+ * is always removed afterward so neither one-shot nor shell mode leaks it.
+ */
+async function runStreamingExec(
+  context: CommandContext,
+  runtime: Runtime,
+  fullCommand: string,
+  spinner: ReturnType<typeof ora> | null,
+): Promise<void> {
+  const controller = new AbortController();
+  let startId: string | undefined;
+  let interrupted = false;
+  let exitCode = 0;
+  let sawExit = false;
+
+  const onInterrupt = (): void => {
+    interrupted = true;
+    // Only an admitted command has an id to cancel; always abort the local read.
+    if (startId) void context.client().cancelExec(startId).catch(() => undefined);
+    controller.abort();
+  };
+  process.once('SIGINT', onInterrupt);
+
+  try {
+    const events = await context.client().execStream(fullCommand, controller.signal);
+    for await (const event of events) {
+      if (event.type === 'start') {
+        startId = event.id;
+        spinner?.stop();
+      } else if (event.type === 'stdout') {
+        context.output.stdout.write(Buffer.from(event.data, 'base64'));
+      } else if (event.type === 'stderr') {
+        context.output.stderr.write(Buffer.from(event.data, 'base64'));
+      } else if (event.type === 'exit') {
+        exitCode = event.exitCode;
+        sawExit = true;
+      }
+    }
+  } catch (error) {
+    if (!interrupted && !controller.signal.aborted) throw error;
+    // An interrupted stream is expected to reject; the exit code reflects it below.
+  } finally {
+    process.removeListener('SIGINT', onInterrupt);
+    spinner?.stop();
+  }
+
+  // 130 = 128 + SIGINT, matching how a shell reports an interrupted foreground job.
+  runtime.exitCode = interrupted && !sawExit ? 130 : exitCode;
+}
+
+const TERMINAL_JOB_STATUSES: readonly JobStatus[] = ['succeeded', 'failed', 'canceled'];
+
+function isTerminalJob(status: JobStatus): boolean {
+  return TERMINAL_JOB_STATUSES.includes(status);
+}
+
+/** Poll interval for --wait/--follow; overridable via env so tests stay fast. */
+function jobPollIntervalMs(): number {
+  const raw = process.env.AIRYFS_JOB_POLL_MS;
+  if (raw === undefined) return 500;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 500;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (ms <= 0 || signal?.aborted) {
+      resolve();
+      return;
+    }
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = (): void => {
+      cleanup();
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Write one persisted log entry's exact bytes to the matching output stream. */
+function writeJobLogEntry(context: CommandContext, entry: JobLogEntry): void {
+  const bytes = Buffer.from(entry.data, 'base64');
+  if (entry.stream === 'stderr') context.output.stderr.write(bytes);
+  else context.output.stdout.write(bytes);
+}
+
+/**
+ * Drain every available log page from `after`, invoking `onEntry` in seq order.
+ * Returns the new cursor (the last seq seen, or the incoming cursor if none).
+ */
+async function drainJobLogs(
+  context: CommandContext,
+  id: string,
+  after: number | undefined,
+  onEntry: (entry: JobLogEntry) => void,
+): Promise<number | undefined> {
+  let cursor = after;
+  while (true) {
+    const page = await context.client().getJobLogs(id, cursor);
+    for (const entry of page.entries) {
+      onEntry(entry);
+      cursor = entry.seq;
+    }
+    if (page.next === null) return cursor;
+  }
+}
+
+/**
+ * Poll a job until it reaches a terminal state, draining logs each pass. A local
+ * SIGINT stops polling without canceling the remote job; its listener is always
+ * removed. Returns the final job snapshot and whether it was interrupted.
+ */
+async function pollJobUntilTerminal(
+  context: CommandContext,
+  id: string,
+  onEntry: (entry: JobLogEntry) => void,
+  after: number | undefined = undefined,
+): Promise<{ job: Job; interrupted: boolean }> {
+  const controller = new AbortController();
+  let interrupted = false;
+  const onInterrupt = (): void => {
+    interrupted = true;
+    controller.abort();
+  };
+  process.once('SIGINT', onInterrupt);
+
+  let cursor = after;
+  let job: Job;
+  try {
+    while (true) {
+      cursor = await drainJobLogs(context, id, cursor, onEntry);
+      job = await context.client().getJob(id);
+      if (isTerminalJob(job.status)) {
+        cursor = await drainJobLogs(context, id, cursor, onEntry);
+        break;
+      }
+      if (controller.signal.aborted) break;
+      await sleep(jobPollIntervalMs(), controller.signal);
+      if (controller.signal.aborted) break;
+    }
+  } finally {
+    process.removeListener('SIGINT', onInterrupt);
+  }
+  return { job, interrupted };
+}
+
+function registerJobCommands(program: Command, runtime: Runtime): void {
+  const job = program.command('job').alias('jobs').description('Submit and manage durable background jobs');
+
+  job.command('submit')
+    .argument('<command...>')
+    .allowUnknownOption(true)
+    .passThroughOptions()
+    .option('--cwd <remote>', 'remote working directory (defaults to the session cwd)')
+    .option('--idempotency-key <key>', 'idempotency key for safe retries (a UUID is generated by default)')
+    .option('--wait', 'wait for the job to finish, streaming persisted output, and adopt its exit code')
+    .description('Submit a command to run as a durable background job')
+    .action(async (parts: string[], options, command) => perform(runtime, command, async (context) => {
+      const commandText = commandForExec(parts);
+      const cwd = options.cwd ? context.path(options.cwd) : context.cwd;
+      const submitted = await context.client().submitJob(commandText, cwd, options.idempotencyKey);
+
+      if (!options.wait) {
+        if (context.output.json) context.output.value(submitted);
+        else context.output.value(submitted.id);
+        return;
+      }
+
+      const onEntry = context.output.json
+        ? (): void => undefined
+        : (entry: JobLogEntry): void => writeJobLogEntry(context, entry);
+      const { job: finished, interrupted } = await pollJobUntilTerminal(context, submitted.id, onEntry);
+
+      if (interrupted && !isTerminalJob(finished.status)) {
+        // 130 = 128 + SIGINT: the local wait was interrupted; the job keeps running.
+        runtime.exitCode = 130;
+        if (context.output.json) context.output.value(finished);
+        return;
+      }
+      if (context.output.json) context.output.value(finished);
+      runtime.exitCode = finished.exitCode ?? (finished.status === 'succeeded' ? 0 : 1);
+    }));
+
+  job.command('list')
+    .alias('ls')
+    .option('--status <status>', 'filter by queued, running, succeeded, failed, or canceled')
+    .description('List durable jobs')
+    .action(async (options, command) => perform(runtime, command, async (context) => {
+      const jobs = await context.client().listJobs(options.status as JobStatus | undefined);
+      if (context.output.json) {
+        context.output.value(jobs);
+        return;
+      }
+      context.output.table(
+        ['Id', 'Status', 'Exit', 'Created', 'Command'],
+        jobs.map((entry) => [
+          entry.id,
+          entry.status,
+          entry.exitCode === null ? '-' : entry.exitCode,
+          formatTime(entry.createdAt),
+          truncateCommand(entry.command),
+        ]),
+      );
+    }));
+
+  job.command('status')
+    .argument('<id>')
+    .description('Show a job\'s current state')
+    .action(async (id, _options, command) => perform(runtime, command, async (context) => {
+      context.output.value(await context.client().getJob(id));
+    }));
+
+  job.command('logs')
+    .argument('<id>')
+    .option('--follow', 'poll for new output until the job reaches a terminal state')
+    .option('--after <seq>', 'only show log entries after this seq cursor')
+    .description('Print a job\'s persisted stdout/stderr')
+    .action(async (id, options, command) => perform(runtime, command, async (context) => {
+      const after = options.after === undefined ? undefined : parseCursor(options.after);
 
       if (context.output.json) {
-        context.output.value(result);
-      } else {
-        context.output.text(result.stdout);
-        if (result.stderr) context.output.stderr.write(result.stderr);
+        const entries: JobLogEntry[] = [];
+        if (options.follow) {
+          await pollJobUntilTerminal(context, id, (entry) => entries.push(entry), after);
+        } else {
+          await drainJobLogs(context, id, after, (entry) => entries.push(entry));
+        }
+        const next = entries.length > 0 ? entries[entries.length - 1].seq : null;
+        context.output.value({ entries, next });
+        return;
       }
-      runtime.exitCode = result.exitCode;
+
+      const onEntry = (entry: JobLogEntry): void => writeJobLogEntry(context, entry);
+      if (options.follow) await pollJobUntilTerminal(context, id, onEntry, after);
+      else await drainJobLogs(context, id, after, onEntry);
     }));
+
+  job.command('cancel')
+    .argument('<id>')
+    .description('Request cancellation of a job')
+    .action(async (id, _options, command) => perform(runtime, command, async (context) => {
+      const canceled = await context.client().cancelJob(id);
+      context.output.success(`Requested cancellation of job ${id}`, canceled);
+    }));
+}
+
+function truncateCommand(command: string): string {
+  const singleLine = command.replace(/\s+/g, ' ').trim();
+  return singleLine.length > 60 ? `${singleLine.slice(0, 57)}...` : singleLine;
+}
+
+function parseCursor(value: string, option = '--after'): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new ConfigError(`Invalid ${option} cursor: ${value}`);
+  }
+  return parsed;
+}
+
+function registerWatchCommand(program: Command, runtime: Runtime): void {
+  program.command('watch')
+    .argument('[path]', 'remote path prefix', '.')
+    .option('--since <seq>', 'replay changes after this sequence cursor')
+    .option('--limit <count>', 'maximum events returned per poll', '100')
+    .option('--once', 'drain currently retained changes and exit')
+    .description('Watch filesystem changes from API and Container/FUSE writers')
+    .action(async (path, options, command) => perform(runtime, command, async (context) => {
+      const target = context.path(path);
+      const limit = parseChangeLimit(options.limit);
+      const requestedSince = options.since === undefined
+        ? undefined
+        : parseCursor(options.since, '--since');
+
+      if (options.once) {
+        const page = await drainChanges(context, target, requestedSince ?? 0, limit);
+        if (context.output.json) context.output.value(page);
+        else for (const event of page.events) writeChangeEvent(context, event);
+        reportChangeGap(context, page);
+        return;
+      }
+
+      const controller = new AbortController();
+      let interrupted = false;
+      const onInterrupt = (): void => {
+        interrupted = true;
+        controller.abort();
+      };
+      process.once('SIGINT', onInterrupt);
+
+      try {
+        let cursor: number;
+        if (requestedSince === undefined) {
+          cursor = (await context.client().getChanges({ path: target, signal: controller.signal })).cursor;
+        } else {
+          cursor = requestedSince;
+        }
+
+        while (!controller.signal.aborted) {
+          const page = await context.client().getChanges({
+            since: cursor,
+            limit,
+            path: target,
+            wait: 25_000,
+            signal: controller.signal,
+          });
+          reportChangeGap(context, page);
+          for (const event of page.events) writeChangeEvent(context, event, true);
+          cursor = page.cursor;
+        }
+      } catch (error) {
+        if (!interrupted && !controller.signal.aborted) throw error;
+      } finally {
+        process.removeListener('SIGINT', onInterrupt);
+      }
+      if (interrupted) runtime.exitCode = 130;
+    }));
+}
+
+async function drainChanges(
+  context: CommandContext,
+  path: string,
+  since: number,
+  limit: number,
+): Promise<ChangePage> {
+  const events: ChangeEvent[] = [];
+  let cursor = since;
+  let latest = since;
+  let oldest = since + 1;
+  let gap = false;
+  let targetLatest: number | undefined;
+
+  do {
+    const previousCursor = cursor;
+    const page = await context.client().getChanges({ since: cursor, limit, path });
+    events.push(...page.events);
+    cursor = page.cursor;
+    latest = page.latest;
+    oldest = page.oldest;
+    gap ||= page.gap;
+    targetLatest ??= page.latest;
+    if (cursor <= previousCursor && cursor < targetLatest) {
+      throw new ConfigError(`Change feed did not advance beyond sequence ${previousCursor}`);
+    }
+  } while (cursor < targetLatest);
+
+  return { events, cursor, latest, oldest, gap };
+}
+
+function writeChangeEvent(context: CommandContext, event: ChangeEvent, streamingJson = false): void {
+  if (context.output.quiet) return;
+  if (context.output.json) {
+    if (streamingJson) context.output.stdout.write(`${JSON.stringify(event)}\n`);
+    else context.output.value(event);
+    return;
+  }
+  const marker: Record<ChangeEvent['type'], string> = {
+    create: 'A',
+    modify: 'M',
+    remove: 'D',
+    rename: 'R',
+  };
+  const detail = event.type === 'rename'
+    ? `${event.oldPath ?? '?'} -> ${event.path}`
+    : event.path;
+  context.output.text(`${marker[event.type]} ${detail}\n`);
+}
+
+function reportChangeGap(context: CommandContext, page: ChangePage): void {
+  if (!page.gap || context.output.quiet || context.output.json) return;
+  context.output.stderr.write(
+    `Warning: change history before sequence ${page.oldest} is no longer retained; resync may be required.\n`,
+  );
+}
+
+function parseChangeLimit(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 1000) {
+    throw new ConfigError(`Invalid --limit count: ${value} (expected 1 to 1000)`);
+  }
+  return parsed;
 }
 
 function registerVolumeCommands(program: Command, runtime: Runtime): void {
@@ -422,6 +956,189 @@ function registerVolumeCommands(program: Command, runtime: Runtime): void {
     .description('Show selected-volume configuration')
     .action(async (_options, command) => perform(runtime, command, async (context) => {
       context.output.value(await context.client().getVolume());
+    }));
+}
+
+function registerSnapshotCommands(program: Command, runtime: Runtime): void {
+  const snapshot = program.command('snapshot').alias('snap').description('Capture and manage full-volume snapshots');
+
+  snapshot.command('create')
+    .argument('[name]', 'snapshot name (a timestamped default is generated when omitted)')
+    .option('-n, --note <note>', 'attach a free-form note')
+    .description('Capture a full-volume snapshot')
+    .action(async (name, options, command) => perform(runtime, command, async (context) => {
+      const info = await context.client().createSnapshot(name, options.note);
+      context.output.success(`Created snapshot ${info.name}`, info);
+    }));
+
+  snapshot.command('list')
+    .alias('ls')
+    .description('List snapshots')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const snapshots = await context.client().listSnapshots();
+      if (context.output.json) {
+        context.output.value(snapshots);
+        return;
+      }
+      context.output.table(
+        ['Name', 'Created', 'Files', 'Size', 'Note'],
+        snapshots.map((info) => [
+          info.name,
+          formatTime(info.createdAt),
+          info.fileCount,
+          formatSize(info.byteCount),
+          info.note ?? '-',
+        ]),
+      );
+    }));
+
+  snapshot.command('diff')
+    .argument('<id>', 'snapshot id or name')
+    .argument('[against]', 'compare against "live" or another snapshot id/name', 'live')
+    .description('Diff a snapshot against the live volume or another snapshot')
+    .action(async (id, against, _options, command) => perform(runtime, command, async (context) => {
+      const entries = await context.client().diffSnapshot(id, against);
+      if (context.output.json) {
+        context.output.value(entries);
+        return;
+      }
+      if (entries.length === 0) {
+        context.output.value('No differences');
+        return;
+      }
+      const marker: Record<string, string> = { added: 'A', removed: 'D', modified: 'M' };
+      context.output.text(`${entries.map((entry) => `${marker[entry.change]} ${entry.path}`).join('\n')}\n`);
+    }));
+
+  snapshot.command('restore')
+    .argument('<id>', 'snapshot id or name')
+    .option('-f, --force', 'skip confirmation')
+    .description('Restore a snapshot over the live volume; recycles the Container')
+    .action(async (id, options, command) => perform(runtime, command, async (context) => {
+      if (context.shellMode && !options.force) {
+        throw new ConfigError('Interactive confirmation is unavailable inside `airyfs shell`; use `restore --force`');
+      }
+      if (!options.force && !await confirmAction(
+        context,
+        `Restore snapshot ${id} over ${context.volume}? Current volume contents will be replaced.`,
+      )) {
+        context.output.value('Cancelled');
+        return;
+      }
+      const info = await context.client().restoreSnapshot(id);
+      context.output.success(`Restored ${context.volume} from snapshot ${info.name}`, info);
+    }));
+
+  snapshot.command('clone')
+    .argument('<id>', 'snapshot id or name')
+    .requiredOption('--to <volume>', 'target volume to clone into (must differ from the source)')
+    .description('Clone a snapshot into another volume; requires root or auth-disabled access')
+    .action(async (id, options, command) => perform(runtime, command, async (context) => {
+      const summary = await context.client().cloneSnapshot(id, options.to);
+      context.output.success(
+        `Cloned snapshot ${id} to volume ${options.to} (${summarize(summary)})`,
+        { snapshot: id, targetVolume: options.to, ...summary },
+      );
+    }));
+
+  snapshot.command('delete')
+    .alias('rm')
+    .argument('<id>', 'snapshot id or name')
+    .option('-f, --force', 'skip confirmation')
+    .description('Delete a snapshot')
+    .action(async (id, options, command) => perform(runtime, command, async (context) => {
+      if (context.shellMode && !options.force) {
+        throw new ConfigError('Interactive confirmation is unavailable inside `airyfs shell`; use `delete --force`');
+      }
+      if (!options.force && !await confirmAction(context, `Delete snapshot ${id}?`)) {
+        context.output.value('Cancelled');
+        return;
+      }
+      const info = await context.client().deleteSnapshot(id);
+      context.output.success(`Deleted snapshot ${info.name}`, info);
+    }));
+}
+
+function registerAuthCommands(program: Command, runtime: Runtime): void {
+  const auth = program.command('auth').description('Manage session authentication');
+
+  auth.command('login')
+    .argument('[token]', 'bearer token (root secret or capability)')
+    .description('Authenticate the active session and store its token')
+    .action(async (token, _options, command) => perform(runtime, command, async (context) => {
+      const candidate = await requiredInput(runtime, token, 'Token: ', 'token');
+      const probe = new AiryFSClient(context.endpoint, context.volume, undefined, candidate);
+      const status = await probe.authStatus();
+      await context.sessions.setToken(context.named.name, candidate);
+      context.output.success(`Logged in to ${context.volume} as ${status.auth}`, {
+        session: context.named.name,
+        volume: context.volume,
+        auth: status.auth,
+        capability: status.capability,
+      });
+    }));
+
+  auth.command('logout')
+    .description('Remove the stored token from the active session')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      await context.sessions.clearToken(context.named.name);
+      context.output.success(`Logged out of ${context.named.name}`, { session: context.named.name });
+    }));
+
+  auth.command('status')
+    .description('Show the authentication state of the active session')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const status = await context.client().authStatus();
+      const localToken = Boolean(context.named.session.token);
+      if (context.output.json) {
+        context.output.value({ session: context.named.name, localToken, ...status });
+        return;
+      }
+      const rows: Array<[string, string]> = [
+        ['Session', context.named.name],
+        ['Volume', status.volume],
+        ['Auth', status.auth],
+        ['Local token', localToken ? 'configured' : 'none'],
+      ];
+      if (status.capability) {
+        rows.push(['Capability', status.capability.id]);
+        rows.push(['Operations', status.capability.operations.join(', ')]);
+        rows.push(['Path prefixes', status.capability.pathPrefixes.join(', ') || '(all)']);
+        rows.push(['Expires', formatTime(status.capability.expires)]);
+      }
+      context.output.table(['Field', 'Value'], rows);
+    }));
+}
+
+function registerCapabilityCommands(program: Command, runtime: Runtime): void {
+  const capability = program.command('capability').description('Mint and revoke scoped capability tokens');
+
+  capability.command('create')
+    .option('-o, --operation <operation>', 'grant read, write, exec, or admin (repeatable)', collectOption, [])
+    .option('-p, --path <prefix>', 'restrict to a remote path prefix (repeatable)', collectOption, [])
+    .option('--expires <duration>', 'validity duration such as 1h or 30m', '1h')
+    .description('Mint a capability token; requires root or admin access')
+    .action(async (options, command) => perform(runtime, command, async (context) => {
+      const minted = await context.client().createCapability({
+        operations: normalizeOperations(options.operation),
+        pathPrefixes: options.path,
+        expiresInSeconds: durationSeconds(options.expires),
+      });
+      if (context.output.json) {
+        context.output.value(minted);
+        return;
+      }
+      context.output.success(`Created capability ${minted.id}`, minted);
+      // The only place the CLI prints a token: the freshly minted capability, once.
+      context.output.value(minted.token);
+    }));
+
+  capability.command('revoke')
+    .argument('<id>')
+    .description('Revoke a capability by id; requires root or admin access')
+    .action(async (id, _options, command) => perform(runtime, command, async (context) => {
+      await context.client().revokeCapability(id);
+      context.output.success(`Revoked capability ${id}`, { id });
     }));
 }
 
@@ -621,6 +1338,25 @@ function parseSize(value: string): number {
   return result;
 }
 
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function normalizeOperations(values: string[]): Operation[] {
+  if (values.length === 0) throw new ConfigError('Provide at least one --operation (read, write, exec, admin)');
+  const allowed: Operation[] = ['read', 'write', 'exec', 'admin'];
+  for (const value of values) {
+    if (!(allowed as string[]).includes(value)) throw new ConfigError(`Unknown operation: ${value}`);
+  }
+  return [...new Set(values)] as Operation[];
+}
+
+function durationSeconds(value: string): number {
+  const seconds = Math.ceil(parseDuration(value) / 1000);
+  if (seconds <= 0) throw new ConfigError(`Invalid duration: ${value}`);
+  return seconds;
+}
+
 function parseDuration(value: string): number {
   const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m)?$/i.exec(value.trim());
   if (!match) throw new ConfigError(`Invalid duration: ${value}`);
@@ -668,6 +1404,17 @@ async function execWithRetry(
   }
 }
 
+/** Update a transfer spinner concisely; a no-op when no spinner is active (JSON/quiet/non-TTY). */
+function updateTransfer(
+  spinner: ReturnType<typeof ora> | null,
+  label: string,
+  progress: TransferProgress,
+): void {
+  if (!spinner) return;
+  const percent = progress.total === 0 ? 100 : Math.floor((progress.transferred / progress.total) * 100);
+  spinner.text = `${label} ${percent}%`;
+}
+
 function createSpinner(context: CommandContext, text: string): ReturnType<typeof ora> | null {
   const stream = context.output.stderr as NodeJS.WriteStream;
   if (context.shellMode || context.output.json || context.output.quiet || !stream.isTTY) return null;
@@ -689,16 +1436,25 @@ async function readStdin(stdin: NodeJS.ReadableStream): Promise<string> {
   return result;
 }
 
-async function confirmDestroy(context: CommandContext): Promise<boolean> {
+/**
+ * Prompt for a yes/no confirmation, sharing the same TTY safety across every
+ * destructive command: without a TTY it refuses rather than hang, directing the
+ * caller to --force. Shell mode disallows prompting entirely (checked by callers).
+ */
+async function confirmAction(context: CommandContext, prompt: string): Promise<boolean> {
   const input = context.stdin as NodeJS.ReadStream;
   if (!input.isTTY) throw new ConfigError('Refusing to prompt without a TTY; use --force');
   const readline = createInterface({ input, output: context.output.stderr as NodeJS.WriteStream });
   try {
-    const answer = await readline.question(`Destroy the Container for ${context.volume}? Volume data will persist. [y/N] `);
+    const answer = await readline.question(`${prompt} [y/N] `);
     return /^y(es)?$/i.test(answer.trim());
   } finally {
     readline.close();
   }
+}
+
+function confirmDestroy(context: CommandContext): Promise<boolean> {
+  return confirmAction(context, `Destroy the Container for ${context.volume}? Volume data will persist.`);
 }
 
 async function requiredInput(

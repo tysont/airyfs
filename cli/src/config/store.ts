@@ -6,7 +6,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, posix } from 'node:path';
 import lockfile from 'proper-lockfile';
-import { CONFIG_VERSION, emptyConfig, type AiryFSConfig } from './types.js';
+import { CONFIG_VERSION, SUPPORTED_CONFIG_VERSIONS, emptyConfig, type AiryFSConfig } from './types.js';
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -75,7 +75,7 @@ export class ConfigStore {
 }
 
 function validateConfig(value: unknown): AiryFSConfig {
-  if (!isRecord(value) || value.version !== CONFIG_VERSION) {
+  if (!isRecord(value) || !(SUPPORTED_CONFIG_VERSIONS as readonly unknown[]).includes(value.version)) {
     throw new ConfigError(`Unsupported AiryFS config version in config.json`);
   }
   if (!isRecord(value.sessions)) {
@@ -95,6 +95,7 @@ function validateConfig(value: unknown): AiryFSConfig {
       || typeof session.cwd !== 'string'
       || !session.cwd.startsWith('/')
       || posix.resolve('/', session.cwd) !== session.cwd
+      || (session.token !== undefined && (typeof session.token !== 'string' || !session.token))
       || !isValidTimestamp(session.createdAt)
       || !isValidTimestamp(session.updatedAt)) {
       throw new ConfigError(`Invalid session "${name}" in config.json`);
@@ -103,6 +104,8 @@ function validateConfig(value: unknown): AiryFSConfig {
   if (typeof value.currentSession === 'string' && !Object.hasOwn(value.sessions, value.currentSession)) {
     throw new ConfigError(`Current session "${value.currentSession}" does not exist in config.json`);
   }
+  // Migrate older-but-supported layouts forward in memory; the next write persists version 3.
+  value.version = CONFIG_VERSION;
   return value as unknown as AiryFSConfig;
 }
 

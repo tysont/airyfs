@@ -1,6 +1,11 @@
 // ABOUTME: AgentFS schema initialization for DO SQLite.
 // ABOUTME: Creates all tables from AgentFS SPEC v0.4 and seeds root inode + config.
 
+import { initSnapshotSchema, SNAPSHOT_TABLES } from './snapshots';
+import { initUploadSchema, UPLOAD_TABLES } from './uploads';
+import { initJobSchema, JOB_TABLES } from './jobs';
+import { initChangeFeedSchema, CHANGE_FEED_TABLES } from './change-feed';
+
 // Minimal interface matching the subset of SqlStorage that initSchema needs.
 // DO SqlStorage satisfies this; tests can provide a lightweight adapter.
 export interface SqlExec {
@@ -125,6 +130,13 @@ const DDL_STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_fs_open_inode_expires ON fs_open_inode(expires_at)`,
 
+  // Revoked capability tokens, checked on every capability-authenticated request.
+  // Additive and per-volume; the root credential is never represented here.
+  `CREATE TABLE IF NOT EXISTS capability_revocations (
+    id TEXT PRIMARY KEY,
+    revoked_at INTEGER NOT NULL DEFAULT (unixepoch())
+  )`,
+
   // Deleting an inode is the single authoritative point at which its chunks,
   // symlink target, and any residual leases are removed together.
   `CREATE TRIGGER IF NOT EXISTS trg_fs_inode_delete_cleanup
@@ -144,7 +156,9 @@ const SEED_STATEMENTS = [
     VALUES (1, 16877, 1, 0, 0, 0, unixepoch(), unixepoch(), unixepoch())`,
 ];
 
-// All table names that initSchema creates, for verification.
+// All table names that initSchema creates, for verification and db diagnostics.
+// The additive snapshot tables are owned by snapshots.ts and appended here so a
+// single list drives row-count introspection.
 export const SCHEMA_TABLES = [
   'fs_config',
   'fs_inode',
@@ -158,6 +172,11 @@ export const SCHEMA_TABLES = [
   'tool_calls',
   'fs_mutation_journal',
   'fs_open_inode',
+  'capability_revocations',
+  ...UPLOAD_TABLES,
+  ...SNAPSHOT_TABLES,
+  ...JOB_TABLES,
+  ...CHANGE_FEED_TABLES,
 ] as const;
 
 /**
@@ -173,6 +192,21 @@ export function initSchema(sql: SqlExec, transactionSync?: TransactionSync): voi
     migrateInodeColumns(sql);
     migrateWhiteouts(sql);
     migrateToolCalls(sql);
+
+    // Additive snapshot metadata + payload tables. Raw snapshot SQL is isolated
+    // in snapshots.ts; initialization stays idempotent alongside the core DDL.
+    initSnapshotSchema(sql);
+
+    // Additive resumable-upload session table, owned by uploads.ts.
+    initUploadSchema(sql);
+
+    // Additive durable job queue + log tables, owned by jobs.ts.
+    initJobSchema(sql);
+
+    // Additive filesystem change-feed tables + capture triggers, owned by
+    // change-feed.ts. Installed after the core DDL so the fs_dentry/fs_inode
+    // tables the triggers reference already exist.
+    initChangeFeedSchema(sql);
 
     for (const stmt of SEED_STATEMENTS) {
       sql.exec(stmt);
