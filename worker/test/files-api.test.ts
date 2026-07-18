@@ -67,6 +67,7 @@ describe('filesystem HTTP API', () => {
     expect(parseV1Route('/v1/volumes/vol/exec/pty')).toEqual({ volume: 'vol', resource: 'exec', path: '/pty' });
     expect(parseV1Route('/v1/volumes/vol/exec/pty-ticket')).toEqual({ volume: 'vol', resource: 'exec', path: '/pty-ticket' });
     expect(parseV1Route('/v1/volumes/vol/services/web/proxy/a')).toEqual({ volume: 'vol', resource: 'services', path: '/web/proxy/a' });
+    expect(parseV1Route('/v1/volumes/source/forks')).toEqual({ volume: 'source', resource: 'forks', path: '/' });
     expect(parseV1Route('/fs/read')).toBeNull();
     expect(() => parseV1Route('/v1/volumes/test/unknown')).toThrow(HttpError);
     expect(() => parseV1Route('/v1/volumes/test/usage/extra')).toThrow(HttpError);

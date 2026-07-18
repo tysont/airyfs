@@ -181,6 +181,16 @@ describe('snapshot clone', () => {
   });
 });
 
+describe('volume fork', () => {
+  it('forks the live volume into an empty target', async () => {
+    const result = await invoke(['volume', 'fork', 'working-copy']);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('Forked volume vol to working-copy');
+    const fork = requests.find((r) => r.method === 'POST' && r.path === '/v1/volumes/vol/forks');
+    expect(JSON.parse(fork?.body || '{}')).toEqual({ targetVolume: 'working-copy' });
+  });
+});
+
 async function invoke(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
@@ -202,6 +212,9 @@ async function invoke(args: string[]): Promise<{ code: number; stdout: string; s
 
 async function route(request: IncomingMessage, response: ServerResponse, url: URL, body: string): Promise<void> {
   const base = '/v1/volumes/vol/snapshots';
+  if (request.method === 'POST' && url.pathname === '/v1/volumes/vol/forks') {
+    return json(response, 201, { files: 2, directories: 3, symlinks: 1, bytes: 17 });
+  }
   if (request.method === 'POST' && url.pathname === base) {
     const parsed = JSON.parse(body || '{}') as { name?: string; note?: string };
     const name = parsed.name ?? 'snap-20260101-000000-abcdef';

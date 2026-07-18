@@ -489,6 +489,7 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `POST` | `/v1/volumes/V/snapshots/ID/restore` | Restore a snapshot and recycle the Container |
 | `POST` | `/v1/volumes/V/snapshots/ID/clone` | Clone into another volume; root access required |
 | `DELETE` | `/v1/volumes/V/snapshots/ID` | Delete snapshot metadata and payload |
+| `POST` | `/v1/volumes/V/forks` | Fork the live filesystem into an empty target volume; root access required |
 | `GET` | `/v1/volumes/V/jobs?status=running` | List durable jobs, optionally by status |
 | `POST` | `/v1/volumes/V/jobs` | Submit an idempotent durable job |
 | `GET` | `/v1/volumes/V/jobs/ID` | Return durable job state and terminal result |
@@ -549,6 +550,8 @@ Scheduled jobs use five-field UTC cron expressions or `@hourly`, `@daily`, `@wee
 Server-side search does not start the Container. `airy find /src --name config` uses a transactionally maintained FTS5 trigram index for basename substring lookup, including files written through FUSE. `airy glob '**/*.test.ts' /src` and `airy grep needle /src --ignore-case` traverse AgentFS directly. Grep skips binary files and files over 10 MiB, scans at most 100 MiB per request, and returns line/column metadata. Traversal modes cap work at 100,000 entries; every mode caps results at 1,000.
 
 `airy tree /src --depth 3` renders a structured server-side walk without starting the Container. The API returns path, depth, type, and logical size for up to 100,000 entries, with explicit truncation metadata.
+
+`airy volume fork working-copy` streams a point-in-time-consistent copy of the live filesystem into an empty target volume. The fork preserves the source chunk size, refuses to overwrite existing target files, and becomes fully independent after creation. Cross-volume forks require root authentication or an auth-disabled deployment.
 
 `airy volume quota --bytes 10g --inodes 100000` configures persistent logical-byte and inode limits. Use `unlimited` to clear either limit. SQLite triggers enforce quotas for direct HTTP writes and Container/FUSE writes at the shared filesystem boundary; rejected HTTP writes return `507 ENOSPC`. `airy usage` reports logical usage, configured limits, remaining capacity, physical SQLite size, and Container/FUSE health.
 

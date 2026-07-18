@@ -14,8 +14,10 @@ if (!endpoint) throw new Error('AIRYFS_URL is required');
 const suffix = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const volume = `features-${suffix}`;
 const cloneVolume = `features-clone-${suffix}`;
+const forkVolume = `features-fork-${suffix}`;
 const client = new AiryFSClient(endpoint, volume);
 const clone = new AiryFSClient(endpoint, cloneVolume);
+const fork = new AiryFSClient(endpoint, forkVolume);
 let passed = 0;
 
 try {
@@ -39,6 +41,8 @@ try {
   equal(await client.readFileText('/src/main.txt'), 'one', 'snapshot restore');
   await client.cloneSnapshot(snapshot.id, cloneVolume);
   equal(await clone.readFileText('/src/main.txt'), 'one', 'snapshot clone');
+  await client.forkVolume(forkVolume);
+  equal(await fork.readFileText('/src/main.txt'), 'one', 'live volume fork');
 
   const largeBytes = new Uint8Array(1024 * 1024 + 3);
   crypto.getRandomValues(largeBytes.subarray(0, 65_536));

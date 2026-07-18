@@ -567,6 +567,14 @@ export class AiryFSClient {
     });
   }
 
+  async forkVolume(targetVolume: string): Promise<TreeSummary> {
+    return this.json<TreeSummary>(`${this.volumeBase}/forks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetVolume }),
+    });
+  }
+
   async deleteSnapshot(id: string): Promise<SnapshotInfo> {
     return this.json<SnapshotInfo>(`${this.volumeBase}/snapshots/${encodeURIComponent(id)}`, {
       method: 'DELETE',

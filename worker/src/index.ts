@@ -780,6 +780,26 @@ export class AiryFS extends Container<Env> {
     });
   }
 
+  /** Stream a consistent live-volume copy into a new, empty target volume. */
+  async forkVolume(targetVolume: string): Promise<TreeSummary> {
+    if (typeof targetVolume !== 'string' || targetVolume.trim() === '') {
+      throw new HttpError(400, 'INVALID_ARGUMENT', 'Missing target volume');
+    }
+    if (this.env.AiryFS.idFromName(targetVolume).equals(this.ctx.id)) {
+      throw new HttpError(409, 'FORK_SELF', 'Fork target volume must differ from the source volume');
+    }
+    const source = this.filesystem();
+    const stream = await this.exportTreeStream('/');
+    return getContainer<AiryFS>(this.env.AiryFS, targetVolume)
+      .importForkStream(stream, source.getChunkSize());
+  }
+
+  /** Trusted target-side fork import. Existing filesystem contents are never replaced. */
+  async importForkStream(stream: ReadableStream<Uint8Array>, chunkSize: number): Promise<TreeSummary> {
+    this.createVolume(chunkSize);
+    return this.importTreeStream('/', stream, { replace: false, allowRoot: true });
+  }
+
   // ---------------------------------------------------------------------------
   // Durable job queue (trusted RPC surface; HTTP routing enforces auth separately)
   // ---------------------------------------------------------------------------
@@ -2031,6 +2051,21 @@ export class AiryFS extends Container<Env> {
           return await this.handleSnapshots(request, url, v1Route, identity);
         }
 
+        if (v1Route.resource === 'forks') {
+          if (v1Route.path !== '/') throw new HttpError(404, 'INVALID_ROUTE', 'Forks do not accept a path suffix');
+          if (request.method !== 'POST') {
+            throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'POST' });
+          }
+          if (identity.kind === 'capability') {
+            throw new HttpError(403, 'FORBIDDEN', 'Only root or auth-disabled callers may fork across volumes');
+          }
+          const body = await readJsonObject(request);
+          if (typeof body.targetVolume !== 'string' || body.targetVolume.trim() === '') {
+            throw new HttpError(400, 'INVALID_ARGUMENT', 'Missing "targetVolume" string');
+          }
+          return Response.json(await this.forkVolume(body.targetVolume), { status: 201 });
+        }
+
         if (v1Route.resource === 'uploads') {
           return await this.handleUploads(request, v1Route);
         }
@@ -2264,6 +2299,8 @@ async function requiredAccess(
     switch (route.resource) {
       case 'volume':
         return { operation: method === 'GET' ? 'read' : 'write', paths: ['/'] };
+      case 'forks':
+        return { operation: 'admin', paths: ['/'] };
       case 'files':
         return {
           operation: method === 'GET' || method === 'HEAD' ? 'read' : 'write',

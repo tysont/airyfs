@@ -1643,6 +1643,17 @@ function registerVolumeCommands(program: Command, runtime: Runtime): void {
       context.output.value(await context.client().getVolume());
     }));
 
+  volume.command('fork')
+    .argument('<target-volume>')
+    .description('Create an independent point-in-time copy in an empty target volume')
+    .action(async (targetVolume, _options, command) => perform(runtime, command, async (context) => {
+      const summary = await context.client().forkVolume(targetVolume);
+      context.output.success(
+        `Forked volume ${context.volume} to ${targetVolume}`,
+        { sourceVolume: context.volume, targetVolume, ...summary },
+      );
+    }));
+
   volume.command('quota')
     .option('--bytes <size>', 'logical byte limit, or unlimited')
     .option('--inodes <count>', 'inode limit, or unlimited')
