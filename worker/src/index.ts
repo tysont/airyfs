@@ -140,6 +140,8 @@ import { search as searchVolume } from './search';
 import { readTree } from './tree';
 import { listTrash, moveToTrash, purgeTrash, restoreTrash, undoTrash } from './trash';
 import { handleWebDav, parseWebDavDestination } from './webdav';
+import { consumePtyTicket, createPtyTicket } from './pty-tickets';
+import { relayPty } from './pty-relay';
 
 interface Env {
   AiryFS: DurableObjectNamespace<AiryFS>;
@@ -410,6 +412,29 @@ export class AiryFS extends Container<Env> {
       );
     } catch {
       // Container gone or unreachable; the command is already not running.
+    }
+  }
+
+  private async execPty(): Promise<Response> {
+    if (this.activeExec || this.destroyPromise) {
+      throw new HttpError(503, 'EXEC_BUSY', 'Another command or Container lifecycle operation is already running');
+    }
+    const execution = Symbol('exec-pty');
+    this.activeExec = execution;
+    try {
+      await this.ensureContainer();
+      const socket = this.ctx.container!.getTcpPort(4001).connect('0.0.0.0:4001') as WorkerSocket;
+      await socket.opened;
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      this.ctx.waitUntil(relayPty(server, socket).finally(() => {
+        if (this.activeExec === execution) this.activeExec = null;
+      }));
+      return new Response(null, { status: 101, webSocket: client } as ResponseInit & { webSocket: WebSocket });
+    } catch (error) {
+      if (this.activeExec === execution) this.activeExec = null;
+      throw error;
     }
   }
 
@@ -1834,7 +1859,16 @@ export class AiryFS extends Container<Env> {
       }
 
       const routeVolume = v1Route?.volume ?? url.searchParams.get('volume') ?? '';
-      const identity = await this.authorize(request, url, v1Route, routeVolume);
+      const ptyUpgrade = v1Route?.resource === 'exec' && v1Route.path === '/pty';
+      if (ptyUpgrade && this.env.AIRYFS_AUTH_SECRET) {
+        const ticket = url.searchParams.get('ticket') ?? '';
+        if (!ticket || !consumePtyTicket(this.ctx.storage.sql, ticket)) {
+          throw new HttpError(401, 'INVALID_PTY_TICKET', 'A valid single-use PTY ticket is required');
+        }
+      }
+      const identity = ptyUpgrade
+        ? { kind: 'disabled' } as Identity
+        : await this.authorize(request, url, v1Route, routeVolume);
 
       if (v1Route) {
         if (v1Route.resource === 'capabilities') {
@@ -2006,6 +2040,18 @@ export class AiryFS extends Container<Env> {
         }
 
         if (v1Route.resource === 'exec') {
+          if (v1Route.path === '/pty-ticket') {
+            if (request.method !== 'POST') {
+              throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'POST' });
+            }
+            return Response.json(createPtyTicket(this.ctx.storage.sql), { status: 201 });
+          }
+          if (v1Route.path === '/pty') {
+            if (request.method !== 'GET' || request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+              throw new HttpError(426, 'UPGRADE_REQUIRED', 'PTY execution requires a WebSocket upgrade', { Upgrade: 'websocket' });
+            }
+            return this.execPty();
+          }
           if (request.method !== 'POST') {
             throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'POST' });
           }

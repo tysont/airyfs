@@ -143,9 +143,9 @@ export function parseV1Route(pathname: string): V1Route | null {
   if (resource === 'usage' && parts.length > 5) {
     throw new HttpError(404, 'INVALID_ROUTE', `${resource} does not accept a path suffix`);
   }
-  // exec accepts no suffix (run) or exactly `cancel` (terminate a streaming run).
-  if (resource === 'exec' && parts.length > 5 && !(parts.length === 6 && parts[5] === 'cancel')) {
-    throw new HttpError(404, 'INVALID_ROUTE', 'exec only accepts the "cancel" suffix');
+  // exec accepts no suffix (run), cancellation, PTY tickets, or a PTY upgrade.
+  if (resource === 'exec' && parts.length > 5 && !(parts.length === 6 && ['cancel', 'pty', 'pty-ticket'].includes(parts[5]))) {
+    throw new HttpError(404, 'INVALID_ROUTE', 'Invalid exec route suffix');
   }
 
   return {
