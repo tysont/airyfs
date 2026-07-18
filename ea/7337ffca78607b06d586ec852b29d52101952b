@@ -1,0 +1,47 @@
+cli/package.json
+  s_e381e485077b84::t_797ec484158ec1 7-8
+cli/test/auth-commands.test.ts
+  s_e381e485077b84::t_0752bdded06e1b 90-135,216-224
+cli/test/commands.int.test.ts
+  s_e381e485077b84::t_bf9438680e3022 93-147,438,443-449
+cli/test/deploy-commands.test.ts
+  s_e381e485077b84::t_e12c558024df94 1-52
+install.sh
+  s_e75ddacbc6cd54::t_9a14b7ee4fe517 1-12
+scripts/install.mjs
+  s_e381e485077b84::t_b9dbc397f62a10 1-82
+scripts/install.test.mjs
+  s_e381e485077b84::t_14b32c1742d67e 1-34
+scripts/provision.test.mjs
+  s_e381e485077b84::t_a62e572310e68b 1-33
+worker/src/auth.ts
+  s_e381e485077b84::t_306fd65848521c 60-66,69-81,166,173-180,202-206,210-257,332-363
+worker/src/schema.ts
+  s_e381e485077b84::t_7e3f5f33f5bebb 140-166,203-204
+worker/test/auth.test.ts
+  s_e381e485077b84::t_38e25c5a84ee41 10,13,17-18,192-218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ea7337ffca78607b06d586ec852b29d52101952b",
+  "prompts": {},
+  "sessions": {
+    "s_e381e485077b84": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08aa0daacffejmkJ8qy2F936Tn",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
