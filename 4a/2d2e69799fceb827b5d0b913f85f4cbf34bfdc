@@ -1,0 +1,29 @@
+sdk/src/client.ts
+  s_e381e485077b84::t_0d6be399b15a3d 222-225
+sdk/src/index.ts
+  s_e381e485077b84::t_2adf1dde147cf7 8
+sdk/src/pty.ts
+  s_e381e485077b84::t_8d1a5348d46d27 1-91
+sdk/src/types.ts
+  s_e381e485077b84::t_27832ef7aac577 188-197
+sdk/test/client.test.ts
+  s_e381e485077b84::t_6ffe33c965867f 72
+sdk/test/pty.test.ts
+  s_e381e485077b84::t_2af4e092cc8d42 1-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4a2d2e69799fceb827b5d0b913f85f4cbf34bfdc",
+  "prompts": {},
+  "sessions": {
+    "s_e381e485077b84": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08aa0daacffejmkJ8qy2F936Tn",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
