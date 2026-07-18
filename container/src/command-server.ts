@@ -5,6 +5,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { exec, spawn, type ChildProcess } from 'child_process';
 import { mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
+import { createExecutionSlot, type ExecutionSlot } from './execution-slot.js';
+import { createPtyServer, PTY_PORT } from './pty-server.js';
 
 const PORT = 4000;
 const MOUNT_POINT = '/volume';
@@ -26,12 +28,6 @@ const SIGNAL_EXIT_CODES: Record<string, number> = {
 };
 
 /** A single in-flight command; buffered and streaming execution share this one slot. */
-interface ActiveCommand {
-  id: string;
-  /** Send SIGTERM to the command, escalating to SIGKILL after a short grace. */
-  terminate: () => void;
-}
-
 /** Terminal and incremental events emitted by the streaming exec endpoint. */
 type ExecEvent =
   | { type: 'start'; id: string }
@@ -73,13 +69,12 @@ function jsonResponse(res: ServerResponse, status: number, value: unknown, heade
  * Build the command server without listening. The caller decides when (and
  * whether) to bind a port, which keeps the module importable from tests.
  */
-export function createCommandServer(): Server {
+export function createCommandServer(slot: ExecutionSlot = createExecutionSlot()): Server {
   let cwd = '/tmp';
   let bridgeStarted = false;
   let fuseProcess: ChildProcess | null = null;
   let fuseExitCode: number | null = null;
   // Exactly one command runs at a time across buffered and streaming endpoints.
-  let active: ActiveCommand | null = null;
 
   /** Check whether the FUSE daemon is alive. Returns error message if dead. */
   function fuseDaemonError(): string | null {
@@ -90,7 +85,7 @@ export function createCommandServer(): Server {
 
   /** Reject a request when a command is already running, matching /exec semantics. */
   function rejectIfBusy(res: ServerResponse): boolean {
-    if (active) {
+    if (slot.active) {
       jsonResponse(res, 503, { error: 'Another command is already running' }, { 'Retry-After': '1' });
       return true;
     }
@@ -134,7 +129,7 @@ export function createCommandServer(): Server {
       }, (error, stdout, stderr) => {
         // Only clear the slot if this command still owns it; a late callback must
         // never release a slot a newer command has taken.
-        if (active === execution) active = null;
+        if (slot.active === execution) slot.active = null;
         jsonResponse(res, 200, {
           exitCode: error ? ((error as { code?: number }).code ?? 1) : 0,
           stdout: stdout || '',
@@ -142,11 +137,11 @@ export function createCommandServer(): Server {
         });
       });
 
-      const execution: ActiveCommand = {
+      const execution = {
         id: `buffered-${Date.now()}`,
         terminate: () => { try { child.kill('SIGTERM'); } catch { /* already gone */ } },
       };
-      active = execution;
+      slot.active = execution;
     })();
   }
 
@@ -223,7 +218,7 @@ export function createCommandServer(): Server {
         // If termination started, leave the unref'ed escalation timer alive so
         // descendants that ignored SIGTERM are still killed after the shell exits.
         res.off('close', onResponseClose);
-        if (active === execution) active = null;
+        if (slot.active === execution) slot.active = null;
       };
 
       function onResponseClose(): void {
@@ -232,8 +227,8 @@ export function createCommandServer(): Server {
         if (!res.writableEnded) terminate();
       }
 
-      const execution: ActiveCommand = { id, terminate };
-      active = execution;
+      const execution = { id, terminate };
+      slot.active = execution;
       res.on('close', onResponseClose);
 
       res.writeHead(200, {
@@ -292,8 +287,8 @@ export function createCommandServer(): Server {
       }
       // Only cancel the command that still owns the slot. A stale id for a command
       // that already finished must never terminate a newer command.
-      const canceled = active !== null && active.id === id;
-      if (canceled) active!.terminate();
+      const canceled = slot.active !== null && slot.active.id === id;
+      if (canceled) slot.active!.terminate();
       jsonResponse(res, 200, { ok: true, canceled });
     })();
   }
@@ -398,5 +393,8 @@ export function createCommandServer(): Server {
 
 // Start listening only when executed directly, never when imported by a test.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  createCommandServer().listen(PORT, '0.0.0.0');
+  const slot = createExecutionSlot();
+  const server = createCommandServer(slot);
+  server.listen(PORT, '0.0.0.0');
+  createPtyServer(slot, () => MOUNT_POINT).listen(PTY_PORT, '0.0.0.0');
 }
