@@ -143,6 +143,7 @@ import { handleWebDav, parseWebDavDestination } from './webdav';
 import { consumePtyTicket, createPtyTicket } from './pty-tickets';
 import { relayPty } from './pty-relay';
 import { createService, deleteService, listServices, readService, setServiceEnabled, type ServiceRecord } from './services';
+import { handleS3Request, parseS3Route } from './s3';
 
 interface Env {
   AiryFS: DurableObjectNamespace<AiryFS>;
@@ -1937,6 +1938,18 @@ export class AiryFS extends Container<Env> {
       if (url.pathname.startsWith('/p/')) {
         return await this.handlePublicService(url, request);
       }
+      const s3Route = parseS3Route(url.pathname);
+      if (s3Route) {
+        return handleS3Request({
+          request,
+          route: s3Route,
+          fs: this.filesystem(),
+          access: this.access,
+          authSecret: this.env.AIRYFS_AUTH_SECRET,
+          onMutation: (paths) => this.recordMutations(this.filesystem(), paths),
+          versionForInode: (ino) => latestFileVersion(this.ctx.storage.sql, ino),
+        });
+      }
 
       const v1Route = parseV1Route(url.pathname);
 
@@ -2518,6 +2531,7 @@ export default {
     let volume: string | null;
     try {
       volume = parsePublicVolume(url.pathname)
+        ?? parseS3Route(url.pathname)?.volume
         ?? parseV1Route(url.pathname)?.volume
         ?? url.searchParams.get('volume');
     } catch (error) {

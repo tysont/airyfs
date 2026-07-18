@@ -402,7 +402,8 @@ export async function writeFileStream(
   fs: FileSystem,
   path: string,
   stream: ReadableStream<Uint8Array> | null,
-  access?: VolumeAccessCoordinator
+  access?: VolumeAccessCoordinator,
+  validateTemp?: (path: string) => Promise<void>
 ): Promise<void> {
   let temp: string | null = null;
 
@@ -445,6 +446,7 @@ export async function writeFileStream(
         reader.releaseLock();
       }
     }
+    await validateTemp?.(temp);
     const release = access ? await access.acquireWrite(path) : () => undefined;
     try {
       await fs.rename(temp, path);

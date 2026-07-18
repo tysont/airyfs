@@ -490,6 +490,7 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `POST` | `/v1/volumes/V/snapshots/ID/clone` | Clone into another volume; root access required |
 | `DELETE` | `/v1/volumes/V/snapshots/ID` | Delete snapshot metadata and payload |
 | `POST` | `/v1/volumes/V/forks` | Fork the live filesystem into an empty target volume; root access required |
+| S3 | `/s3/V[/key]` | Path-style S3 bucket and object operations with SigV4 |
 | `GET` | `/v1/volumes/V/jobs?status=running` | List durable jobs, optionally by status |
 | `POST` | `/v1/volumes/V/jobs` | Submit an idempotent durable job |
 | `GET` | `/v1/volumes/V/jobs/ID` | Return durable job state and terminal result |
@@ -552,6 +553,16 @@ Server-side search does not start the Container. `airy find /src --name config` 
 `airy tree /src --depth 3` renders a structured server-side walk without starting the Container. The API returns path, depth, type, and logical size for up to 100,000 entries, with explicit truncation metadata.
 
 `airy volume fork working-copy` streams a point-in-time-consistent copy of the live filesystem into an empty target volume. The fork preserves the source chunk size, refuses to overwrite existing target files, and becomes fully independent after creation. Cross-volume forks require root authentication or an auth-disabled deployment.
+
+Each volume is also available as a path-style S3 bucket at `/s3/<volume>`. The compatibility surface supports `HeadBucket`, `GetBucketLocation`, `ListObjectsV2`, and single-object `HeadObject`, `GetObject` (including ranges), `PutObject`, and `DeleteObject`. Object keys map directly to unambiguous filesystem paths; trailing slashes, empty segments, and `.`/`..` segments are rejected. `PutObject` creates missing parent directories. Listings are bounded to 100,000 filesystem entries. Multipart uploads, object metadata, ACLs, versioning, and batch deletion are not currently implemented.
+
+Authenticated deployments use SigV4 with access key ID `airyfs`, region `auto`, service `s3`, and `AIRYFS_AUTH_SECRET` as the secret access key. Configure clients with the deployment URL plus `/s3` as their endpoint and force path-style addressing. Auth-disabled local/test deployments may send unsigned requests.
+
+```sh
+AWS_ACCESS_KEY_ID=airyfs \
+AWS_SECRET_ACCESS_KEY="$AIRYFS_AUTH_SECRET" \
+aws --endpoint-url https://airyfs.example.workers.dev/s3 --region auto s3 ls s3://my-volume
+```
 
 `airy volume quota --bytes 10g --inodes 100000` configures persistent logical-byte and inode limits. Use `unlimited` to clear either limit. SQLite triggers enforce quotas for direct HTTP writes and Container/FUSE writes at the shared filesystem boundary; rejected HTTP writes return `507 ENOSPC`. `airy usage` reports logical usage, configured limits, remaining capacity, physical SQLite size, and Container/FUSE health.
 
