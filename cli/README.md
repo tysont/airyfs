@@ -257,6 +257,7 @@ The shell can start without an active session. Its prompt shows `airyfs:no-sessi
 | `context` / `config` | Show the selected session, endpoint, volume, and remote directory |
 | `status` / `doctor` | Check endpoint, Container, FUSE, SQLite, and Hrana status |
 | `usage` | Show raw filesystem and runtime usage |
+| `metrics` | Print per-volume Prometheus text exposition |
 | `perf` | Show Hrana request and SQL statement counters |
 | `db-info` | Show per-table Durable Object SQLite row counts |
 | `destroy [--force]` | Destroy the Container while preserving volume data |

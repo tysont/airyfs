@@ -101,6 +101,14 @@ describe('AiryFSClient', () => {
     expect(fetchMock.mock.calls[0][0].toString()).toBe('https://example.com/perf?volume=vol');
   });
 
+  it('reads Prometheus metrics from the volume resource', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response('airyfs_container_up 1\n'));
+    const client = new AiryFSClient('https://example.com', 'my volume', fetchMock);
+
+    expect(await client.metrics()).toBe('airyfs_container_up 1\n');
+    expect(fetchMock.mock.calls[0][0].toString()).toBe('https://example.com/v1/volumes/my%20volume/metrics');
+  });
+
   it('builds encoded tree URLs and forwards the bearer token', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock, 'tok');

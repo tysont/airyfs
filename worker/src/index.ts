@@ -147,6 +147,7 @@ import { handleS3Request, parseS3Route } from './s3';
 import { executeScopedSql } from './scoped-sql';
 import { VolumeRegistry } from './volume-registry';
 import { handleVolumeRegistryRequest } from './volume-registry-api';
+import { renderPrometheusMetrics, type MetricsSnapshot } from './metrics';
 
 export { VolumeRegistry };
 
@@ -171,6 +172,7 @@ const CONTAINER_EXEC_TIMEOUT_MS = 310_000;
 const DESTROY_TIMEOUT_MS = 10_000;
 const CHANGE_LONG_POLL_MAX_MS = 25_000;
 const CHANGE_LONG_POLL_INTERVAL_MS = 200;
+const METRICS_CACHE_MS = 5_000;
 const LEGACY_VOLUME_PATHS = new Set([
   '/exec', '/destroy', '/fs/write', '/fs/read', '/fs/ls', '/kv/set', '/kv/get', '/perf', '/db-info', '/usage',
 ]);
@@ -212,6 +214,8 @@ export class AiryFS extends Container<Env> {
   private invalidationSocket: WorkerSocket | null = null;
   private hranaServer: HranaServer | null = null;
   private readonly access = new VolumeAccessCoordinator();
+  private metricsCache: { expiresAt: number; text: string } | null = null;
+  private metricsPromise: Promise<string> | null = null;
   private readonly mutations: MutationJournal;
   private registeredVolume: string | null = null;
 
@@ -994,11 +998,11 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Return logical filesystem usage, physical SQLite size, and runtime health. */
-  async usage(): Promise<Record<string, unknown>> {
+  async usage(): Promise<MetricsSnapshot> {
     const filesystem = await this.filesystem().statfs();
     const quota = readQuota(this.ctx.storage.sql);
     const runtimeState = await this.getState();
-    let container: Record<string, unknown> = {
+    let container: MetricsSnapshot['container'] = {
       state: runtimeState.status,
       hranaConnected: Boolean(this.activeServePromise),
     };
@@ -1038,6 +1042,23 @@ export class AiryFS extends Container<Env> {
         sqlStatements: this.hranaServer?.statementCount ?? 0,
       },
     };
+  }
+
+  /** Render a short-lived scrape snapshot to bound repeated row-count work. */
+  async metrics(): Promise<string> {
+    const now = Date.now();
+    if (this.metricsCache && this.metricsCache.expiresAt > now) return this.metricsCache.text;
+    if (this.metricsPromise) return this.metricsPromise;
+    this.metricsPromise = (async () => {
+      const text = renderPrometheusMetrics(await this.usage(), this.dbInfo());
+      this.metricsCache = { expiresAt: Date.now() + METRICS_CACHE_MS, text };
+      return text;
+    })();
+    try {
+      return await this.metricsPromise;
+    } finally {
+      this.metricsPromise = null;
+    }
   }
 
   /** Destroy the Container. Volume data persists in DO SQLite. */
@@ -2293,6 +2314,12 @@ export class AiryFS extends Container<Env> {
           return Response.json(await this.usage());
         }
 
+        if (v1Route.resource === 'metrics' && request.method === 'GET') {
+          return new Response(await this.metrics(), {
+            headers: { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' },
+          });
+        }
+
         throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET' });
       }
 
@@ -2453,6 +2480,7 @@ async function requiredAccess(
       case 'webhooks':
         return { operation: 'admin', paths: [] };
       case 'usage':
+      case 'metrics':
         return { operation: 'read', paths: ['/'] };
       case 'quota':
         return method === 'GET'

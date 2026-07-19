@@ -85,7 +85,7 @@ AiryFS is not optimized for workloads dominated by thousands of sequential metad
 | Lifecycle | Single-flight startup, FUSE readiness checks, failed-mount cleanup, TCP reconnects, and explicit Container destruction |
 | Concurrency | Path-scoped direct-access locks, a volume-wide lock for FUSE SQL mutations, and journal-driven FUSE cache invalidation |
 | Protocol | Hrana pipeline and cursor transport, batches and conditions, stored SQL, sequences, typed values, and PRAGMA compatibility |
-| Observability | Logical filesystem usage, SQLite size, per-table row counts, Container/FUSE health, and Hrana request counters |
+| Observability | Prometheus exposition for logical filesystem usage, SQLite/table size, Container/FUSE health, and current Hrana session counters |
 | Schema management | Atomic, idempotent initialization plus migrations for supported older AgentFS table layouts |
 | Additional state | A simple key-value table and AgentFS tool-call tables in the same DO SQLite database |
 | Application SQL | Scoped single-statement SQLite over user-owned `app_*` tables and indexes, isolated from AiryFS internals |
@@ -444,6 +444,8 @@ AiryFS implements the Hrana operations used by the AgentFS libSQL client. It is 
 
 Each active `HranaServer` records pipeline and statement counts for `/usage` and `/perf`. These are in-memory counters for the current Hrana server session, not cumulative billing or lifetime metrics. They reset when the connection or Durable Object restarts.
 
+`/v1/volumes/V/metrics` exposes the same per-volume state in Prometheus text format, including filesystem and quota gauges, physical SQLite size, Container/FUSE/Hrana health, current-session Hrana counts, and bounded `table` row-count labels. Scrape snapshots are cached for five seconds to limit repeated row-count work. Metrics do not fan out through the deployment registry or add writes to filesystem hot paths.
+
 ### Framing, Ordering, And Failure Handling
 
 TCP does not preserve application message boundaries. `FrameBuffer` handles partial headers, partial payloads, and multiple frames delivered in one chunk. Each bridge channel admits at most 16 requests, assigns local request IDs, serializes socket writes with backpressure, and resolves the bounded Hrana pipeline in FIFO order. Request IDs are returned in `X-AiryFS-Request-ID` and never alter the Hrana wire payload.
@@ -532,6 +534,7 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `GET` | `/s/V/path` | Public, unauthenticated static-site serving with MIME, index, and SPA fallback |
 | `GET` | `/d/V/ID` | Public, unauthenticated share-link download |
 | `GET` | `/v1/volumes/V/usage` | Return filesystem, SQLite, Container, and Hrana usage |
+| `GET` | `/v1/volumes/V/metrics` | Return per-volume Prometheus text exposition; read access required |
 
 Filesystem failures return structured JSON with stable POSIX-style codes and appropriate HTTP statuses.
 

@@ -2065,6 +2065,12 @@ function registerDiagnosticCommands(program: Command, runtime: Runtime): void {
       context.output.value(await context.client().perf());
     }));
 
+  program.command('metrics')
+    .description('Print per-volume Prometheus metrics')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      context.output.text(await context.client().metrics());
+    }));
+
   program.command('db-info')
     .description('Show row counts for Durable Object SQLite tables')
     .action(async (_options, command) => perform(runtime, command, async (context) => {

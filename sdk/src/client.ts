@@ -431,6 +431,10 @@ export class AiryFSClient {
     return this.json<UsageInfo>(`${this.volumeBase}/usage`);
   }
 
+  async metrics(): Promise<string> {
+    return (await this.request(`${this.volumeBase}/metrics`)).text();
+  }
+
   perf(): Promise<PerfInfo> {
     return this.legacyJson<PerfInfo>('/perf');
   }

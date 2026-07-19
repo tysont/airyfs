@@ -102,6 +102,7 @@ describe('AiryFSClient', () => {
     await client.createCapability({ operations: ['read'], pathPrefixes: ['/a'], expiresInSeconds: 60 });
     await client.revokeCapability('cap id');
     await client.usage();
+    await client.metrics();
     await client.quota();
     await client.setQuota({ bytes: 1024, inodes: null });
     await client.perf();
@@ -125,6 +126,7 @@ describe('AiryFSClient', () => {
     expect(requests.some((request) => request.url.endsWith('/v1/volumes?limit=1000') && request.method === 'GET')).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/sql') && request.method === 'POST')).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/perf?volume=my+volume'))).toBe(true);
+    expect(requests.some((request) => request.url.endsWith('/v1/volumes/my%20volume/metrics'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/kv/set?volume=my+volume&key=a+b'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/services/dev%20server/start') && request.method === 'POST')).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/services/dev%20server/logs?after=4&generation=gen'))).toBe(true);
