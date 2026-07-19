@@ -28,6 +28,7 @@ describe('AiryFSClient', () => {
       if (url.includes('/trees/') && method === 'GET') return new Response(new Uint8Array([1, 2]));
       if (url.includes('/operations/readlink')) return Response.json({ target: '../target' });
       if (url.includes('/kv/get')) return new Response('value');
+      if (url.includes('/v1/volumes?')) return Response.json({ volumes: [], nextCursor: null });
       return Response.json({
         target: '../target',
         events: [], cursor: 0, latest: 0, oldest: 1, gap: false,
@@ -41,6 +42,7 @@ describe('AiryFSClient', () => {
     });
 
     await client.getVolume();
+    await client.listVolumes();
     await client.createVolume(262144);
     await client.listDirectory('/a b');
     await client.tree('/a b', { depth: 2, limit: 10 });
@@ -119,6 +121,7 @@ describe('AiryFSClient', () => {
     expect(requests.some((request) => request.url.includes('/changes/a%20b?since=4&limit=20&wait=100'))).toBe(true);
     expect(requests.some((request) => request.url.includes('/snapshots/snap%20id/diff?against=other'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/forks') && request.method === 'POST')).toBe(true);
+    expect(requests.some((request) => request.url.endsWith('/v1/volumes?limit=1000') && request.method === 'GET')).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/sql') && request.method === 'POST')).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/perf?volume=my+volume'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/kv/set?volume=my+volume&key=a+b'))).toBe(true);

@@ -37,6 +37,14 @@ export type ExecEvent =
 export interface VolumeInfo {
   chunkSize: number;
 }
+export interface VolumeRecord extends VolumeInfo {
+  name: string;
+  createdAt: number;
+}
+export interface VolumePage {
+  volumes: VolumeRecord[];
+  nextCursor: string | null;
+}
 
 export interface QuotaInfo {
   bytes: number | null;

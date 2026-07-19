@@ -47,6 +47,8 @@ import type {
   UploadStatus,
   UsageInfo,
   VolumeInfo,
+  VolumeRecord,
+  VolumePage,
   WebhookInfo,
 } from './types.js';
 
@@ -66,6 +68,19 @@ export class AiryFSClient {
 
   async getVolume(): Promise<VolumeInfo> {
     return this.json<VolumeInfo>(this.volumeBase);
+  }
+
+  async listVolumes(): Promise<VolumeRecord[]> {
+    const volumes: VolumeRecord[] = [];
+    let cursor: string | null = null;
+    do {
+      const query = new URLSearchParams({ limit: '1000' });
+      if (cursor) query.set('cursor', cursor);
+      const page = await this.json<VolumePage>(`/v1/volumes?${query}`);
+      volumes.push(...page.volumes);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return volumes;
   }
 
   async quota(): Promise<QuotaInfo> {

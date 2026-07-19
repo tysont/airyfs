@@ -51,12 +51,18 @@ test('targets the native Wrangler environment with immediate Container rollout',
 
 test('pins Worker, Container, binding, and migration identities', () => {
   assert.equal(wrangler.name, 'airyfs');
-  assert.deepEqual(wrangler.migrations, [{ tag: 'v1', new_sqlite_classes: ['AiryFS'] }]);
+  assert.deepEqual(wrangler.migrations, [
+    { tag: 'v1', new_sqlite_classes: ['AiryFS'] },
+    { tag: 'v2', new_sqlite_classes: ['VolumeRegistry'] },
+  ]);
   for (const env of ['int', 'prod']) {
     const config = wrangler.env[env];
     assert.equal(config.containers[0].name, `airyfs-${env}-airyfs`);
     assert.equal(config.containers[0].class_name, 'AiryFS');
-    assert.deepEqual(config.durable_objects.bindings, [{ name: 'AiryFS', class_name: 'AiryFS' }]);
+    assert.deepEqual(config.durable_objects.bindings, [
+      { name: 'AiryFS', class_name: 'AiryFS' },
+      { name: 'VolumeRegistry', class_name: 'VolumeRegistry' },
+    ]);
   }
 });
 

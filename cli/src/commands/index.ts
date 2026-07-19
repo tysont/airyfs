@@ -1633,6 +1633,18 @@ function parseChangeLimit(value: string): number {
 
 function registerVolumeCommands(program: Command, runtime: Runtime): void {
   const volume = program.command('volume').description('Manage the selected volume');
+  volume.command('list')
+    .description('List registered volumes; requires root access when authentication is enabled')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const records = await context.client().listVolumes();
+      if (context.output.json) context.output.value(records);
+      else context.output.table(['Name', 'Chunk size', 'Created'], records.map((record) => [
+        record.name,
+        formatSize(record.chunkSize),
+        formatTime(record.createdAt),
+      ]));
+    }));
+
   volume.command('create')
     .option('--chunk-size <size>', 'immutable chunk size (4k to 1m)', '256k')
     .option('-p, --password [password]', 'set a volume password and log the session in with a scoped token')

@@ -395,6 +395,19 @@ describe('AiryFSClient uploads and checksum', () => {
     expect(result).toMatchObject({ algorithm: 'sha256', checksum: 'c'.repeat(64) });
   });
 
+  it('lists registered volumes from the deployment endpoint', async () => {
+    const first = { name: 'project', chunkSize: 262144, createdAt: 1_700_000_000 };
+    const second = { name: 'scratch', chunkSize: 65536, createdAt: 1_700_000_001 };
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ volumes: [first], nextCursor: 'project' }))
+      .mockResolvedValueOnce(Response.json({ volumes: [second], nextCursor: null }));
+    const client = new AiryFSClient('https://example.com', 'selected', fetchMock);
+
+    expect(await client.listVolumes()).toEqual([first, second]);
+    expect(fetchMock.mock.calls[0][0].toString()).toBe('https://example.com/v1/volumes?limit=1000');
+    expect(fetchMock.mock.calls[1][0].toString()).toBe('https://example.com/v1/volumes?limit=1000&cursor=project');
+  });
+
   it('executes scoped SQL with positional arguments', async () => {
     const result = { columns: ['body'], rows: [['hello']], rowsRead: 1, rowsWritten: 0, truncated: false };
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(result));

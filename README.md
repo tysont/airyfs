@@ -79,7 +79,7 @@ AiryFS is not optimized for workloads dominated by thousands of sequential metad
 | Change feeds | Ordered create, modify, remove, and rename events from both direct API and FUSE writers, with retention-gap detection |
 | Workers RPC | Streams, metadata, mutations, trees, uploads, snapshots, jobs, changes, usage, lifecycle, and exec |
 | TypeScript SDK | Complete typed HTTP client plus watch, job-follow/wait, exec-id, and resumable Blob helpers |
-| CLI | Sessions, remote cwd, smart upload/download plus file and tree transfer, snapshots, jobs, watch, password auth, session export/import, web hosting, one-command deploy, diagnostics, JSON output, and interactive shell |
+| CLI | Sessions, volume listing, remote cwd, smart upload/download plus file and tree transfer, snapshots, jobs, watch, password auth, session export/import, web hosting, one-command deploy, diagnostics, JSON output, and interactive shell |
 | Container execution | Run shell commands with `cwd=/volume`, a five-minute timeout, streaming output, and cancellation |
 | Standard tooling | Git, Python, shell utilities, and other programs included in the Container image |
 | Lifecycle | Single-flight startup, FUSE readiness checks, failed-mount cleanup, TCP reconnects, and explicit Container destruction |
@@ -307,6 +307,7 @@ airy session create work \
   --endpoint https://your-worker.workers.dev \
   --volume project
 airy volume create --chunk-size 256k
+airy volume list
 
 airy mkdir -p /src
 airy upload /tmp/airyfs-main.py /src/main.py
@@ -324,7 +325,7 @@ airy status
 airy shell
 ```
 
-A session stores an endpoint, volume, and remote working directory under `~/.airyfs`. `AIRYFS_SESSION` and `--session` let separate terminals or scripts select different sessions. Volume names are explicit because Durable Object namespaces cannot enumerate names used to derive object IDs.
+A session stores an endpoint, volume, and remote working directory under `~/.airyfs`. `AIRYFS_SESSION` and `--session` let separate terminals or scripts select different sessions. A separate registry Durable Object records names when volumes are first used because Durable Object namespaces cannot enumerate names used to derive object IDs.
 
 Before each arbitrary `exec`, the CLI submits a retry-safe `:` preflight that starts or reconnects the Container. Transient transport and HTTP `502`, `503`, and `504` failures may retry that no-op. The actual user command is submitted at most once after ambiguous failures; it retries only for `EXEC_BUSY`, which confirms that the server did not admit it. HTML gateway failures are normalized into concise CLI errors rather than printed as markup.
 
@@ -459,6 +460,7 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 
 | Method | Path | Behavior |
 |---|---|---|
+| `GET` | `/v1/volumes?cursor=C&limit=100` | List registered volumes by name; root access required when auth is enabled |
 | `PUT` | `/v1/volumes/V` | Explicitly create a volume with optional `{"chunkSize":262144}` |
 | `GET` | `/v1/volumes/V` | Return immutable volume configuration |
 | `PUT` | `/v1/volumes/V/files/path` | Stream and atomically replace a file; parent must exist |
@@ -533,6 +535,8 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 Filesystem failures return structured JSON with stable POSIX-style codes and appropriate HTTP statuses.
 
 Volumes default to 256 KiB chunks. Explicit chunk sizes must be powers of two from 4 KiB through 1 MiB. Existing volumes retain their stored chunk size, and a conflicting size returns `409 CHUNK_SIZE_IMMUTABLE` after filesystem data exists. Any filesystem request implicitly creates an unconfigured volume with the default.
+
+The volume registry is not on the filesystem data path. Each volume publishes its name and chunk size once, then records that registration in its own SQLite database. Ordinary file, S3, site, and execution requests continue routing directly to the volume Durable Object. Existing deployments populate the new registry lazily as volumes are used.
 
 File writes do not create missing parent directories. Create the directory first with `PUT /v1/volumes/V/directories/path`; otherwise the write returns `ENOENT`.
 

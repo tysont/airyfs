@@ -17,6 +17,10 @@
       {
         "name": "AiryFS",
         "class_name": "AiryFS"
+      },
+      {
+        "name": "VolumeRegistry",
+        "class_name": "VolumeRegistry"
       }
     ]
   },
@@ -24,6 +28,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["AiryFS"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["VolumeRegistry"]
     }
   ],
   "env": {
@@ -43,6 +51,10 @@
           {
             "name": "AiryFS",
             "class_name": "AiryFS"
+          },
+          {
+            "name": "VolumeRegistry",
+            "class_name": "VolumeRegistry"
           }
         ]
       }
@@ -63,6 +75,10 @@
           {
             "name": "AiryFS",
             "class_name": "AiryFS"
+          },
+          {
+            "name": "VolumeRegistry",
+            "class_name": "VolumeRegistry"
           }
         ]
       }

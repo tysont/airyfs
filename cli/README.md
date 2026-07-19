@@ -166,6 +166,7 @@ airyfs ls ../tests
 | `service start|stop|delete <name>` | Manage preview service lifecycle |
 | `volume quota` | Show quotas; set with `--bytes`, `--inodes`, or `unlimited` |
 | `volume fork <target-volume>` | Create an independent point-in-time copy in an empty volume |
+| `volume list` | List registered volumes; requires root access when auth is enabled |
 
 `cat` emits raw bytes and therefore cannot be combined with `--json` or `--quiet`. Use `get` for binary files that should not be written directly to the terminal.
 

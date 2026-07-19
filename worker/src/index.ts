@@ -145,9 +145,14 @@ import { relayPty } from './pty-relay';
 import { createService, deleteService, listServices, readService, setServiceEnabled, type ServiceRecord } from './services';
 import { handleS3Request, parseS3Route } from './s3';
 import { executeScopedSql } from './scoped-sql';
+import { VolumeRegistry } from './volume-registry';
+import { handleVolumeRegistryRequest } from './volume-registry-api';
+
+export { VolumeRegistry };
 
 interface Env {
   AiryFS: DurableObjectNamespace<AiryFS>;
+  VolumeRegistry: DurableObjectNamespace<VolumeRegistry>;
   /** When set, HTTP access requires a root or capability bearer credential. */
   AIRYFS_AUTH_SECRET?: string;
   /** When set, `<volume>.<SITES_ZONE>` hostnames serve that volume's published site. */
@@ -166,6 +171,9 @@ const CONTAINER_EXEC_TIMEOUT_MS = 310_000;
 const DESTROY_TIMEOUT_MS = 10_000;
 const CHANGE_LONG_POLL_MAX_MS = 25_000;
 const CHANGE_LONG_POLL_INTERVAL_MS = 200;
+const LEGACY_VOLUME_PATHS = new Set([
+  '/exec', '/destroy', '/fs/write', '/fs/read', '/fs/ls', '/kv/set', '/kv/get', '/perf', '/db-info', '/usage',
+]);
 
 async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();
@@ -205,6 +213,7 @@ export class AiryFS extends Container<Env> {
   private hranaServer: HranaServer | null = null;
   private readonly access = new VolumeAccessCoordinator();
   private readonly mutations: MutationJournal;
+  private registeredVolume: string | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx as never, env);
@@ -285,6 +294,32 @@ export class AiryFS extends Container<Env> {
       }
       throw error;
     }
+  }
+
+  private async ensureVolumeRegistered(volume: string, refresh = false): Promise<void> {
+    if (!refresh && this.registeredVolume === volume) return;
+    const stored = this.ctx.storage.sql.exec(
+      "SELECT value FROM fs_config WHERE key = 'registry_volume_name'",
+    ).toArray()[0]?.value;
+    if (!refresh && stored === volume) {
+      this.registeredVolume = volume;
+      return;
+    }
+
+    await this.env.VolumeRegistry.getByName('global').register(volume, this.filesystem().getChunkSize());
+    this.ctx.storage.sql.exec(
+      `INSERT INTO fs_config(key, value) VALUES ('volume_name', ?), ('registry_volume_name', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      volume,
+      volume,
+    );
+    this.registeredVolume = volume;
+  }
+
+  private async registerSuccessfulVolume(volume: string | null, response: Promise<Response>): Promise<Response> {
+    const result = await response;
+    if (volume && result.status < 400) await this.ensureVolumeRegistered(volume);
+    return result;
   }
 
   override onStop() {
@@ -776,10 +811,17 @@ export class AiryFS extends Container<Env> {
       throw new HttpError(409, 'CLONE_SELF', 'Clone target volume must differ from the source volume');
     }
     const stream = await this.exportSnapshotStream(id);
-    return getContainer<AiryFS>(this.env.AiryFS, targetVolume).importTreeStream('/', stream, {
+    return getContainer<AiryFS>(this.env.AiryFS, targetVolume).importCloneStream(stream, targetVolume);
+  }
+
+  /** Trusted target-side clone import followed by one-time registry publication. */
+  async importCloneStream(stream: ReadableStream<Uint8Array>, volume: string): Promise<TreeSummary> {
+    const summary = await this.importTreeStream('/', stream, {
       replace: true,
       allowRoot: true,
     });
+    await this.ensureVolumeRegistered(volume);
+    return summary;
   }
 
   /** Stream a consistent live-volume copy into a new, empty target volume. */
@@ -793,13 +835,15 @@ export class AiryFS extends Container<Env> {
     const source = this.filesystem();
     const stream = await this.exportTreeStream('/');
     return getContainer<AiryFS>(this.env.AiryFS, targetVolume)
-      .importForkStream(stream, source.getChunkSize());
+      .importForkStream(stream, source.getChunkSize(), targetVolume);
   }
 
   /** Trusted target-side fork import. Existing filesystem contents are never replaced. */
-  async importForkStream(stream: ReadableStream<Uint8Array>, chunkSize: number): Promise<TreeSummary> {
+  async importForkStream(stream: ReadableStream<Uint8Array>, chunkSize: number, volume: string): Promise<TreeSummary> {
     this.createVolume(chunkSize);
-    return this.importTreeStream('/', stream, { replace: false, allowRoot: true });
+    const summary = await this.importTreeStream('/', stream, { replace: false, allowRoot: true });
+    await this.ensureVolumeRegistered(volume);
+    return summary;
   }
 
   // ---------------------------------------------------------------------------
@@ -1928,20 +1972,20 @@ export class AiryFS extends Container<Env> {
     try {
       // Public web hosting is served before any bearer check.
       if (url.pathname === '/s' || url.pathname.startsWith('/s/')) {
-        return await this.handleSiteRequest(url, request);
+        return this.registerSuccessfulVolume(parsePublicVolume(url.pathname), this.handleSiteRequest(url, request));
       }
       if (url.pathname.startsWith('/d/')) {
-        return await this.handleShareRequest(url, request);
+        return this.registerSuccessfulVolume(parsePublicVolume(url.pathname), this.handleShareRequest(url, request));
       }
       if (url.pathname.startsWith('/dav/')) {
-        return await this.handleWebDavRequest(url, request);
+        return this.registerSuccessfulVolume(parsePublicVolume(url.pathname), this.handleWebDavRequest(url, request));
       }
       if (url.pathname.startsWith('/p/')) {
-        return await this.handlePublicService(url, request);
+        return this.registerSuccessfulVolume(parsePublicVolume(url.pathname), this.handlePublicService(url, request));
       }
       const s3Route = parseS3Route(url.pathname);
       if (s3Route) {
-        return handleS3Request({
+        const response = await handleS3Request({
           request,
           route: s3Route,
           fs: this.filesystem(),
@@ -1950,6 +1994,8 @@ export class AiryFS extends Container<Env> {
           onMutation: (paths) => this.recordMutations(this.filesystem(), paths),
           versionForInode: (ino) => latestFileVersion(this.ctx.storage.sql, ino),
         });
+        if (response.status < 400) await this.ensureVolumeRegistered(s3Route.volume);
+        return response;
       }
 
       const v1Route = parseV1Route(url.pathname);
@@ -1976,6 +2022,12 @@ export class AiryFS extends Container<Env> {
         ? { kind: 'disabled' } as Identity
         : await this.authorize(request, url, v1Route, routeVolume);
 
+      if (v1Route && !(v1Route.resource === 'volume' && request.method === 'PUT')) {
+        await this.ensureVolumeRegistered(v1Route.volume);
+      } else if (!v1Route && routeVolume && LEGACY_VOLUME_PATHS.has(url.pathname)) {
+        await this.ensureVolumeRegistered(routeVolume);
+      }
+
       if (v1Route) {
         if (v1Route.resource === 'capabilities') {
           return await this.handleCapabilities(request, v1Route, identity);
@@ -1986,7 +2038,9 @@ export class AiryFS extends Container<Env> {
             return Response.json({ chunkSize: this.filesystem().getChunkSize() });
           }
           if (request.method === 'PUT') {
-            return Response.json(this.createVolume(await readVolumeCreateRequest(request)), { status: 201 });
+            const info = this.createVolume(await readVolumeCreateRequest(request));
+            await this.ensureVolumeRegistered(v1Route.volume, true);
+            return Response.json(info, { status: 201 });
           }
           throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, PUT' });
         }
@@ -2538,6 +2592,14 @@ export default {
       const target = new URL(url);
       target.pathname = `/s/${encodeURIComponent(label)}${url.pathname === '/' ? '' : url.pathname}`;
       return getContainer<AiryFS>(env.AiryFS, label).fetch(new Request(target, request));
+    }
+
+    if (url.pathname === '/v1/volumes' || url.pathname === '/v1/volumes/') {
+      return handleVolumeRegistryRequest(
+        request,
+        env.AIRYFS_AUTH_SECRET,
+        (after, limit) => env.VolumeRegistry.getByName('global').list(after, limit),
+      );
     }
 
     let volume: string | null;

@@ -16,6 +16,14 @@ export interface FileStats {
 
 export interface DirectoryEntry extends FileStats { name: string }
 export interface VolumeInfo { chunkSize: number }
+export interface VolumeRecord extends VolumeInfo {
+  name: string;
+  createdAt: number;
+}
+export interface VolumePage {
+  volumes: VolumeRecord[];
+  nextCursor: string | null;
+}
 export interface QuotaInfo { bytes: number | null; inodes: number | null }
 export interface TrashEntry {
   id: string;
