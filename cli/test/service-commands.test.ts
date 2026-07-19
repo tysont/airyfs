@@ -25,11 +25,26 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', 'http://localhost');
   let body = '';
   for await (const chunk of request) body += chunk.toString();
-  requests.push({ method: request.method || 'GET', path: url.pathname, body });
+  requests.push({ method: request.method || 'GET', path: `${url.pathname}${url.search}`, body });
   if (url.pathname === '/v1/volumes/vol/services' && request.method === 'POST') return json(response, 201, info);
   if (url.pathname === '/v1/volumes/vol/services' && request.method === 'GET') return json(response, 200, [info]);
   if (url.pathname === '/v1/volumes/vol/services/web/start' && request.method === 'POST') return json(response, 200, info);
   if (url.pathname === '/v1/volumes/vol/services/web/stop' && request.method === 'POST') return json(response, 200, { ...info, enabled: false });
+  if (url.pathname === '/v1/volumes/vol/services/web/logs' && request.method === 'GET') {
+    const after = Number(url.searchParams.get('after') ?? 0);
+    const entries = [
+      { seq: 1, stream: 'stdout', data: Buffer.from('ready\n').toString('base64'), timestamp: 1 },
+      { seq: 2, stream: 'stderr', data: Buffer.from('warning\n').toString('base64'), timestamp: 2 },
+    ].filter((entry) => entry.seq > after);
+    return json(response, 200, {
+      entries,
+      next: entries.at(-1)?.seq ?? null,
+      generation: 'gen-1',
+      earliestSeq: 1,
+      reset: false,
+      truncated: false,
+    });
+  }
   if (url.pathname === '/v1/volumes/vol/services/web' && request.method === 'DELETE') return json(response, 200, info);
   json(response, 404, { error: { code: 'NOT_FOUND', message: 'Unhandled request' } });
 });
@@ -69,6 +84,31 @@ describe('service commands', () => {
     expect((await invoke(['service', 'start', 'web'])).code).toBe(0);
     expect((await invoke(['service', 'delete', 'web'])).code).toBe(0);
   });
+
+  it('prints service logs and forwards the cursor', async () => {
+    const result = await invoke(['service', 'logs', 'web', '--after', '0']);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('ready\n');
+    expect(result.stderr).toBe('warning\n');
+    expect(requests.some((request) => request.path.endsWith('/services/web/logs?after=0'))).toBe(true);
+  });
+
+  it('returns structured logs in JSON mode', async () => {
+    const result = await invoke(['--json', 'service', 'logs', 'web']);
+    expect(JSON.parse(result.stdout)).toMatchObject({ next: 2, entries: [{ seq: 1 }, { seq: 2 }] });
+  });
+
+  it('follows with cursor deduplication until interrupted', async () => {
+    const before = requests.filter((request) => request.path.includes('/services/web/logs')).length;
+    const run = invoke(['service', 'logs', 'web', '--follow']);
+    await waitFor(() => requests.filter((request) => request.path.includes('/services/web/logs')).length >= before + 2);
+    process.emit('SIGINT');
+    const result = await run;
+    expect(result.code).toBe(130);
+    expect(result.stdout).toBe('ready\n');
+    expect(result.stderr).toBe('warning\n');
+    expect(requests.some((request) => request.path.endsWith('/services/web/logs?after=2&generation=gen-1'))).toBe(true);
+  });
 });
 
 async function invoke(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -89,4 +129,12 @@ async function invoke(args: string[]): Promise<{ code: number; stdout: string; s
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for service log poll');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }

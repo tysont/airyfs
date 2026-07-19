@@ -164,6 +164,7 @@ airyfs ls ../tests
 | `service create <name> <command...>` | Create a persistent preview; use `--public`, `--cwd`, and `--env` |
 | `service list` | List allocated preview services and desired state |
 | `service start|stop|delete <name>` | Manage preview service lifecycle |
+| `service logs <name> [--follow] [--after N]` | Read ephemeral preview service stdout/stderr |
 | `volume quota` | Show quotas; set with `--bytes`, `--inodes`, or `unlimited` |
 | `volume fork <target-volume>` | Create an independent point-in-time copy in an empty volume |
 | `volume list` | List registered volumes; requires root access when auth is enabled |

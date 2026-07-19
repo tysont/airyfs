@@ -168,6 +168,13 @@ export interface JobLogPage {
   next: number | null;
 }
 
+export interface ServiceLogPage extends JobLogPage {
+  generation: string | null;
+  earliestSeq: number | null;
+  reset: boolean;
+  truncated: boolean;
+}
+
 export interface JobSchedule {
   id: string;
   name: string;

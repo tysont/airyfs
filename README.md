@@ -504,6 +504,7 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `GET` | `/v1/volumes/V/jobs/ID` | Return durable job state and terminal result |
 | `GET` | `/v1/volumes/V/jobs/ID/logs?after=N` | Page persisted binary-safe stdout/stderr |
 | `POST` | `/v1/volumes/V/jobs/ID/cancel` | Cancel queued or running work |
+| `GET` | `/v1/volumes/V/services/NAME/logs?after=N` | Read ephemeral, binary-safe preview service stdout/stderr |
 | `GET` | `/v1/volumes/V/schedules` | List UTC cron schedules |
 | `POST` | `/v1/volumes/V/schedules` | Create an enabled schedule `{"name","cron","command","cwd"}` |
 | `POST` | `/v1/volumes/V/schedules/ID/enable` | Enable and recalculate the next run |
@@ -587,6 +588,8 @@ Volumes are mountable over WebDAV at `/dav/<volume>/`. The dependency-free adapt
 `airy exec --pty <command>` runs interactive terminal applications against the mounted volume. The CLI obtains a 30-second single-use ticket, upgrades to a binary WebSocket, forwards raw terminal input and resize events, and restores local terminal mode on every exit path. PTY sessions share the volume's single execution slot with buffered, streaming, and durable commands.
 
 Preview services persist a command definition in Durable Object SQLite while the process remains disposable Container compute. `airy service create web --public -- node server.js` allocates `$PORT` from 5000–5015, starts independently of foreground exec/PTY work, and publishes at `/p/<volume>/web/`. Enabled services restart lazily after Container sleep or replacement when the next proxy request arrives. Commands must listen on `$PORT`; public exposure is opt-in.
+
+`airy service logs web` reads the Container's bounded stdout/stderr buffer; `--follow` polls until interrupted and `--after` resumes from a sequence cursor. Follow mode detects process generations and reports restarts or ring-buffer gaps instead of silently losing output. Service logs are ephemeral and disappear when the Container is replaced. Reading logs requires `exec` access.
 
 ```sh
 # macOS Finder: Go > Connect to Server

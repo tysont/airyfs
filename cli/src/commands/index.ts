@@ -154,6 +154,65 @@ function registerServiceCommands(program: Command, runtime: Runtime): void {
       const record = await context.client().deleteService(name);
       context.output.success(`Deleted preview service ${name}`, record);
     }));
+
+  service.command('logs')
+    .argument('<name>')
+    .option('--follow', 'poll for new output until interrupted')
+    .option('--after <seq>', 'only show log entries after this seq cursor')
+    .description('Print ephemeral preview service stdout/stderr')
+    .action(async (name, options, command) => perform(runtime, command, async (context) => {
+      const after = options.after === undefined ? undefined : parseCursor(options.after);
+      if (context.output.json && options.follow) throw new ConfigError('--json cannot be combined with --follow');
+      if (context.output.json) {
+        context.output.value(await context.client().getServiceLogs(name, { after }));
+        return;
+      }
+      await printServiceLogs(context, name, after, Boolean(options.follow), runtime);
+    }));
+}
+
+async function printServiceLogs(
+  context: CommandContext,
+  name: string,
+  after: number | undefined,
+  follow: boolean,
+  runtime: Runtime,
+): Promise<void> {
+  const controller = new AbortController();
+  let interrupted = false;
+  const onInterrupt = (): void => { interrupted = true; controller.abort(); };
+  process.once('SIGINT', onInterrupt);
+  let cursor = after;
+  let generation: string | undefined;
+  try {
+    while (true) {
+      const page = await context.client().getServiceLogs(name, {
+        after: cursor,
+        generation,
+        signal: controller.signal,
+      });
+      if (page.reset) {
+        context.output.stderr.write('Preview service restarted; log cursor reset\n');
+        cursor = undefined;
+      }
+      if (page.truncated) {
+        context.output.stderr.write(`Preview service logs truncated before sequence ${page.earliestSeq}\n`);
+      }
+      generation = page.generation ?? undefined;
+      for (const entry of page.entries) {
+        writeJobLogEntry(context, entry);
+        cursor = entry.seq;
+      }
+      if (!follow || controller.signal.aborted) break;
+      await sleep(jobPollIntervalMs(), controller.signal);
+      if (controller.signal.aborted) break;
+    }
+  } catch (error) {
+    if (!interrupted) throw error;
+  } finally {
+    process.removeListener('SIGINT', onInterrupt);
+  }
+  if (interrupted) runtime.exitCode = 130;
 }
 
 function registerSessionCommands(program: Command, runtime: Runtime): void {

@@ -11,6 +11,7 @@ const KILL_GRACE_MS = 2000;
 interface LogEntry { seq: number; stream: 'stdout' | 'stderr'; data: string; timestamp: number; bytes: number }
 interface ServiceProcess {
   name: string;
+  generation: string;
   port: number;
   child: ChildProcess;
   startedAt: number;
@@ -38,8 +39,17 @@ async function handle(request: IncomingMessage, response: ServerResponse, servic
   if (request.method === 'GET' && logMatch) {
     const service = services.get(decodeURIComponent(logMatch[1]));
     if (!service) return json(response, 404, { error: 'Service not found' });
-    const after = Number(url.searchParams.get('after') ?? 0);
-    json(response, 200, { entries: service.logs.filter((entry) => entry.seq > after).map(({ bytes: _, ...entry }) => entry) });
+    const requestedGeneration = url.searchParams.get('generation');
+    const reset = requestedGeneration !== null && requestedGeneration !== service.generation;
+    const after = reset ? 0 : Number(url.searchParams.get('after') ?? 0);
+    const earliestSeq = service.logs[0]?.seq ?? null;
+    json(response, 200, {
+      generation: service.generation,
+      reset,
+      earliestSeq,
+      truncated: !reset && earliestSeq !== null && after < earliestSeq - 1,
+      entries: service.logs.filter((entry) => entry.seq > after).map(({ bytes: _, ...entry }) => entry),
+    });
     return;
   }
   if (request.method === 'POST' && url.pathname === '/services/start') {
@@ -86,7 +96,7 @@ function startService(name: string, command: string, port: number, cwd: string, 
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const service: ServiceProcess = {
-    name, port, child, startedAt: Date.now(), exitCode: null, logs: [], logBytes: 0, nextSeq: 1,
+    name, generation: crypto.randomUUID(), port, child, startedAt: Date.now(), exitCode: null, logs: [], logBytes: 0, nextSeq: 1,
   };
   child.stdout?.on('data', (chunk: Buffer) => appendLog(service, 'stdout', chunk));
   child.stderr?.on('data', (chunk: Buffer) => appendLog(service, 'stderr', chunk));

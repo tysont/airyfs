@@ -93,6 +93,12 @@ export interface Job {
 }
 export interface JobLogEntry { seq: number; stream: 'stdout' | 'stderr'; data: string; timestamp: number }
 export interface JobLogPage { entries: JobLogEntry[]; next: number | null }
+export interface ServiceLogPage extends JobLogPage {
+  generation: string | null;
+  earliestSeq: number | null;
+  reset: boolean;
+  truncated: boolean;
+}
 
 export type ChangeType = 'create' | 'modify' | 'remove' | 'rename';
 export interface ChangeEvent {

@@ -26,6 +26,10 @@ describe('preview service server', () => {
     await waitFor(async () => ((await getJson(base, '/services/web/logs')).entries as unknown[]).length > 0);
     const logs = await getJson(base, '/services/web/logs');
     assert.equal(Buffer.from((logs.entries as Array<{ data: string }>)[0].data, 'base64').toString(), 'port=5000\n');
+    assert.equal(typeof logs.generation, 'string');
+    const reset = await getJson(base, '/services/web/logs?after=99&generation=old');
+    assert.equal(reset.reset, true);
+    assert.equal((reset.entries as unknown[]).length, 1);
     const listed = await getJson(base, '/services') as unknown as Array<{ name: string; running: boolean }>;
     assert.deepEqual(listed.map(({ name, running }) => ({ name, running })), [{ name: 'web', running: true }]);
     assert.equal((await json(base, '/services/stop', { name: 'web' })).status, 200);

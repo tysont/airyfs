@@ -1608,6 +1608,33 @@ export class AiryFS extends Container<Env> {
       }), 4002).catch(() => undefined);
       return Response.json(service);
     }
+    if (segments.length === 2 && segments[1] === 'logs' && request.method === 'GET') {
+      readService(this.ctx.storage.sql, name);
+      const url = new URL(request.url);
+      const after = parseOptionalInteger(url.searchParams.get('after'), 'after') ?? 0;
+      const generation = url.searchParams.get('generation') || null;
+      if (after < 0) throw new HttpError(400, 'INVALID_ARGUMENT', 'after must be non-negative');
+      await this.ensureContainer();
+      const response = await this.containerFetch(
+        new Request(`http://localhost/services/${encodeURIComponent(name)}/logs?${new URLSearchParams({
+          after: String(after),
+          ...(generation ? { generation } : {}),
+        })}`),
+        4002,
+      );
+      if (response.status === 404) {
+        return Response.json({ entries: [], next: null, generation: null, earliestSeq: null, reset: generation !== null, truncated: false });
+      }
+      if (!response.ok) throw new HttpError(503, 'SERVICE_LOGS_UNAVAILABLE', await response.text());
+      const page = await response.json<{
+        entries: Array<{ seq: number; stream: 'stdout' | 'stderr'; data: string; timestamp: number }>;
+        generation: string;
+        earliestSeq: number | null;
+        reset: boolean;
+        truncated: boolean;
+      }>();
+      return Response.json({ ...page, next: page.entries.at(-1)?.seq ?? null });
+    }
     if (segments[1] === 'proxy') {
       const path = `/${segments.slice(2).map(decodeURIComponent).join('/')}`;
       return this.proxyService(readService(this.ctx.storage.sql, name), path, request);
@@ -2435,9 +2462,13 @@ async function requiredAccess(
         return method === 'GET'
           ? { operation: 'read', paths: ['/'] }
           : { operation: 'admin', paths: [] };
-      case 'services':
-        if (route.path.includes('/proxy')) return { operation: 'exec', paths: ['/'] };
+      case 'services': {
+        const segments = route.path.split('/').filter(Boolean);
+        if (segments[1] === 'proxy' || (segments.length === 2 && segments[1] === 'logs')) {
+          return { operation: 'exec', paths: ['/'] };
+        }
         return method === 'GET' ? { operation: 'read', paths: ['/'] } : { operation: 'admin', paths: [] };
+      }
       case 'capabilities':
         return method === 'GET'
           ? { operation: null, paths: [] }

@@ -26,6 +26,7 @@ import type {
   SnapshotDiffEntry,
   SnapshotInfo,
   ServiceRecord,
+  ServiceLogPage,
   CreateServiceInput,
   SqlResult,
   SqlValue,
@@ -248,6 +249,19 @@ export class AiryFSClient {
 
   getService(name: string): Promise<ServiceRecord> {
     return this.json<ServiceRecord>(`${this.volumeBase}/services/${encodeURIComponent(name)}`);
+  }
+
+  getServiceLogs(
+    name: string,
+    options: { after?: number; generation?: string; signal?: AbortSignal } = {},
+  ): Promise<ServiceLogPage> {
+    const query = new URLSearchParams();
+    if (options.after !== undefined) query.set('after', String(options.after));
+    if (options.generation) query.set('generation', options.generation);
+    const suffix = query.size > 0 ? `?${query}` : '';
+    return this.json<ServiceLogPage>(`${this.volumeBase}/services/${encodeURIComponent(name)}/logs${suffix}`, {
+      signal: options.signal,
+    });
   }
 
   createService(input: CreateServiceInput): Promise<ServiceRecord> {

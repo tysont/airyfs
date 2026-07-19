@@ -74,6 +74,7 @@ describe('AiryFSClient', () => {
     await client.createPtyTicket();
     await client.listServices();
     await client.getService('dev server');
+    await client.getServiceLogs('dev server', { after: 4, generation: 'gen' });
     await client.createService({ name: 'dev', command: 'npm start', public: true });
     await client.startService('dev server');
     await client.stopService('dev server');
@@ -126,6 +127,7 @@ describe('AiryFSClient', () => {
     expect(requests.some((request) => request.url.endsWith('/perf?volume=my+volume'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/kv/set?volume=my+volume&key=a+b'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/services/dev%20server/start') && request.method === 'POST')).toBe(true);
+    expect(requests.some((request) => request.url.endsWith('/services/dev%20server/logs?after=4&generation=gen'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/services/dev%20server') && request.method === 'DELETE')).toBe(true);
   });
 
