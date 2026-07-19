@@ -2059,6 +2059,27 @@ function registerDiagnosticCommands(program: Command, runtime: Runtime): void {
       context.output.value(await context.client().usage());
     }));
 
+  program.command('usage-history')
+    .description('Show recent per-volume usage samples')
+    .option('--before <timestamp>', 'show samples before this Unix timestamp')
+    .option('--limit <count>', 'maximum samples to return', '288')
+    .action(async (options, command) => perform(runtime, command, async (context) => {
+      const before = options.before === undefined ? undefined : parseCursor(options.before, '--before');
+      const limit = parseChangeLimit(options.limit);
+      const page = await context.client().usageHistory({ before, limit });
+      if (context.output.json) context.output.value(page);
+      else context.output.table(['Sampled', 'Files', 'Filesystem', 'SQLite', 'Byte quota', 'Inode quota'],
+        page.samples.map((sample) => [
+          new Date(sample.sampledAt * 1000).toLocaleString(),
+          sample.inodes,
+          formatSize(sample.bytesUsed),
+          formatSize(sample.sqliteBytes),
+          sample.quotaBytes === null ? '-' : formatSize(sample.quotaBytes),
+          sample.quotaInodes ?? '-',
+        ]));
+      if (!context.output.json && page.next !== null) context.output.text(`Next cursor: ${page.next}\n`);
+    }));
+
   program.command('perf')
     .description('Show Hrana request and SQL statement counters')
     .action(async (_options, command) => perform(runtime, command, async (context) => {

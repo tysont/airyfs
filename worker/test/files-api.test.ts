@@ -70,10 +70,12 @@ describe('filesystem HTTP API', () => {
     expect(parseV1Route('/v1/volumes/source/forks')).toEqual({ volume: 'source', resource: 'forks', path: '/' });
     expect(parseV1Route('/v1/volumes/vol/sql')).toEqual({ volume: 'vol', resource: 'sql', path: '/' });
     expect(parseV1Route('/v1/volumes/vol/metrics')).toEqual({ volume: 'vol', resource: 'metrics', path: '/' });
+    expect(parseV1Route('/v1/volumes/vol/usage-history')).toEqual({ volume: 'vol', resource: 'usage-history', path: '/' });
     expect(parseV1Route('/fs/read')).toBeNull();
     expect(() => parseV1Route('/v1/volumes/test/unknown')).toThrow(HttpError);
     expect(() => parseV1Route('/v1/volumes/test/usage/extra')).toThrow(HttpError);
     expect(() => parseV1Route('/v1/volumes/test/metrics/extra')).toThrow(HttpError);
+    expect(() => parseV1Route('/v1/volumes/test/usage-history/extra')).toThrow(HttpError);
   });
 
   it('streams arbitrary binary content without UTF-8 conversion', async () => {

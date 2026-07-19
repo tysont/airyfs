@@ -85,7 +85,7 @@ AiryFS is not optimized for workloads dominated by thousands of sequential metad
 | Lifecycle | Single-flight startup, FUSE readiness checks, failed-mount cleanup, TCP reconnects, and explicit Container destruction |
 | Concurrency | Path-scoped direct-access locks, a volume-wide lock for FUSE SQL mutations, and journal-driven FUSE cache invalidation |
 | Protocol | Hrana pipeline and cursor transport, batches and conditions, stored SQL, sequences, typed values, and PRAGMA compatibility |
-| Observability | Prometheus exposition for logical filesystem usage, SQLite/table size, Container/FUSE health, and current Hrana session counters |
+| Observability | Prometheus exposition plus bounded per-volume filesystem, quota, and SQLite usage history |
 | Schema management | Atomic, idempotent initialization plus migrations for supported older AgentFS table layouts |
 | Additional state | A simple key-value table and AgentFS tool-call tables in the same DO SQLite database |
 | Application SQL | Scoped single-statement SQLite over user-owned `app_*` tables and indexes, isolated from AiryFS internals |
@@ -534,6 +534,7 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `GET` | `/s/V/path` | Public, unauthenticated static-site serving with MIME, index, and SPA fallback |
 | `GET` | `/d/V/ID` | Public, unauthenticated share-link download |
 | `GET` | `/v1/volumes/V/usage` | Return filesystem, SQLite, Container, and Hrana usage |
+| `GET` | `/v1/volumes/V/usage-history` | Return newest-first five-minute usage samples with `before`/`limit` pagination |
 | `GET` | `/v1/volumes/V/metrics` | Return per-volume Prometheus text exposition; read access required |
 
 Filesystem failures return structured JSON with stable POSIX-style codes and appropriate HTTP statuses.
@@ -672,6 +673,8 @@ The change feed uses SQLite triggers on AgentFS inode and dentry tables, so it o
 
 `GET /db-info?volume=V` returns the row count for every AiryFS and AgentFS schema table. `GET /perf?volume=V` returns the current Hrana session counters alone. The Container's internal `/health` endpoint reports `bridgeStarted`, `fuseMounted`, `fuseExitCode`, and `cwd` to the Durable Object lifecycle manager.
 
+Usage reads update at most one `fs_usage_sample` row per five-minute bucket. `GET /v1/volumes/V/usage-history` returns newest-first samples of filesystem bytes, inode count, SQLite size, and configured quotas. AiryFS retains the latest 2,016 samples, equivalent to seven days at continuous five-minute observation; sparse observations can span longer. Sampling is demand-driven: it does not create perpetual Durable Object alarms, wake idle volumes, run on filesystem mutations, or make Prometheus scrapes write state. Requests with a `before` cursor only read stored samples.
+
 ## Data Model
 
 AgentFS stores the filesystem as normalized SQLite tables:
@@ -688,6 +691,7 @@ AgentFS stores the filesystem as normalized SQLite tables:
 - `fs_upload` stores durable resumable-upload identity, target, expected size/checksum, and current offset; partial bytes remain in hidden AgentFS files until publish or abort.
 - `fs_job` and `fs_job_log` store durable execution admission, state, terminal results, cancellation intent, and binary output.
 - `fs_change_sequence` and `fs_change_feed` provide an ordered, bounded mutation feed without changing AgentFS or perturbing `last_insert_rowid()`.
+- `fs_usage_sample` stores the latest 2,016 demand-driven usage observations.
 - `capability_revocations` stores revoked signed capability IDs.
 - `kv_store` stores application key-value records.
 - `tool_calls` stores AgentFS tool-call records.

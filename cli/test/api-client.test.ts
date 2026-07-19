@@ -109,6 +109,16 @@ describe('AiryFSClient', () => {
     expect(fetchMock.mock.calls[0][0].toString()).toBe('https://example.com/v1/volumes/my%20volume/metrics');
   });
 
+  it('reads paginated usage history from the volume resource', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ samples: [], next: null }));
+    const client = new AiryFSClient('https://example.com', 'my volume', fetchMock);
+
+    expect(await client.usageHistory({ before: 42, limit: 10 })).toEqual({ samples: [], next: null });
+    expect(fetchMock.mock.calls[0][0].toString()).toBe(
+      'https://example.com/v1/volumes/my%20volume/usage-history?before=42&limit=10',
+    );
+  });
+
   it('builds encoded tree URLs and forwards the bearer token', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock, 'tok');

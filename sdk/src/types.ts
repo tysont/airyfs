@@ -147,6 +147,18 @@ export interface UsageInfo {
   container: ContainerHealth;
   hrana: PerfInfo;
 }
+export interface UsageSample {
+  sampledAt: number;
+  bytesUsed: number;
+  inodes: number;
+  sqliteBytes: number;
+  quotaBytes: number | null;
+  quotaInodes: number | null;
+}
+export interface UsageHistoryPage {
+  samples: UsageSample[];
+  next: number | null;
+}
 export interface TreeViewEntry {
   path: string;
   name: string;

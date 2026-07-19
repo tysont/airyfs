@@ -47,6 +47,7 @@ import type {
   UploadCompleteResult,
   UploadStatus,
   UsageInfo,
+  UsageHistoryPage,
   VolumeInfo,
   VolumeRecord,
   VolumePage,
@@ -448,6 +449,14 @@ export class AiryFSClient {
 
   async usage(): Promise<UsageInfo> {
     return this.json<UsageInfo>(`${this.volumeBase}/usage`);
+  }
+
+  async usageHistory(options: { before?: number; limit?: number } = {}): Promise<UsageHistoryPage> {
+    const query = new URLSearchParams();
+    if (options.before !== undefined) query.set('before', String(options.before));
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    const suffix = query.size > 0 ? `?${query}` : '';
+    return this.json<UsageHistoryPage>(`${this.volumeBase}/usage-history${suffix}`);
   }
 
   async metrics(): Promise<string> {

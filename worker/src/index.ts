@@ -148,6 +148,7 @@ import { executeScopedSql } from './scoped-sql';
 import { VolumeRegistry } from './volume-registry';
 import { handleVolumeRegistryRequest } from './volume-registry-api';
 import { renderPrometheusMetrics, type MetricsSnapshot } from './metrics';
+import { listUsageHistory, MAX_USAGE_HISTORY_LIMIT, recordUsageSample } from './usage-history';
 
 export { VolumeRegistry };
 
@@ -2311,7 +2312,25 @@ export class AiryFS extends Container<Env> {
         }
 
         if (v1Route.resource === 'usage' && request.method === 'GET') {
-          return Response.json(await this.usage());
+          const usage = await this.usage();
+          recordUsageSample(this.ctx.storage.sql, usage);
+          return Response.json(usage);
+        }
+
+        if (v1Route.resource === 'usage-history' && request.method === 'GET') {
+          const before = parseOptionalInteger(url.searchParams.get('before'), 'before');
+          const limit = parseOptionalInteger(url.searchParams.get('limit'), 'limit');
+          if (before !== undefined && before < 0) {
+            throw new HttpError(400, 'INVALID_ARGUMENT', 'before must be a non-negative integer');
+          }
+          if (limit !== undefined && (limit < 1 || limit > MAX_USAGE_HISTORY_LIMIT)) {
+            throw new HttpError(400, 'INVALID_ARGUMENT', `limit must be between 1 and ${MAX_USAGE_HISTORY_LIMIT}`);
+          }
+          if (before === undefined) {
+            const usage = await this.usage();
+            recordUsageSample(this.ctx.storage.sql, usage);
+          }
+          return Response.json(listUsageHistory(this.ctx.storage.sql, { before, limit }));
         }
 
         if (v1Route.resource === 'metrics' && request.method === 'GET') {
@@ -2391,7 +2410,9 @@ export class AiryFS extends Container<Env> {
       }
 
       if (url.pathname === '/usage') {
-        return Response.json(await this.usage());
+        const usage = await this.usage();
+        recordUsageSample(this.ctx.storage.sql, usage);
+        return Response.json(usage);
       }
 
       return new Response('Not found', { status: 404 });
@@ -2480,6 +2501,7 @@ async function requiredAccess(
       case 'webhooks':
         return { operation: 'admin', paths: [] };
       case 'usage':
+      case 'usage-history':
       case 'metrics':
         return { operation: 'read', paths: ['/'] };
       case 'quota':

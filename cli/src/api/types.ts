@@ -310,6 +310,20 @@ export interface UsageInfo {
   hrana: PerfInfo;
 }
 
+export interface UsageSample {
+  sampledAt: number;
+  bytesUsed: number;
+  inodes: number;
+  sqliteBytes: number;
+  quotaBytes: number | null;
+  quotaInodes: number | null;
+}
+
+export interface UsageHistoryPage {
+  samples: UsageSample[];
+  next: number | null;
+}
+
 export type DatabaseInfo = Record<string, number>;
 
 export type Operation = 'read' | 'write' | 'exec' | 'sql' | 'admin';
