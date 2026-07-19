@@ -1,13 +1,13 @@
 # AiryFS
 
-AiryFS is a durable, programmable filesystem for Cloudflare Durable Objects. It supports four ways to work with the same volume:
+AiryFS is a lightweight cloud filesystem built on Cloudflare Durable Objects. Each volume is a self-contained filesystem in Durable Object SQLite that applications and developers can consume through native AgentFS, web APIs and Workers RPC, the TypeScript SDK, or the CLI:
 
-1. **AgentFS inside the Durable Object:** application code uses the full AgentFS filesystem directly against `ctx.storage.sql`, with optional Linux execution through an attached Container.
+1. **AgentFS inside the Durable Object:** application code uses the full AgentFS filesystem directly against `ctx.storage.sql`.
 2. **Web APIs and Workers RPC:** remote applications stream files, inspect metadata, mutate paths, and run commands.
-3. **The TypeScript SDK:** Node, browser, and Worker applications use a complete typed client plus async iterators for exec, durable jobs, and change feeds.
+3. **The TypeScript SDK:** Node, browser, and Worker applications use a typed client plus async iterators for exec, durable jobs, and change feeds.
 4. **The `airyfs` CLI:** developers use named sessions, familiar filesystem commands, bulk transfers, snapshots, durable jobs, watch feeds, diagnostics, and an interactive shell.
 
-The filesystem is an application primitive owned by the Durable Object, not a disk hidden behind a compute environment. Durable Object methods can create, inspect, transform, and coordinate files through AgentFS. HTTP, RPC, and CLI clients operate on the same state. When a workload needs Git, Python, a compiler, a test runner, or another Linux tool, AiryFS mounts that state at `/volume` in an attached Container and runs the real program there.
+AiryFS combines familiar filesystem operations with utilities for transfers, search, snapshots, quotas, change feeds, automation, public hosting, sharing, WebDAV, S3 clients, scoped SQL, observability, and optional Linux execution. These capabilities operate on the same underlying volume, with availability varying by interface. Applications can use AiryFS as simple cloud file storage, compose its APIs into a larger system, or attach a Container when a workload needs Git, Python, a compiler, a test runner, or another Linux tool.
 
 The Durable Object's SQLite database is the only persistent store for the volume. The complete persistent filesystem, coordination state, snapshots, uploads, jobs, and change history are self-contained within that Durable Object. AiryFS does not copy the filesystem into a Container disk, synchronize a second database, or persist file data in object storage or another service.
 
@@ -21,41 +21,42 @@ Durable Object methods / HTTP / Workers RPC / airyfs CLI
                 only persistent source          data + invalidation
 ```
 
-AgentFS provides the filesystem semantics and native TypeScript interface inside the Durable Object. AiryFS adds coordinated HTTP and RPC access, a universal TypeScript SDK, a local CLI, and on-demand real-process execution. Direct filesystem calls do not start the Container. Execution starts or reconnects the Container, mounts the same SQLite-backed volume through FUSE, and runs with `/volume` as the working directory.
+AgentFS provides the filesystem semantics and native TypeScript interface inside the Durable Object. AiryFS adds coordinated HTTP and RPC access, a universal TypeScript SDK, a local CLI, and a collection of storage, serving, automation, recovery, and execution utilities. Direct filesystem calls do not start the Container. Execution starts or reconnects the Container, mounts the same SQLite-backed volume through FUSE, and runs with `/volume` as the working directory.
 
-## What You Can Build
+## What You Can Do
 
-- **Coding-agent workspaces:** let an agent manage source files through the Durable Object API or TypeScript SDK, invoke a real Container for Git, package managers, compilers, and tests, then return artifacts through the same volume.
-- **Document and data transformation:** accept inputs through a Durable Object method or HTTP upload, inspect and organize them without starting compute, run existing conversion tools in the Container, and stream results back from the same volume.
-- **Repository automation:** maintain durable per-repository state, update individual files directly, and attach disposable compute only for operations such as checkout, diff, lint, build, or test.
-- **Per-user application storage with execution:** give each user or job an isolated filesystem that application code can query and mutate, while retaining the option to run general-purpose software against it.
-- **Durable workflow workspaces:** preserve intermediate files across retries, Container sleep, and Container replacement without adding a separate synchronization or recovery system.
-- **Static sites and artifact sharing:** publish a volume subtree as a public website with index-document and single-page-app routing, or mint expiring links to individual files, served directly from Durable Object SQLite with no Container.
+- **Store and organize application files:** give each user, project, repository, or task an isolated cloud filesystem with directories, links, metadata, quotas, and transactional mutations.
+- **Use files from any runtime:** access the same volume directly inside its Durable Object, over HTTP or Workers RPC, through the TypeScript SDK, or from the `airyfs` CLI.
+- **Move and inspect data:** stream individual files, transfer directory trees, resume large uploads and downloads, search names and content, follow changing files, and query scoped application tables.
+- **Publish and share content:** host static sites, deploy atomically with rollback, serve immutable assets, accept capability-scoped browser uploads, or mint expiring download links without starting compute.
+- **Integrate existing tools:** mount a volume through WebDAV, use S3-compatible clients, or expose it to normal Linux programs at `/volume` through an on-demand Container.
+- **Automate filesystem workflows:** react to ordered change feeds and webhooks, run durable or scheduled jobs, supervise preview services, and preserve intermediate files across retries and Container replacement.
+- **Recover and experiment safely:** use trash and undo, snapshots, diffs, cross-volume clones, and point-in-time forks of live volumes for rollback or isolated work.
+- **Operate volumes:** list registered volumes, inspect health plus durable-job and preview-service logs, export Prometheus metrics, and retain bounded filesystem, quota, and SQLite usage history.
 
 ## Core Properties
 
 - **One volume, one Durable Object:** each volume name maps to an isolated Durable Object and SQLite database.
 - **Self-contained durable state:** the filesystem and all AiryFS coordination records live in that Durable Object; no external storage service is required.
 - **SQLite-only persistence:** all persistent file content, metadata, links, and directory entries live in Durable Object SQLite.
-- **Four product surfaces, one schema:** Durable Object code, web APIs/SDK, and the CLI all read and mutate the same AgentFS tables; Container tools see those tables through FUSE.
+- **Multiple access methods, one schema:** native AgentFS, HTTP, Workers RPC, SDK, and CLI operations share the same tables; Container tools see those tables through FUSE.
 - **Container on demand:** reads, writes, listings, and metadata operations do not require a Container. Container-backed execution, including CLI `warm`, starts or reconnects it.
 - **Container compute scales to zero:** after the configured inactivity timeout, the Container sleeps and its compute charges stop; the next `exec` remounts the durable volume.
 - **Ephemeral compute:** destroying or evicting the Container does not destroy the volume. The next `exec` remounts it from Durable Object SQLite.
-- **Normal tools:** software inside the Container sees `/volume` as a mounted filesystem and can use standard file APIs without a AiryFS-specific SDK.
+- **Normal tools:** software inside the Container sees `/volume` as a mounted filesystem and can use standard file APIs without an AiryFS-specific SDK.
 
 Volume bytes necessarily travel to the Container when a process reads them through FUSE. The distinction is persistence: there is no second durable copy of the volume outside the Durable Object's SQLite storage.
 
 ## When To Use AiryFS
 
-AiryFS fits workloads that need the filesystem to be directly programmable state, externally accessible state, and an execution workspace:
+AiryFS fits workloads that need a lightweight, isolated cloud filesystem with one or more programmable interfaces:
 
-- Durable Object applications that model source trees, documents, generated artifacts, or task state as files and directories.
-- Agent workspaces that use the direct APIs or TypeScript SDK for file operations, then need native tools for execution.
-- Build and transformation jobs that need fast ingestion and retrieval around a smaller amount of Container execution.
-- Per-user, per-repository, or per-task workspaces that need isolation through one Durable Object per volume.
-- Stateful automation where Container compute can disappear but the workspace and intermediate files must remain.
-- Applications that need to inspect, mutate, or serve files through HTTP without paying a Container cold start.
-- Workflows that want one authoritative SQLite-backed namespace rather than a Container filesystem synchronized to another persistent service.
+- Applications that need file and directory semantics rather than an object-only keyspace.
+- Per-user, per-repository, per-project, or per-task storage isolated through one Durable Object per volume.
+- Durable Object applications that want colocated, directly programmable files with remote API, SDK, or CLI access.
+- File transfer, publishing, sharing, automation, recovery, or interoperability workflows that benefit from built-in utilities.
+- Agent, build, and transformation workspaces that need native tools occasionally but should not make compute the owner or gateway for stored files.
+- Systems that want one authoritative SQLite-backed namespace rather than a Container filesystem synchronized to another persistent service.
 
 AiryFS is not optimized for workloads dominated by thousands of sequential metadata operations. Every FUSE syscall crosses the Container-to-DO boundary and executes SQL in the Durable Object. For those workloads, use the direct API to create or transfer files in larger operations, then use `exec` for computation.
 
@@ -71,15 +72,23 @@ AiryFS is not optimized for workloads dominated by thousands of sequential metad
 | Links | Create symbolic links and read link targets |
 | Authentication | Optional root bearer auth, signed/expiring/revocable capabilities scoped by volume/operation/path, and per-volume passwords that mint scoped tokens without the root secret |
 | Web hosting | Opt-in public static-site serving with MIME inference, index documents, and SPA fallback, plus expiring file-share links, served directly from SQLite |
+| Browser uploads | Capability-scoped direct uploads into approved volume paths |
+| Static deployment | Atomic site publication with snapshot-backed rollback and immutable content-addressed assets |
 | Bulk transfer | Transactional streaming directory push/pull using the dependency-free AiryFS archive format |
 | Snapshots | Named full-volume capture, list, exact diff, restore, delete, and cross-volume clone |
 | Large files | Persistent resumable uploads, range-resumed downloads, per-chunk and full-file SHA-256 verification |
 | Execution | Buffered or live NDJSON stdout/stderr, process-group cancellation, and at-most-once command admission |
 | Durable jobs | Idempotent queued commands with persisted status, binary logs, cancellation, orphan recovery, and output limits |
 | Change feeds | Ordered create, modify, remove, and rename events from both direct API and FUSE writers, with retention-gap detection |
+| Automation | Path-filtered webhooks, UTC cron schedules, and durable command execution |
+| Search | Server-side filename FTS, glob matching, content grep, tree views, and directory usage |
+| Recovery | Trash, restore, undo, snapshots, diffs, clones, and live volume forks |
+| Interoperability | WebDAV mounting and path-style S3-compatible access to each volume |
+| Interactive compute | WebSocket PTY sessions and supervised long-running preview services with authenticated proxying and logs |
 | Workers RPC | Streams, metadata, mutations, trees, uploads, snapshots, jobs, changes, usage, lifecycle, and exec |
-| TypeScript SDK | Complete typed HTTP client plus watch, job-follow/wait, exec-id, and resumable Blob helpers |
+| TypeScript SDK | Typed HTTP client for core volume resources plus watch, job-follow/wait, exec-id, and resumable Blob helpers |
 | CLI | Sessions, volume listing, remote cwd, smart upload/download plus file and tree transfer, snapshots, jobs, watch, password auth, session export/import, web hosting, one-command deploy, diagnostics, JSON output, and interactive shell |
+| Volume management | Lazy deployment registry, root-scoped listing, explicit creation, immutable chunk configuration, quotas, and Container lifecycle controls |
 | Container execution | Run shell commands with `cwd=/volume`, a five-minute timeout, streaming output, and cancellation |
 | Standard tooling | Git, Python, shell utilities, and other programs included in the Container image |
 | Lifecycle | Single-flight startup, FUSE readiness checks, failed-mount cleanup, TCP reconnects, and explicit Container destruction |
@@ -129,9 +138,9 @@ AiryFS uses AgentFS in two different runtimes:
 - The vendored AgentFS Cloudflare adapter runs directly inside the Durable Object against `ctx.storage.sql`.
 - The AgentFS Rust SDK and CLI run inside the Container and expose the same database through FUSE.
 
-The AgentFS Cloudflare integration demonstrates direct filesystem access backed by Durable Object SQLite. AiryFS extends that model into a complete service with direct and FUSE data paths exposed through four product surfaces. It adds named volume routing, a resource-oriented HTTP API, Workers RPC methods, the TypeScript SDK, the CLI, streaming and range handling, mutation coordination, schema migration, Container startup and health management, an HTTP-to-TCP bridge, a Hrana server backed by `ctx.storage.sql`, and an on-demand FUSE mount.
+The AgentFS Cloudflare integration demonstrates direct filesystem access backed by Durable Object SQLite. AiryFS extends that model into a complete service with direct and FUSE data paths exposed through multiple product surfaces. It adds named volume routing, a resource-oriented HTTP API, Workers RPC methods, the TypeScript SDK, the CLI, streaming and range handling, mutation coordination, schema migration, Container startup and health management, an HTTP-to-TCP bridge, a Hrana server backed by `ctx.storage.sql`, and an on-demand FUSE mount.
 
-AiryFS is not a replacement for AgentFS. It is the Cloudflare Durable Object and Container architecture around AgentFS that makes both technical data paths and all four product surfaces operate on one persistent database.
+AiryFS is not a replacement for AgentFS. It is the Cloudflare Durable Object and Container architecture around AgentFS that makes both technical data paths and every product surface operate on one persistent database.
 
 ### Why AiryFS Patches AgentFS
 
@@ -170,7 +179,7 @@ No SQLite database file is created in the Container for the mounted volume.
 
 ## Quick Start
 
-Volumes are created on first use, or explicitly with a selected chunk size. Choose the interface that matches where your application runs; all three operate on the same persistent volume.
+Volumes are created on first use, or explicitly with a selected chunk size. Choose the interface that matches where your application runs; all operate on the same persistent volume.
 
 ### 1. Use AgentFS Inside The Durable Object
 
