@@ -1,0 +1,19 @@
+README.md
+  s_9e4b4bb5386909::t_14bacbfd946326 3,5,8-27,30,32,34-37,39,43,49-50,52,54,56,58,60,62,64,68,70,72,81,86-87,90,95,99,125,141,143,145,162,180-191,194,196,198,207,227,229,233-267,280,283-284,287-303,305-307,315-341,345,398,441-442,462,476,480-481,486-487,528,536,552,581,607,625,662,684-691,696,711,715-716,808,862,872,883
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "49c475f3ece69c89f19f147a9380f48bfe7b6fd1",
+  "prompts": {},
+  "sessions": {
+    "s_9e4b4bb5386909": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0863c6cbcffeNK2K8nhrCfYGHT",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
