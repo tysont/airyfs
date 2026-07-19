@@ -168,6 +168,43 @@ describe('commands', () => {
     expect(Buffer.concat(chunks).toString()).toBe('cat-bodyafter-cat');
   });
 
+  it('reads leading lines without starting an exec', async () => {
+    const before = requests.length;
+    const result = await invoke(['head', '-n', '2', '/head.txt']);
+    expect(result).toMatchObject({ code: 0, stdout: 'one\ntwo\n' });
+    expect(requests.slice(before).some((request) => request.path.endsWith('/exec'))).toBe(false);
+  });
+
+  it('dispatches direct metadata, link, usage, and directory primitives', async () => {
+    expect((await invoke(['touch', '/note.txt'])).code).toBe(0);
+    expect((await invoke(['chmod', '640', '/note.txt'])).code).toBe(0);
+    expect((await invoke(['ln', '/note.txt', '/linked.txt'])).code).toBe(0);
+    expect((await invoke(['lstat', '/note.txt'])).code).toBe(0);
+    expect((await invoke(['du', '/'])).stdout).toContain('11\t/');
+    expect((await invoke(['file', '/text.txt'])).stdout).toContain('/text.txt: text');
+    expect((await invoke(['rmdir', '/empty'])).code).toBe(0);
+
+    const operationBodies = requests
+      .filter((request) => request.path.includes('/operations/'))
+      .map((request) => [request.path.split('/').at(-1), JSON.parse(request.body)]);
+    expect(operationBodies).toEqual(expect.arrayContaining([
+      ['touch', { path: '/note.txt' }],
+      ['chmod', { path: '/note.txt', mode: 0o640 }],
+      ['link', { existing: '/note.txt', path: '/linked.txt' }],
+    ]));
+    expect(requests).toContainEqual({ method: 'DELETE', path: '/v1/volumes/vol/directories/empty?permanent=true', body: '' });
+  });
+
+  it('buffers a bounded stdin append into the direct operation', async () => {
+    const result = await invokeOneShot(['append', '/log.bin'], 'more');
+    expect(result.code).toBe(0);
+    expect(requests).toContainEqual({
+      method: 'POST',
+      path: '/v1/volumes/vol/operations/append',
+      body: JSON.stringify({ path: '/log.bin', data: Buffer.from('more').toString('base64') }),
+    });
+  });
+
   it('executes in the session cwd and propagates the remote exit code', async () => {
     const result = await invoke(['exec', '--no-stream', 'git', 'status']);
 
@@ -407,6 +444,19 @@ async function invokeBinary(
   return { code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
 }
 
+async function invokeOneShot(args: string[], stdin = ''): Promise<{ code: number; stdout: string; stderr: string }> {
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  const code = await execute(['node', 'airyfs', '--session', 'test', ...args], {
+    sessions,
+    stdin: Readable.from(stdin),
+    stdout: sink(stdout),
+    stderr: sink(stderr),
+    shellMode: false,
+  });
+  return { code, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() };
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -461,6 +511,30 @@ async function route(
   }
   if (request.method === 'GET' && url.pathname.endsWith('/cat.txt')) {
     response.writeHead(200, { 'Content-Type': 'application/octet-stream' }).end('cat-body');
+    return;
+  }
+  if (request.method === 'HEAD' && url.pathname === '/v1/volumes/vol/files/head.txt') {
+    response.writeHead(200, { 'Content-Length': '14' }).end();
+    return;
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/volumes/vol/files/head.txt') {
+    response.writeHead(206, { 'Content-Length': '14', 'Content-Range': 'bytes 0-13/14' }).end('one\ntwo\nthree\n');
+    return;
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/volumes/vol/files/text.txt') {
+    response.writeHead(206, { 'Content-Type': 'application/octet-stream' }).end('plain text\n');
+    return;
+  }
+  if (request.method === 'POST' && url.pathname.startsWith('/v1/volumes/vol/operations/')) {
+    if (url.pathname.endsWith('/lstat')) {
+      return json(response, 200, { ino: 2, mode: 0o100644, nlink: 1, uid: 0, gid: 0, size: 11, atime: 0, mtime: 0, ctime: 0, type: 'file' });
+    }
+    if (url.pathname.endsWith('/du')) return json(response, 200, { bytes: 11, inodes: 2 });
+    response.writeHead(204).end();
+    return;
+  }
+  if (request.method === 'DELETE' && url.pathname.startsWith('/v1/volumes/vol/directories/')) {
+    response.writeHead(204).end();
     return;
   }
   if (request.method === 'POST' && url.pathname === '/v1/volumes/vol/exec/cancel') {

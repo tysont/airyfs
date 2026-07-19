@@ -16,6 +16,7 @@ import { HranaServer, wrapSqlStorage } from './hrana-server';
 import { MutationJournal } from './mutation-journal';
 import {
   errorResponse,
+  appendFileData,
   fileResponse,
   latestFileVersion,
   handleFilesystemRequest,
@@ -23,13 +24,17 @@ import {
   parseV1Route,
   readCommandRequest,
   readJsonObject,
+  readJsonObjectBounded,
   readVolumeCreateRequest,
   toStatsDto,
   VolumeAccessCoordinator,
   writeFileStream,
   type StatsDto,
+  type DiskUsage,
   type V1Route,
+  MAX_APPEND_JSON_BYTES,
 } from './files-api';
+import { FilesystemPrimitives } from './filesystem-primitives';
 import { encodeTreeStream, type TreeSummary } from './archive';
 import { holdStreamUntilDone } from './exec-stream';
 import { sseToNdjson } from './sse-stream';
@@ -218,11 +223,16 @@ export class AiryFS extends Container<Env> {
   private metricsCache: { expiresAt: number; text: string } | null = null;
   private metricsPromise: Promise<string> | null = null;
   private readonly mutations: MutationJournal;
+  private readonly directFilesystem: FilesystemPrimitives;
   private registeredVolume: string | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx as never, env);
     this.mutations = new MutationJournal(this.ctx.storage.sql);
+    this.directFilesystem = new FilesystemPrimitives(
+      this.ctx.storage.sql,
+      (callback) => this.ctx.storage.transactionSync(callback),
+    );
     this.ctx.blockConcurrencyWhile(async () => {
       initSchema(this.ctx.storage.sql, (callback) => this.ctx.storage.transactionSync(callback));
       await this.scheduleWebhookDelivery();
@@ -519,6 +529,76 @@ export class AiryFS extends Container<Env> {
     const release = await this.access.acquireRead(path);
     try {
       return toStatsDto(await this.filesystem().stat(path));
+    } finally {
+      release();
+    }
+  }
+
+  /** Get metadata for a path without following its final symbolic link. */
+  async lstatPath(path: string): Promise<StatsDto> {
+    path = normalizePath(path);
+    const release = await this.access.acquireRead(path);
+    try {
+      return toStatsDto(await this.filesystem().lstat(path));
+    } finally {
+      release();
+    }
+  }
+
+  /** Create a file if missing or update its access and modification timestamps. */
+  async touchPath(path: string, atime?: number, mtime?: number): Promise<void> {
+    path = normalizePath(path);
+    const fs = this.filesystem();
+    const release = await this.access.acquireWrite(path);
+    try {
+      this.directFilesystem.touch(path, atime, mtime);
+      await this.recordMutations(fs, [path]);
+    } finally {
+      release();
+    }
+  }
+
+  /** Replace a path's permission bits without changing its file type. */
+  async chmodPath(path: string, mode: number): Promise<void> {
+    path = normalizePath(path);
+    const fs = this.filesystem();
+    const release = await this.access.acquireWrite(path);
+    try {
+      this.directFilesystem.chmod(path, mode);
+      await this.recordMutations(fs, [path]);
+    } finally {
+      release();
+    }
+  }
+
+  /** Create a second directory entry for an existing non-directory inode. */
+  async linkPath(existing: string, path: string): Promise<void> {
+    existing = normalizePath(existing);
+    path = normalizePath(path);
+    const fs = this.filesystem();
+    const release = await this.access.acquireWrite([existing, path]);
+    try {
+      this.directFilesystem.link(existing, path);
+      await this.recordMutations(fs, [existing, path]);
+    } finally {
+      release();
+    }
+  }
+
+  /** Append one bounded byte buffer atomically with respect to other direct writes. */
+  async appendFile(path: string, data: Uint8Array): Promise<void> {
+    path = normalizePath(path);
+    const fs = this.filesystem();
+    const changed = await appendFileData(fs, path, data, this.access, () => this.directFilesystem.updateCtime(path));
+    if (changed) await this.recordMutations(fs, [path]);
+  }
+
+  /** Return logical quota bytes and distinct inodes reachable under a path. */
+  async diskUsage(path: string): Promise<DiskUsage> {
+    path = normalizePath(path);
+    const release = await this.access.acquireRead(path);
+    try {
+      return this.directFilesystem.diskUsage(path);
     } finally {
       release();
     }
@@ -2138,7 +2218,8 @@ export class AiryFS extends Container<Env> {
           fs,
           this.access,
           (paths) => this.recordMutations(fs, paths),
-          (ino) => latestFileVersion(this.ctx.storage.sql, ino)
+          (ino) => latestFileVersion(this.ctx.storage.sql, ino),
+          this.directFilesystem,
         );
         if (filesystemResponse) {
           return v1Route.resource === 'browser-uploads'
@@ -2479,7 +2560,10 @@ async function requiredAccess(
         };
       case 'operations':
         return method === 'POST'
-          ? operationAccess(await safeJson(request), route.path.slice(1))
+          ? operationAccess(await safeJson(
+            request,
+            route.path === '/append' ? MAX_APPEND_JSON_BYTES : undefined,
+          ), route.path.slice(1))
           : { operation: 'write', paths: [route.path] };
       case 'snapshots':
         return snapshotAccess(method, route.path);
@@ -2566,6 +2650,8 @@ function operationAccess(body: Record<string, unknown> | null, operation: string
   switch (operation) {
     case 'readlink':
     case 'checksum':
+    case 'lstat':
+    case 'du':
       return { operation: 'read', paths: pick('path') };
     case 'rename':
     case 'copy':
@@ -2573,16 +2659,24 @@ function operationAccess(body: Record<string, unknown> | null, operation: string
     case 'symlink':
       return { operation: 'write', paths: [...pick('path'), ...pick('target')] };
     case 'truncate':
+    case 'touch':
+    case 'chmod':
+    case 'append':
       return { operation: 'write', paths: pick('path') };
+    case 'link':
+      return { operation: 'write', paths: [...pick('existing'), ...pick('path')] };
     default:
       return { operation: 'write', paths: [] };
   }
 }
 
-async function safeJson(request: Request): Promise<Record<string, unknown> | null> {
+async function safeJson(request: Request, limit?: number): Promise<Record<string, unknown> | null> {
   try {
-    return await request.clone().json();
-  } catch {
+    return limit === undefined
+      ? await request.clone().json()
+      : await readJsonObjectBounded(request.clone(), limit);
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 413) throw error;
     return null;
   }
 }

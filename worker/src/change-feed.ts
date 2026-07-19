@@ -183,24 +183,37 @@ const CHANGE_FEED_DDL = [
       ${BUMP_SEQ}
     END`,
 
+  // Recreate this trigger during additive schema initialization so older volumes
+  // gain metadata-change events without a schema-version migration.
+  `DROP TRIGGER IF EXISTS trg_fs_change_modify`,
+
   // modify: AgentFS writes size/mtime together, including same-size rewrites that
-  // happen within one timestamp tick. UPDATE OF observes those writes even when
-  // the resulting values compare equal. A representative hardlink is sufficient.
-  `CREATE TRIGGER IF NOT EXISTS trg_fs_change_modify
-    AFTER UPDATE OF size, mtime ON fs_inode
-    WHEN (NEW.mode & ${S_IFMT}) = ${S_IFREG}
-      AND ${pathExpr('SELECT parent_ino, \'/\' || name FROM fs_dentry WHERE id = (SELECT min(id) FROM fs_dentry WHERE ino = NEW.ino)')} IS NOT NULL
+  // happen within one timestamp tick. Permission changes also count as modifies,
+  // including chmod on directories and symlinks. Parent-directory timestamp
+  // maintenance remains silent. Every hard-link path receives an event so a
+  // path-scoped watcher cannot miss writes made through another alias.
+  `CREATE TRIGGER trg_fs_change_modify
+    AFTER UPDATE OF size, mtime, mode ON fs_inode
+    WHEN ((NEW.mode & ${S_IFMT}) = ${S_IFREG} OR OLD.mode != NEW.mode)
     BEGIN
       INSERT INTO fs_change_feed (seq, type, path, oldPath, ino, timestamp)
-      VALUES (
-        ${NEXT_SEQ},
+      SELECT
+        ${NEXT_SEQ} + row_number() OVER (ORDER BY link.id) - 1,
         'modify',
-        ${pathExpr('SELECT parent_ino, \'/\' || name FROM fs_dentry WHERE id = (SELECT min(id) FROM fs_dentry WHERE ino = NEW.ino)')},
+        ${pathExpr("SELECT link.parent_ino, '/' || link.name")},
         NULL,
         NEW.ino,
         unixepoch()
-      );
-      ${BUMP_SEQ}
+      FROM fs_dentry link
+      WHERE link.ino = NEW.ino
+        AND ${pathExpr("SELECT link.parent_ino, '/' || link.name")} IS NOT NULL;
+      UPDATE fs_change_sequence
+      SET next_seq = next_seq + (
+        SELECT count(*) FROM fs_dentry link
+        WHERE link.ino = NEW.ino
+          AND ${pathExpr("SELECT link.parent_ino, '/' || link.name")} IS NOT NULL
+      )
+      WHERE id = 1;
     END`,
 
   // Bounded retention: keep only the most recent CHANGE_FEED_RETENTION seq values.

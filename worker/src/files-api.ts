@@ -5,9 +5,13 @@ import { Buffer } from 'buffer';
 import type { FileHandle, FileSystem, Stats } from 'agentfs-sdk/cloudflare';
 import { sha256Path } from './checksum';
 import type { SqlExec } from './schema';
+import type { DiskUsage, FilesystemPrimitives } from './filesystem-primitives';
+import { normalizePath } from './auth';
 
 const READ_CHUNK_SIZE = 256 * 1024;
 const WRITE_CHUNK_SIZE = 256 * 1024;
+export const MAX_APPEND_BYTES = 1024 * 1024;
+export const MAX_APPEND_JSON_BYTES = Math.ceil(MAX_APPEND_BYTES * 4 / 3) + 64 * 1024;
 
 export interface StatsDto {
   ino: number;
@@ -21,6 +25,8 @@ export interface StatsDto {
   ctime: number;
   type: 'file' | 'directory' | 'symlink' | 'other';
 }
+
+export type { DiskUsage };
 
 export interface V1Route {
   volume: string;
@@ -196,6 +202,7 @@ export function errorResponse(error: unknown): Response {
     ENOTDIR: 409,
     EINVAL: 400,
     EPERM: 403,
+    ELOOP: 409,
     ENOSPC: 507,
   };
 
@@ -459,10 +466,63 @@ export async function writeFileStream(
   }
 }
 
+export async function appendFileData(
+  fs: FileSystem,
+  path: string,
+  data: Uint8Array,
+  access?: VolumeAccessCoordinator,
+  updateCtime?: () => void,
+): Promise<boolean> {
+  if (data.byteLength > MAX_APPEND_BYTES) {
+    throw new HttpError(413, 'APPEND_TOO_LARGE', `Append exceeds ${MAX_APPEND_BYTES} bytes`);
+  }
+  return withWrite(access, path, async () => {
+    const handle = await fs.open(path);
+    const stats = await handle.fstat();
+    if (!stats.isFile()) throw Object.assign(new Error(`EISDIR: illegal operation on '${path}'`), { code: 'EISDIR', path });
+    if (data.byteLength === 0) return false;
+    await handle.pwrite(stats.size, Buffer.from(data));
+    await handle.fsync();
+    updateCtime?.();
+    return true;
+  });
+}
+
 async function readJson<T>(request: Request): Promise<T> {
   try {
     return await request.json<T>();
   } catch {
+    throw new HttpError(400, 'INVALID_JSON', 'Request body must be valid JSON');
+  }
+}
+
+export async function readJsonObjectBounded(request: Request, limit: number): Promise<Record<string, unknown>> {
+  const declared = Number(request.headers.get('Content-Length'));
+  if (Number.isFinite(declared) && declared > limit) {
+    throw new HttpError(413, 'REQUEST_TOO_LARGE', `Request body exceeds ${limit} bytes`);
+  }
+  if (!request.body) throw new HttpError(400, 'INVALID_JSON', 'Request body must be valid JSON');
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel();
+        throw new HttpError(413, 'REQUEST_TOO_LARGE', `Request body exceeds ${limit} bytes`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), size).toString('utf8')) as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
     throw new HttpError(400, 'INVALID_JSON', 'Request body must be valid JSON');
   }
 }
@@ -528,7 +588,8 @@ export async function handleFilesystemRequest(
   fs: FileSystem,
   access?: VolumeAccessCoordinator,
   onMutation?: (paths: string[]) => Promise<void>,
-  versionForInode?: (ino: number) => number
+  versionForInode?: (ino: number) => number,
+  primitives?: FilesystemPrimitives,
 ): Promise<Response | null> {
   try {
     if (route.resource === 'files') {
@@ -581,7 +642,9 @@ export async function handleFilesystemRequest(
 
     if (route.resource === 'operations' && request.method === 'POST') {
       const operation = route.path.slice(1);
-      const body = await readJson<Record<string, unknown>>(request);
+      const body = operation === 'append'
+        ? await readJsonObjectBounded(request, MAX_APPEND_JSON_BYTES)
+        : await readJson<Record<string, unknown>>(request);
       if (operation === 'rename') {
         const from = requireString(body.from, 'from');
         const to = requireString(body.to, 'to');
@@ -620,6 +683,53 @@ export async function handleFilesystemRequest(
         await onMutation?.([path]);
         return new Response(null, { status: 204 });
       }
+      if (operation === 'lstat') {
+        const path = normalizePath(requireString(body.path, 'path'));
+        return Response.json(toStatsDto(await withRead(access, path, () => fs.lstat(path))));
+      }
+      if (operation === 'touch') {
+        const path = normalizePath(requireString(body.path, 'path'));
+        const atime = body.atime === undefined ? undefined : requireTimestamp(body.atime, 'atime');
+        const mtime = body.mtime === undefined ? undefined : requireTimestamp(body.mtime, 'mtime');
+        await withWrite(access, path, async () => primitivesOrThrow(primitives).touch(path, atime, mtime));
+        await onMutation?.([path]);
+        return new Response(null, { status: 204 });
+      }
+      if (operation === 'chmod') {
+        const path = normalizePath(requireString(body.path, 'path'));
+        const mode = requireNonNegativeInteger(body.mode, 'mode');
+        await withWrite(access, path, async () => primitivesOrThrow(primitives).chmod(path, mode));
+        await onMutation?.([path]);
+        return new Response(null, { status: 204 });
+      }
+      if (operation === 'link') {
+        const existing = normalizePath(requireString(body.existing, 'existing'));
+        const path = normalizePath(requireString(body.path, 'path'));
+        await withWrite(access, [existing, path], async () => primitivesOrThrow(primitives).link(existing, path));
+        await onMutation?.([existing, path]);
+        return new Response(null, { status: 204 });
+      }
+      if (operation === 'append') {
+        const path = normalizePath(requireString(body.path, 'path'));
+        if (typeof body.data !== 'string') throw new HttpError(400, 'INVALID_ARGUMENT', 'Missing "data" base64 string');
+        const encoded = body.data;
+        if (encoded.length > Math.ceil(MAX_APPEND_BYTES * 4 / 3) + 4) {
+          throw new HttpError(413, 'APPEND_TOO_LARGE', `Append exceeds ${MAX_APPEND_BYTES} bytes`);
+        }
+        if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+          throw new HttpError(400, 'INVALID_ARGUMENT', 'data must be canonical base64');
+        }
+        const changed = await appendFileData(
+          fs, path, Buffer.from(encoded, 'base64'), access,
+          () => primitivesOrThrow(primitives).updateCtime(path),
+        );
+        if (changed) await onMutation?.([path]);
+        return new Response(null, { status: 204 });
+      }
+      if (operation === 'du') {
+        const path = normalizePath(requireString(body.path, 'path'));
+        return Response.json(await withRead(access, path, async () => primitivesOrThrow(primitives).diskUsage(path)));
+      }
       throw new HttpError(404, 'UNKNOWN_OPERATION', `Unknown filesystem operation: ${operation}`);
     }
 
@@ -631,4 +741,16 @@ export async function handleFilesystemRequest(
   } catch (error) {
     return errorResponse(error);
   }
+}
+
+function requireTimestamp(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new HttpError(400, 'INVALID_ARGUMENT', `Expected non-negative timestamp "${name}"`);
+  }
+  return value;
+}
+
+function primitivesOrThrow(primitives: FilesystemPrimitives | undefined): FilesystemPrimitives {
+  if (!primitives) throw new Error('Direct filesystem primitives are not configured');
+  return primitives;
 }

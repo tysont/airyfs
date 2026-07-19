@@ -18,6 +18,8 @@ export interface DirectoryEntry extends FileStats {
   name: string;
 }
 
+export interface DiskUsage { bytes: number; inodes: number }
+
 export interface ExecResult {
   exitCode: number;
   stdout: string;

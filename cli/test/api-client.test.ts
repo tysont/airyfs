@@ -92,6 +92,32 @@ describe('AiryFSClient', () => {
     expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ from: '/from', to: '/to' }) });
   });
 
+  it('sends direct filesystem primitive operations without exec', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (url) => {
+      if (url.toString().endsWith('/lstat')) return Response.json({ type: 'file' });
+      if (url.toString().endsWith('/du')) return Response.json({ bytes: 3, inodes: 1 });
+      return new Response(null, { status: 204 });
+    });
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.lstat('/file');
+    await client.touch('/file', { mtime: 42 });
+    await client.chmod('/file', 0o640);
+    await client.link('/file', '/linked');
+    await client.appendFile('/file', Uint8Array.from([0, 255]));
+    await client.diskUsage('/');
+
+    expect(fetchMock.mock.calls.map(([url]) => url.toString())).toEqual([
+      'https://example.com/v1/volumes/vol/operations/lstat',
+      'https://example.com/v1/volumes/vol/operations/touch',
+      'https://example.com/v1/volumes/vol/operations/chmod',
+      'https://example.com/v1/volumes/vol/operations/link',
+      'https://example.com/v1/volumes/vol/operations/append',
+      'https://example.com/v1/volumes/vol/operations/du',
+    ]);
+    expect(fetchMock.mock.calls[4][1]?.body).toBe(JSON.stringify({ path: '/file', data: 'AP8=' }));
+  });
+
   it('adds the volume query parameter for diagnostic routes', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ pipelineRequests: 1, sqlStatements: 2 }));
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock);

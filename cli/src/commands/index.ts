@@ -481,6 +481,23 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       await pipeResponse(response, context.output.stdout, false);
     }));
 
+  program.command('head')
+    .argument('<path>')
+    .option('-n, --lines <count>', 'number of leading lines', Number, 10)
+    .option('-c, --bytes <count>', 'number of leading bytes', Number)
+    .description('Print the beginning of a remote file')
+    .action(async (path, options, command) => perform(runtime, command, async (context) => {
+      if (context.output.json || context.output.quiet) {
+        throw new ConfigError('head emits raw bytes and cannot be combined with --json or --quiet');
+      }
+      const lines = validateTailCount(options.lines, '--lines');
+      const bytes = options.bytes === undefined ? undefined : validateTailCount(options.bytes, '--bytes');
+      if (bytes !== undefined && command.getOptionValueSource('lines') === 'cli') {
+        throw new ConfigError('--lines and --bytes are mutually exclusive');
+      }
+      await writeHead(context, context.path(path), lines, bytes);
+    }));
+
   program.command('tail')
     .argument('<path>')
     .option('-n, --lines <count>', 'number of trailing lines', Number, 10)
@@ -536,6 +553,17 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       context.output.success(`Wrote ${remotePath}`, { remote: remotePath });
     }));
 
+  program.command('append')
+    .argument('<remote>')
+    .description('Append up to 1 MiB from stdin to a remote file')
+    .action(async (remote, _options, command) => perform(runtime, command, async (context) => {
+      if (context.shellMode) throw new ConfigError('`append` cannot consume stdin inside `airyfs shell`');
+      const remotePath = context.path(remote);
+      const data = await readBoundedInput(context.stdin, 1024 * 1024);
+      await context.client().appendFile(remotePath, data);
+      context.output.success(`Appended ${data.byteLength} bytes to ${remotePath}`, { remote: remotePath, bytes: data.byteLength });
+    }));
+
   program.command('mkdir')
     .argument('<path>')
     .option('-p, --parents', 'create missing parent directories')
@@ -555,6 +583,16 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
         await context.client().makeDirectory(target);
       }
       context.output.success(`Created ${target}`, { path: target });
+    }));
+
+  program.command('rmdir')
+    .argument('<path>')
+    .description('Permanently remove an empty remote directory')
+    .action(async (path, _options, command) => perform(runtime, command, async (context) => {
+      const target = context.path(path);
+      if (target === '/') throw new ConfigError('Refusing to remove the volume root');
+      await context.client().removeDirectory(target, false, true);
+      context.output.success(`Removed ${target}`, { path: target });
     }));
 
   program.command('rm')
@@ -628,14 +666,18 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
     }));
 
   program.command('ln')
-    .requiredOption('-s, --symbolic', 'create a symbolic link')
+    .option('-s, --symbolic', 'create a symbolic link instead of a hard link')
     .argument('<target>')
     .argument('<path>')
-    .description('Create a remote symbolic link')
+    .description('Create a remote hard or symbolic link')
     .action(async (target, path, _options, command) => perform(runtime, command, async (context) => {
       const linkPath = context.path(path);
-      await context.client().symlink(target, linkPath);
-      context.output.success(`Linked ${linkPath} to ${target}`, { path: linkPath, target });
+      if (_options.symbolic) {
+        await context.client().symlink(target, linkPath);
+      } else {
+        await context.client().link(context.path(target), linkPath);
+      }
+      context.output.success(`Linked ${linkPath} to ${target}`, { path: linkPath, target, symbolic: Boolean(_options.symbolic) });
     }));
 
   program.command('readlink')
@@ -656,11 +698,62 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       context.output.success(`Truncated ${target} to ${bytes} bytes`, { path: target, size: bytes });
     }));
 
+  program.command('touch')
+    .argument('<path>')
+    .description('Create a remote file or update its timestamps')
+    .action(async (path, _options, command) => perform(runtime, command, async (context) => {
+      const target = context.path(path);
+      await context.client().touch(target);
+      context.output.success(`Touched ${target}`, { path: target });
+    }));
+
+  program.command('chmod')
+    .argument('<mode>', 'octal permission bits, such as 755')
+    .argument('<path>')
+    .description('Change remote path permissions')
+    .action(async (mode, path, _options, command) => perform(runtime, command, async (context) => {
+      const target = context.path(path);
+      const parsed = parseMode(mode);
+      await context.client().chmod(target, parsed);
+      context.output.success(`Changed ${target} to ${mode}`, { path: target, mode: parsed });
+    }));
+
   program.command('stat')
     .argument('<path>')
     .description('Show remote path metadata')
     .action(async (path, _options, command) => perform(runtime, command, async (context) => {
       context.output.value(await statRemote(context, context.path(path)));
+    }));
+
+  program.command('lstat')
+    .argument('<path>')
+    .description('Show remote path metadata without following its final symbolic link')
+    .action(async (path, _options, command) => perform(runtime, command, async (context) => {
+      context.output.value(await context.client().lstat(context.path(path)));
+    }));
+
+  program.command('du')
+    .argument('[path]', 'remote path', '.')
+    .description('Show logical bytes and distinct inodes below a remote path')
+    .action(async (path, _options, command) => perform(runtime, command, async (context) => {
+      const target = context.path(path);
+      const usage = await context.client().diskUsage(target);
+      if (context.output.json) context.output.value({ path: target, ...usage });
+      else context.output.text(`${usage.bytes}\t${target}\n`);
+    }));
+
+  program.command('file')
+    .argument('<path>')
+    .description('Classify a remote path from metadata and leading bytes')
+    .action(async (path, _options, command) => perform(runtime, command, async (context) => {
+      const target = context.path(path);
+      const stats = await context.client().lstat(target);
+      let description: string = stats.type;
+      if (stats.type === 'symlink') description = `symbolic link to ${await context.client().readlink(target)}`;
+      if (stats.type === 'file') description = await describeRemoteFile(context, target, stats.size);
+      const result = { path: target, type: stats.type, description };
+      if (context.output.json) context.output.value(result);
+      else context.output.text(`${target}: ${description}\n`);
     }));
 
   program.command('push')
@@ -737,6 +830,57 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
 function validateTailCount(value: number, option: string): number {
   if (!Number.isSafeInteger(value) || value < 0) throw new ConfigError(`${option} must be a non-negative integer`);
   return value;
+}
+
+async function writeHead(context: CommandContext, path: string, lines: number, bytes?: number): Promise<void> {
+  const size = tailResponseSize(await context.client().headFile(path));
+  if (size === 0 || bytes === 0 || (bytes === undefined && lines === 0)) return;
+  if (bytes !== undefined) {
+    await pipeResponse(await context.client().readFile(path, `bytes=0-${Math.min(bytes, size) - 1}`), context.output.stdout, false);
+    return;
+  }
+  let length = Math.min(size, 64 * 1024);
+  while (true) {
+    const data = await context.client().readFileBytes(path, `bytes=0-${length - 1}`);
+    const end = firstLineEnd(data, lines);
+    if (end !== null || length >= size) {
+      context.output.stdout.write(end === null ? data : data.subarray(0, end));
+      return;
+    }
+    length = Math.min(size, length * 2);
+  }
+}
+
+function firstLineEnd(data: Uint8Array, lines: number): number | null {
+  let remaining = lines;
+  for (let index = 0; index < data.length; index++) {
+    if (data[index] === 10 && --remaining === 0) return index + 1;
+  }
+  return null;
+}
+
+async function readBoundedInput(stream: NodeJS.ReadableStream, limit: number): Promise<Uint8Array> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const value of stream as AsyncIterable<Buffer | string>) {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    size += chunk.byteLength;
+    if (size > limit) throw new ConfigError(`Input exceeds ${limit} bytes`);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function describeRemoteFile(context: CommandContext, path: string, size: number): Promise<string> {
+  if (size === 0) return 'empty';
+  const data = await context.client().readFileBytes(path, `bytes=0-${Math.min(size, 512) - 1}`);
+  if (data.some((byte) => byte === 0)) return 'data';
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(data);
+  } catch {
+    return 'data';
+  }
+  return data.every((byte) => byte === 9 || byte === 10 || byte === 13 || byte >= 32) ? 'text' : 'data';
 }
 
 async function runTail(
@@ -2561,6 +2705,11 @@ function parseSize(value: string): number {
   const result = Number(match[1]) * 1024 ** exponent;
   if (!Number.isSafeInteger(result) || result < 0) throw new ConfigError(`Invalid size: ${value}`);
   return result;
+}
+
+function parseMode(value: string): number {
+  if (!/^[0-7]{1,4}$/.test(value)) throw new ConfigError(`Invalid mode: ${value}`);
+  return Number.parseInt(value, 8);
 }
 
 function collectOption(value: string, previous: string[]): string[] {

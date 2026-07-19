@@ -15,6 +15,7 @@ import type {
   ChecksumResult,
   DatabaseInfo,
   DirectoryEntry,
+  DiskUsage,
   ExecEvent,
   ExecResult,
   Job,
@@ -126,6 +127,10 @@ export class AiryFSClient {
     return this.request(this.resourcePath('files', path), { method: 'HEAD' });
   }
 
+  async readFileBytes(path: string, range?: string): Promise<Uint8Array> {
+    return new Uint8Array(await (await this.readFile(path, range)).arrayBuffer());
+  }
+
   async writeFile(path: string, body: NonNullable<RequestInit['body']>): Promise<void> {
     await this.request(this.resourcePath('files', path), {
       method: 'PUT',
@@ -190,6 +195,30 @@ export class AiryFSClient {
 
   async truncate(path: string, size: number): Promise<void> {
     await this.operation('truncate', { path, size });
+  }
+
+  async lstat(path: string): Promise<import('./types.js').FileStats> {
+    return this.operation('lstat', { path });
+  }
+
+  async touch(path: string, options: { atime?: number; mtime?: number } = {}): Promise<void> {
+    await this.operation('touch', { path, ...options });
+  }
+
+  async chmod(path: string, mode: number): Promise<void> {
+    await this.operation('chmod', { path, mode });
+  }
+
+  async link(existing: string, path: string): Promise<void> {
+    await this.operation('link', { existing, path });
+  }
+
+  async appendFile(path: string, data: Uint8Array): Promise<void> {
+    await this.operation('append', { path, data: Buffer.from(data).toString('base64') });
+  }
+
+  async diskUsage(path: string): Promise<DiskUsage> {
+    return this.operation<DiskUsage>('du', { path });
   }
 
   /** Compute the server-side streaming SHA-256 of a remote file. */

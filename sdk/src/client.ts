@@ -10,6 +10,7 @@ import type {
   ChangeQuery,
   ChecksumResult,
   DatabaseInfo,
+  DiskUsage,
   DirectoryEntry,
   AiryFSClientOptions,
   ExecEvent,
@@ -190,6 +191,30 @@ export class AiryFSClient {
 
   truncate(path: string, size: number): Promise<void> {
     return this.operation('truncate', { path, size });
+  }
+
+  lstat(path: string): Promise<import('./types.js').FileStats> {
+    return this.operation('lstat', { path });
+  }
+
+  touch(path: string, options: { atime?: number; mtime?: number } = {}): Promise<void> {
+    return this.operation('touch', { path, ...options });
+  }
+
+  chmod(path: string, mode: number): Promise<void> {
+    return this.operation('chmod', { path, mode });
+  }
+
+  link(existing: string, path: string): Promise<void> {
+    return this.operation('link', { existing, path });
+  }
+
+  appendFile(path: string, data: Uint8Array): Promise<void> {
+    return this.operation('append', { path, data: encodeBase64(data) });
+  }
+
+  diskUsage(path: string): Promise<DiskUsage> {
+    return this.operation<DiskUsage>('du', { path });
   }
 
   checksum(path: string): Promise<ChecksumResult> {
@@ -532,3 +557,11 @@ export class AiryFSClient {
 }
 
 async function* emptyEvents(): AsyncGenerator<ExecEvent> {}
+
+function encodeBase64(data: Uint8Array): string {
+  let binary = '';
+  for (let offset = 0; offset < data.length; offset += 32_768) {
+    binary += String.fromCharCode(...data.subarray(offset, offset + 32_768));
+  }
+  return btoa(binary);
+}

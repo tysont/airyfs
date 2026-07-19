@@ -135,19 +135,27 @@ airyfs ls ../tests
 |---|---|
 | `ls [path]` | List a directory; use `-l`, `-a`, or global `--json` |
 | `cat <path>` | Stream raw file bytes to stdout |
+| `head <path>` | Print leading lines or bytes with `-n` or `-c` |
 | `get <remote> [local]` | Download a file without overwriting unless `--force` is used |
 | `put <local> [remote]` | Stream a local file into the volume |
 | `download <remote> [local]` | Download a file or (with `-r`) a directory tree, auto-detecting which |
 | `upload <local> [remote]` | Upload a file or (with `-r`) a directory tree, auto-detecting which |
 | `write <remote>` | Stream stdin into a remote file |
+| `append <remote>` | Append up to 1 MiB from stdin without starting the Container |
 | `mkdir [-p] <path>` | Create a directory or parent chain |
+| `rmdir <path>` | Permanently remove an empty directory |
 | `rm [-r] <path>` | Remove a file, link, or directory |
 | `mv <from> <to>` | Move or rename a path |
 | `cp <from> <to>` | Copy a file |
-| `ln -s <target> <path>` | Create a symbolic link |
+| `ln <target> <path>` | Create a true hard link; use `-s` for a symbolic link |
 | `readlink <path>` | Print a symbolic-link target |
 | `truncate <path> <size>` | Resize a file; sizes accept `k`, `m`, and `g` suffixes |
+| `touch <path>` | Create a file or update its timestamps |
+| `chmod <mode> <path>` | Set octal permission bits |
 | `stat <path>` | Show path metadata |
+| `lstat <path>` | Show no-follow path metadata |
+| `du [path]` | Show logical bytes and distinct reachable inodes |
+| `file <path>` | Classify a path from metadata and leading bytes |
 | `asset put <local>` | Hash and publish an immutable SHA-256-addressed asset |
 | `asset get <sha256> [local]` | Download a content-addressed asset |
 | `find [path] --name <text>` | Find names server-side without starting the Container |
@@ -169,7 +177,7 @@ airyfs ls ../tests
 | `volume fork <target-volume>` | Create an independent point-in-time copy in an empty volume |
 | `volume list` | List registered volumes; requires root access when auth is enabled |
 
-`cat` emits raw bytes and therefore cannot be combined with `--json` or `--quiet`. Use `get` for binary files that should not be written directly to the terminal.
+`cat` and `head` emit raw bytes and therefore cannot be combined with `--json` or `--quiet`. Use `get` for binary files that should not be written directly to the terminal. These filesystem commands execute in the Durable Object and do not start the Container.
 
 `upload` and `download` are the ergonomic unified verbs. `upload` inspects the local path and streams a single file (like `put`, with `--resume`) or, with `-r/--recursive`, pushes a directory tree as a transactional archive (like `push`, with `--replace`). `download` inspects the remote path and retrieves a single file (like `get`, with `--resume`) or, with `-r/--recursive`, pulls a directory tree (like `pull`). The lower-level `put`/`get` and `push`/`pull` commands remain available.
 

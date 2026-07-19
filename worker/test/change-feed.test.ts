@@ -117,7 +117,7 @@ describe('change-feed', () => {
     expect(allEvents()).toEqual([]);
   });
 
-  it('resolves one representative path for a hardlinked file modify', () => {
+  it('emits a modify for every path of a hardlinked file', () => {
     mkfile(2, 'one', 1, 0, 0);
     link('two', 1, 2); // second hardlink to ino 2
     const before = latestChangeSeq(sql);
@@ -125,10 +125,10 @@ describe('change-feed', () => {
     db.prepare('UPDATE fs_inode SET size = 3 WHERE ino = 2').run();
 
     const modifies = allEvents().filter((e) => e.seq > before);
-    expect(modifies).toHaveLength(1);
-    expect(modifies[0].type).toBe('modify');
-    expect(['/one', '/two']).toContain(modifies[0].path);
-    expect(modifies[0].ino).toBe(2);
+    expect(modifies.map((event) => [event.type, event.path, event.ino])).toEqual([
+      ['modify', '/one', 2],
+      ['modify', '/two', 2],
+    ]);
   });
 
   // ------------------------------------------------------------------ rename

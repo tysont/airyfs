@@ -63,6 +63,12 @@ describe('AiryFSClient', () => {
     await client.symlink('../target', '/link');
     expect(await client.readlink('/link')).toBe('../target');
     await client.truncate('/file', 2);
+    await client.lstat('/file');
+    await client.touch('/file', { mtime: 42 });
+    await client.chmod('/file', 0o640);
+    await client.link('/file', '/hard-link');
+    await client.appendFile('/file', Uint8Array.from([0, 255]));
+    await client.diskUsage('/');
     await client.checksum('/file');
     await client.exportTree('/tree');
     await client.importTree('/tree', new Uint8Array([1]).buffer, true);
@@ -133,6 +139,8 @@ describe('AiryFSClient', () => {
     expect(requests.some((request) => request.url.endsWith('/services/dev%20server/start') && request.method === 'POST')).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/services/dev%20server/logs?after=4&generation=gen'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/services/dev%20server') && request.method === 'DELETE')).toBe(true);
+    expect(requests.some((request) => request.url.endsWith('/operations/append')
+      && request.body === JSON.stringify({ path: '/file', data: 'AP8=' }))).toBe(true);
   });
 
   it('normalizes structured API errors and transport failures', async () => {

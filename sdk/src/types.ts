@@ -15,6 +15,7 @@ export interface FileStats {
 }
 
 export interface DirectoryEntry extends FileStats { name: string }
+export interface DiskUsage { bytes: number; inodes: number }
 export interface VolumeInfo { chunkSize: number }
 export interface VolumeRecord extends VolumeInfo {
   name: string;

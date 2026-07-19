@@ -212,7 +212,7 @@ async runPython(source: string): Promise<{
 
 This method can also be called over Workers RPC on a `AiryFS` stub. The direct operations execute against Durable Object SQLite; `exec` attaches compute to that same state. Existing AiryFS wrappers already coordinate access and append mutation-journal entries. Custom methods that call the underlying `AgentFS` instance directly must use `VolumeAccessCoordinator` for overlapping content access and record direct mutations so mounted FUSE clients invalidate stale cache entries.
 
-The underlying AgentFS interface includes `readFile`, `writeFile`, `readdir`, `readdirPlus`, `stat`, `lstat`, `mkdir`, `rm`, `rename`, `copyFile`, `symlink`, `readlink`, `access`, `statfs`, and random-access handles through `open`; file handles provide operations such as `truncate(size)`.
+The underlying AgentFS interface includes `readFile`, `writeFile`, `readdir`, `readdirPlus`, `stat`, `lstat`, `mkdir`, `rm`, `rename`, `copyFile`, `symlink`, `readlink`, `access`, `statfs`, and random-access handles through `open`; file handles provide operations such as `truncate(size)`. AiryFS adds coordinated direct primitives for timestamps, permissions, true hard links, bounded append, and subtree usage where the TypeScript AgentFS interface has no equivalent.
 
 ### 2. Use The Web APIs
 
@@ -301,7 +301,7 @@ await client.sql('CREATE TABLE app_notes (id INTEGER PRIMARY KEY, body TEXT)');
 await client.sql('INSERT INTO app_notes(body) VALUES (?)', ['remember this']);
 ```
 
-`AiryFSClient` exposes files, directories, path operations, tree archives, buffered and streaming exec, resumable upload primitives, checksums, durable jobs and logs, snapshots, change feeds, auth/capabilities, usage, diagnostics, lifecycle, KV state, and scoped application SQL. High-level helpers manage long-poll cursors, job output, exec IDs, and resumable `Blob` uploads.
+`AiryFSClient` exposes files, directories, metadata, timestamps, permissions, symbolic and hard links, bounded append, subtree usage, tree archives, buffered and streaming exec, resumable upload primitives, checksums, durable jobs and logs, snapshots, change feeds, auth/capabilities, usage, diagnostics, lifecycle, KV state, and scoped application SQL. High-level helpers manage long-poll cursors, job output, exec IDs, and resumable `Blob` uploads.
 
 ### 4. Use The CLI
 
@@ -488,6 +488,12 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `POST` | `/v1/volumes/V/operations/readlink` | Read `{"path":"/b"}` |
 | `POST` | `/v1/volumes/V/operations/truncate` | Resize `{"path":"/a","size":4096}` |
 | `POST` | `/v1/volumes/V/operations/checksum` | Stream a file through server-side SHA-256 |
+| `POST` | `/v1/volumes/V/operations/lstat` | Return no-follow metadata for `{"path":"/a"}` |
+| `POST` | `/v1/volumes/V/operations/touch` | Create a file or update timestamps; optional numeric `atime` and `mtime` |
+| `POST` | `/v1/volumes/V/operations/chmod` | Replace permission bits with numeric `{"path":"/a","mode":416}` |
+| `POST` | `/v1/volumes/V/operations/link` | Create a true hard link `{"existing":"/a","path":"/b"}` |
+| `POST` | `/v1/volumes/V/operations/append` | Append at most 1 MiB from canonical base64 `data` |
+| `POST` | `/v1/volumes/V/operations/du` | Return logical bytes and distinct reachable inodes below `path` |
 | `GET` | `/v1/volumes/V/trees/path` | Stream a directory as a AiryFS archive |
 | `PUT` | `/v1/volumes/V/trees/path?replace=true` | Transactionally import a AiryFS archive |
 | `POST` | `/v1/volumes/V/exec` | Execute and return buffered stdout/stderr |
@@ -547,6 +553,8 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `GET` | `/v1/volumes/V/metrics` | Return per-volume Prometheus text exposition; read access required |
 
 Filesystem failures return structured JSON with stable POSIX-style codes and appropriate HTTP statuses.
+
+Direct `lstat`, `touch`, and `chmod` do not traverse symbolic links. `lstat` reports the link inode; `touch` and `chmod` reject a link operand so scoped capabilities cannot escape through a link target.
 
 Volumes default to 256 KiB chunks. Explicit chunk sizes must be powers of two from 4 KiB through 1 MiB. Existing volumes retain their stored chunk size, and a conflicting size returns `409 CHUNK_SIZE_IMMUTABLE` after filesystem data exists. Any filesystem request implicitly creates an unconfigured volume with the default.
 

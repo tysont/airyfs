@@ -21,6 +21,7 @@ import {
 import { createTestStorage } from './support/storage';
 import { MutationJournal } from '../src/mutation-journal';
 import { initSchema } from '../src/schema';
+import { FilesystemPrimitives } from '../src/filesystem-primitives';
 
 function route(resource: V1Route['resource'], path: string): V1Route {
   return { volume: 'test', resource, path };
@@ -29,12 +30,14 @@ function route(resource: V1Route['resource'], path: string): V1Route {
 describe('filesystem HTTP API', () => {
   let fs: AgentFS;
   let sql: ReturnType<typeof createTestStorage>['sql'];
+  let primitives: FilesystemPrimitives;
 
   beforeEach(() => {
     const storage = createTestStorage(new Database(':memory:'));
     sql = storage.sql;
     initSchema(sql);
     fs = AgentFS.create(storage);
+    primitives = new FilesystemPrimitives(sql, (callback) => storage.transactionSync(callback));
   });
 
   it('parses resource routes and encoded path segments', () => {
@@ -338,6 +341,99 @@ describe('filesystem HTTP API', () => {
     expect((await fs.stat('/data.txt')).ino).toBe(before.ino);
   });
 
+  it('touches existing paths and creates missing empty files', async () => {
+    const create = await operationRequest('touch', { path: '/created.txt', atime: 10.25, mtime: 20.5 });
+    expect(create.status).toBe(204);
+    expect(await fs.stat('/created.txt')).toMatchObject({ atime: 10, mtime: 20, size: 0 });
+    expect(await fs.readFile('/created.txt', 'utf8')).toBe('');
+
+    const ino = (await fs.stat('/created.txt')).ino;
+    expect((await operationRequest('touch', { path: '/created.txt' })).status).toBe(204);
+    expect((await fs.stat('/created.txt')).ino).toBe(ino);
+  });
+
+  it('changes permission bits without changing the inode type', async () => {
+    await fs.mkdir('/private');
+    const response = await operationRequest('chmod', { path: '/private', mode: 0o700 });
+    expect(response.status).toBe(204);
+    expect((await fs.stat('/private')).mode).toBe(0o40700);
+  });
+
+  it('creates true hard links that share content and link counts', async () => {
+    await fs.writeFile('/source.txt', Buffer.from('before'));
+    expect((await operationRequest('link', { existing: '/source.txt', path: '/linked.txt' })).status).toBe(204);
+
+    const source = await fs.stat('/source.txt');
+    const linked = await fs.stat('/linked.txt');
+    expect(linked.ino).toBe(source.ino);
+    expect(linked.nlink).toBe(2);
+    await fs.writeFile('/source.txt', Buffer.from('after'));
+    expect(await fs.readFile('/linked.txt', 'utf8')).toBe('after');
+    await fs.unlink('/source.txt');
+    expect(await fs.readFile('/linked.txt', 'utf8')).toBe('after');
+    expect((await fs.stat('/linked.txt')).nlink).toBe(1);
+  });
+
+  it('reports symlink metadata without following the link', async () => {
+    await fs.writeFile('/target.txt', Buffer.from('target'));
+    await fs.symlink('/target.txt', '/link');
+    const response = await operationRequest('lstat', { path: '/link' });
+    expect(await response.json()).toMatchObject({ type: 'symlink' });
+  });
+
+  it('appends binary data at the locked current file size', async () => {
+    await fs.writeFile('/log.bin', Buffer.from([0, 1]));
+    sql.exec('UPDATE fs_inode SET ctime = 1 WHERE ino = ?', (await fs.stat('/log.bin')).ino);
+    const response = await operationRequest('append', { path: '/log.bin', data: Buffer.from([2, 255]).toString('base64') });
+    expect(response.status).toBe(204);
+    expect(new Uint8Array(await fs.readFile('/log.bin'))).toEqual(Uint8Array.from([0, 1, 2, 255]));
+    expect((await fs.stat('/log.bin')).ctime).toBeGreaterThan(1);
+  });
+
+  it('bounds and validates append input before writing', async () => {
+    await fs.writeFile('/log', Buffer.from('before'));
+    expect((await operationRequest('append', { path: '/log', data: '!' })).status).toBe(400);
+    expect((await operationRequest('append', { path: '/log', data: 'A'.repeat(1_398_108) })).status).toBe(413);
+    expect(await fs.readFile('/log', 'utf8')).toBe('before');
+
+    const missing = await operationRequest('append', { path: '/missing', data: '' });
+    expect(missing.status).toBe(404);
+  });
+
+  it('rejects directory hard links, duplicate destinations, and metadata changes through symlinks', async () => {
+    await fs.mkdir('/dir');
+    await fs.writeFile('/file', Buffer.from('x'));
+    await fs.symlink('/file', '/link');
+    expect((await operationRequest('link', { existing: '/dir', path: '/dir-link' })).status).toBe(403);
+    expect((await operationRequest('link', { existing: '/file', path: '/file' })).status).toBe(409);
+    expect((await operationRequest('touch', { path: '/link' })).status).toBe(409);
+    expect((await operationRequest('chmod', { path: '/link', mode: 0o600 })).status).toBe(409);
+  });
+
+  it('canonicalizes direct operation paths before mutation journaling', async () => {
+    const mutations: string[][] = [];
+    const response = await handleFilesystemRequest(
+      new Request('http://localhost', { method: 'POST', body: JSON.stringify({ path: '/tmp/../note' }) }),
+      route('operations', '/touch'),
+      fs,
+      undefined,
+      async (paths) => { mutations.push(paths); },
+      undefined,
+      primitives,
+    );
+    expect(response?.status).toBe(204);
+    expect(mutations).toEqual([['/note']]);
+    expect((await fs.stat('/note')).isFile()).toBe(true);
+  });
+
+  it('counts logical subtree bytes once for hard-linked inodes', async () => {
+    await fs.mkdir('/data');
+    await fs.writeFile('/data/a', Buffer.from('12345'));
+    await operationRequest('link', { existing: '/data/a', path: '/data/b' });
+    const response = await operationRequest('du', { path: '/data' });
+    expect(await response.json()).toEqual({ bytes: 5, inodes: 2 });
+  });
+
   it('journals parent entries and current inodes for direct mutations', async () => {
     const db = new Database(':memory:');
     const storage = createTestStorage(db);
@@ -412,6 +508,18 @@ describe('filesystem HTTP API', () => {
     expect(response?.status).toBe(409);
     expect(await response?.json()).toMatchObject({ error: { code: 'SYMLINK_NOT_RESOLVED' } });
   });
+
+  async function operationRequest(name: string, body: Record<string, unknown>): Promise<Response> {
+    return (await handleFilesystemRequest(
+      new Request('http://localhost', { method: 'POST', body: JSON.stringify(body) }),
+      route('operations', `/${name}`),
+      fs,
+      undefined,
+      undefined,
+      undefined,
+      primitives,
+    ))!;
+  }
 });
 
 describe('open-handle lease retention', () => {
