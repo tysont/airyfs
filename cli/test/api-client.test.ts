@@ -394,4 +394,17 @@ describe('AiryFSClient uploads and checksum', () => {
     expect(JSON.parse(String(init?.body))).toEqual({ path: '/data/big.bin' });
     expect(result).toMatchObject({ algorithm: 'sha256', checksum: 'c'.repeat(64) });
   });
+
+  it('executes scoped SQL with positional arguments', async () => {
+    const result = { columns: ['body'], rows: [['hello']], rowsRead: 1, rowsWritten: 0, truncated: false };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(result));
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    expect(await client.sql('SELECT body FROM app_notes WHERE id = ?', [1])).toEqual(result);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/sql');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual({ sql: 'SELECT body FROM app_notes WHERE id = ?', args: [1] });
+  });
 });

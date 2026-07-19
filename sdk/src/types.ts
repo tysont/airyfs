@@ -147,7 +147,15 @@ export interface TreeViewResponse {
 }
 export type DatabaseInfo = Record<string, number>;
 
-export type Operation = 'read' | 'write' | 'exec' | 'admin';
+export type Operation = 'read' | 'write' | 'exec' | 'sql' | 'admin';
+export type SqlValue = string | number | null | { base64: string };
+export interface SqlResult {
+  columns: string[];
+  rows: SqlValue[][];
+  rowsRead: number;
+  rowsWritten: number;
+  truncated: boolean;
+}
 export interface CapabilityInfo {
   id: string;
   volume: string;

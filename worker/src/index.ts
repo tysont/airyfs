@@ -144,6 +144,7 @@ import { consumePtyTicket, createPtyTicket } from './pty-tickets';
 import { relayPty } from './pty-relay';
 import { createService, deleteService, listServices, readService, setServiceEnabled, type ServiceRecord } from './services';
 import { handleS3Request, parseS3Route } from './s3';
+import { executeScopedSql } from './scoped-sql';
 
 interface Env {
   AiryFS: DurableObjectNamespace<AiryFS>;
@@ -2079,6 +2080,15 @@ export class AiryFS extends Container<Env> {
           return Response.json(await this.forkVolume(body.targetVolume), { status: 201 });
         }
 
+        if (v1Route.resource === 'sql') {
+          if (v1Route.path !== '/') throw new HttpError(404, 'INVALID_ROUTE', 'SQL does not accept a path suffix');
+          if (request.method !== 'POST') {
+            throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'POST' });
+          }
+          const body = await readJsonObject(request);
+          return Response.json(executeScopedSql(this.ctx.storage.sql, body.sql, body.args));
+        }
+
         if (v1Route.resource === 'uploads') {
           return await this.handleUploads(request, v1Route);
         }
@@ -2314,6 +2324,8 @@ async function requiredAccess(
         return { operation: method === 'GET' ? 'read' : 'write', paths: ['/'] };
       case 'forks':
         return { operation: 'admin', paths: ['/'] };
+      case 'sql':
+        return { operation: 'sql', paths: [] };
       case 'files':
         return {
           operation: method === 'GET' || method === 'HEAD' ? 'read' : 'write',

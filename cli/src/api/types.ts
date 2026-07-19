@@ -172,6 +172,15 @@ export interface JobSchedule {
   createdAt: number;
 }
 
+export type SqlValue = string | number | null | { base64: string };
+export interface SqlResult {
+  columns: string[];
+  rows: SqlValue[][];
+  rowsRead: number;
+  rowsWritten: number;
+  truncated: boolean;
+}
+
 export type ChangeType = 'create' | 'modify' | 'remove' | 'rename';
 
 export interface ChangeEvent {
@@ -288,7 +297,7 @@ export interface UsageInfo {
 
 export type DatabaseInfo = Record<string, number>;
 
-export type Operation = 'read' | 'write' | 'exec' | 'admin';
+export type Operation = 'read' | 'write' | 'exec' | 'sql' | 'admin';
 
 export interface CapabilityInfo {
   id: string;

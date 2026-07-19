@@ -80,6 +80,11 @@ describe('capabilityAllows', () => {
     expect(capabilityAllows(cap, 'write', ['/a'])).toBe(false);
   });
 
+  it('keeps application SQL separate from filesystem permissions', () => {
+    expect(capabilityAllows(capability({ operations: ['sql'] }), 'sql', [])).toBe(true);
+    expect(capabilityAllows(capability({ operations: ['read', 'write'] }), 'sql', [])).toBe(false);
+  });
+
   it('treats empty prefixes as all paths', () => {
     const cap = capability({ operations: ['write'], pathPrefixes: [] });
     expect(capabilityAllows(cap, 'write', ['/anything/at/all'])).toBe(true);

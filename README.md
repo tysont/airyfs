@@ -88,6 +88,7 @@ AiryFS is not optimized for workloads dominated by thousands of sequential metad
 | Observability | Logical filesystem usage, SQLite size, per-table row counts, Container/FUSE health, and Hrana request counters |
 | Schema management | Atomic, idempotent initialization plus migrations for supported older AgentFS table layouts |
 | Additional state | A simple key-value table and AgentFS tool-call tables in the same DO SQLite database |
+| Application SQL | Scoped single-statement SQLite over user-owned `app_*` tables and indexes, isolated from AiryFS internals |
 
 ## How AiryFS Differs
 
@@ -286,9 +287,12 @@ const controller = new AbortController();
 for await (const change of watchChanges(client, { path: '/src', signal: controller.signal })) {
   console.log(change.type, change.oldPath, change.path);
 }
+
+await client.sql('CREATE TABLE app_notes (id INTEGER PRIMARY KEY, body TEXT)');
+await client.sql('INSERT INTO app_notes(body) VALUES (?)', ['remember this']);
 ```
 
-`AiryFSClient` exposes files, directories, path operations, tree archives, buffered and streaming exec, resumable upload primitives, checksums, durable jobs and logs, snapshots, change feeds, auth/capabilities, usage, diagnostics, lifecycle, and KV state. High-level helpers manage long-poll cursors, job output, exec IDs, and resumable `Blob` uploads.
+`AiryFSClient` exposes files, directories, path operations, tree archives, buffered and streaming exec, resumable upload primitives, checksums, durable jobs and logs, snapshots, change feeds, auth/capabilities, usage, diagnostics, lifecycle, KV state, and scoped application SQL. High-level helpers manage long-poll cursors, job output, exec IDs, and resumable `Blob` uploads.
 
 ### 4. Use The CLI
 
@@ -314,6 +318,7 @@ airy warm
 airy exec python3 main.py
 airy job submit --wait python3 main.py
 airy snapshot create before-refactor --note "known good"
+airy sql 'SELECT body FROM app_notes WHERE id = ?' --arg 1
 airy watch /src
 airy status
 airy shell
@@ -490,6 +495,7 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `POST` | `/v1/volumes/V/snapshots/ID/clone` | Clone into another volume; root access required |
 | `DELETE` | `/v1/volumes/V/snapshots/ID` | Delete snapshot metadata and payload |
 | `POST` | `/v1/volumes/V/forks` | Fork the live filesystem into an empty target volume; root access required |
+| `POST` | `/v1/volumes/V/sql` | Execute one statement against user-owned `app_*` tables or indexes |
 | S3 | `/s3/V[/key]` | Path-style S3 bucket and object operations with SigV4 |
 | `GET` | `/v1/volumes/V/jobs?status=running` | List durable jobs, optionally by status |
 | `POST` | `/v1/volumes/V/jobs` | Submit an idempotent durable job |
@@ -563,6 +569,8 @@ AWS_ACCESS_KEY_ID=airyfs \
 AWS_SECRET_ACCESS_KEY="$AIRYFS_AUTH_SECRET" \
 aws --endpoint-url https://airyfs.example.workers.dev/s3 --region auto s3 ls s3://my-volume
 ```
+
+Scoped application SQL runs in the volume Durable Object without starting the Container. Each request accepts `{ "sql": "...", "args": [...] }`, where arguments are strings, numbers, `null`, or `{ "base64": "..." }` blobs. Statements may create and access only tables and indexes whose names begin with `app_`; AiryFS, AgentFS, SQLite system objects, PRAGMAs, views, triggers, attached databases, CTEs, and multiple statements are rejected. Results return at most 1,000 rows and require a capability granting the dedicated `sql` operation (or `admin`).
 
 `airy volume quota --bytes 10g --inodes 100000` configures persistent logical-byte and inode limits. Use `unlimited` to clear either limit. SQLite triggers enforce quotas for direct HTTP writes and Container/FUSE writes at the shared filesystem boundary; rejected HTTP writes return `507 ENOSPC`. `airy usage` reports logical usage, configured limits, remaining capacity, physical SQLite size, and Container/FUSE health.
 

@@ -211,6 +211,18 @@ When a shell expression is supplied as one argument, it is sent as written:
 airyfs exec 'find . -type f | sort'
 ```
 
+## Application SQL
+
+Execute one SQLite statement against user-owned `app_*` tables and indexes inside the selected volume:
+
+```bash
+airyfs sql 'CREATE TABLE app_notes (id INTEGER PRIMARY KEY, body TEXT)'
+airyfs sql 'INSERT INTO app_notes(body) VALUES (?)' --arg '"hello"'
+airyfs sql 'SELECT id, body FROM app_notes WHERE id = ?' --arg 1
+```
+
+Repeat `--arg <json>` for positional placeholders. Values may be JSON strings, numbers, `null`, or `{ "base64": "..." }` blobs. Scoped SQL requires the dedicated `sql` capability operation (or `admin`) and cannot access AiryFS internal tables.
+
 ## Interactive Shell
 
 ```bash

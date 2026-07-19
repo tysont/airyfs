@@ -93,6 +93,7 @@ describe('AiryFSClient', () => {
     await client.restoreSnapshot('snap id');
     await client.cloneSnapshot('snap id', 'copy');
     await client.forkVolume('fork copy');
+    await client.sql('SELECT * FROM app_notes WHERE id = ?', [1]);
     await client.deleteSnapshot('snap id');
     await client.authStatus();
     await client.createCapability({ operations: ['read'], pathPrefixes: ['/a'], expiresInSeconds: 60 });
@@ -118,6 +119,7 @@ describe('AiryFSClient', () => {
     expect(requests.some((request) => request.url.includes('/changes/a%20b?since=4&limit=20&wait=100'))).toBe(true);
     expect(requests.some((request) => request.url.includes('/snapshots/snap%20id/diff?against=other'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/forks') && request.method === 'POST')).toBe(true);
+    expect(requests.some((request) => request.url.endsWith('/sql') && request.method === 'POST')).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/perf?volume=my+volume'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/kv/set?volume=my+volume&key=a+b'))).toBe(true);
     expect(requests.some((request) => request.url.endsWith('/services/dev%20server/start') && request.method === 'POST')).toBe(true);

@@ -65,6 +65,7 @@ export function registerCommands(program: Command, runtime: Runtime): void {
   registerCapabilityCommands(program, runtime);
   registerDiagnosticCommands(program, runtime);
   registerKvCommands(program, runtime);
+  registerSqlCommand(program, runtime);
   registerDeployCommands(program, runtime);
   registerSiteCommands(program, runtime);
 
@@ -78,6 +79,32 @@ export function registerCommands(program: Command, runtime: Runtime): void {
       if (initialSession) await runtime.sessions.resolve(initialSession);
       const { runShell } = await import('../shell.js');
       await runShell(runtime, initialSession);
+    }));
+}
+
+function registerSqlCommand(program: Command, runtime: Runtime): void {
+  program.command('sql')
+    .argument('<statement>')
+    .option('--arg <json>', 'positional JSON argument; repeat in placeholder order', collectOption, [])
+    .description('Execute scoped SQLite against app_* tables')
+    .action(async (statement, options, command) => perform(runtime, command, async (context) => {
+      const args = (options.arg as string[]).map((value) => {
+        try { return JSON.parse(value) as string | number | null | { base64: string }; }
+        catch { throw new ConfigError(`Invalid JSON argument: ${value}`); }
+      });
+      const result = await context.client().sql(statement, args);
+      if (context.output.json) {
+        context.output.value(result);
+      } else if (result.columns.length > 0) {
+        context.output.table(result.columns, result.rows.map((row) => row.map((value) => {
+          if (value === null) return 'NULL';
+          if (typeof value === 'object') return `<blob ${value.base64.length} base64 chars>`;
+          return value;
+        })));
+        if (result.truncated) context.output.value('Results truncated at 1,000 rows');
+      } else {
+        context.output.success(`SQL executed; ${result.rowsWritten} row${result.rowsWritten === 1 ? '' : 's'} written`, result);
+      }
     }));
 }
 
@@ -1881,7 +1908,7 @@ function registerCapabilityCommands(program: Command, runtime: Runtime): void {
   const capability = program.command('capability').description('Mint and revoke scoped capability tokens');
 
   capability.command('create')
-    .option('-o, --operation <operation>', 'grant read, write, exec, or admin (repeatable)', collectOption, [])
+    .option('-o, --operation <operation>', 'grant read, write, exec, sql, or admin (repeatable)', collectOption, [])
     .option('-p, --path <prefix>', 'restrict to a remote path prefix (repeatable)', collectOption, [])
     .option('--expires <duration>', 'validity duration such as 1h or 30m', '1h')
     .description('Mint a capability token; requires root or admin access')
@@ -2443,8 +2470,8 @@ function collectOption(value: string, previous: string[]): string[] {
 }
 
 function normalizeOperations(values: string[]): Operation[] {
-  if (values.length === 0) throw new ConfigError('Provide at least one --operation (read, write, exec, admin)');
-  const allowed: Operation[] = ['read', 'write', 'exec', 'admin'];
+  if (values.length === 0) throw new ConfigError('Provide at least one --operation (read, write, exec, sql, admin)');
+  const allowed: Operation[] = ['read', 'write', 'exec', 'sql', 'admin'];
   for (const value of values) {
     if (!(allowed as string[]).includes(value)) throw new ConfigError(`Unknown operation: ${value}`);
   }

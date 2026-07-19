@@ -41,6 +41,8 @@ import type {
   RestoredTrashEntry,
   ServiceRecord,
   CreateServiceInput,
+  SqlResult,
+  SqlValue,
   UploadCompleteResult,
   UploadStatus,
   UsageInfo,
@@ -572,6 +574,14 @@ export class AiryFSClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ targetVolume }),
+    });
+  }
+
+  async sql(statement: string, args: SqlValue[] = []): Promise<SqlResult> {
+    return this.json<SqlResult>(`${this.volumeBase}/sql`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql: statement, args }),
     });
   }
 

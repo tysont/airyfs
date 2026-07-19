@@ -4,7 +4,7 @@
 import { HttpError } from './files-api';
 import type { SqlExec } from './schema';
 
-export const OPERATIONS = ['read', 'write', 'exec', 'admin'] as const;
+export const OPERATIONS = ['read', 'write', 'exec', 'sql', 'admin'] as const;
 export type Operation = (typeof OPERATIONS)[number];
 
 export interface Capability {
