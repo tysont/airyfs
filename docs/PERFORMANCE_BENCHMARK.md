@@ -126,3 +126,19 @@ The integration deployment passed all 30 deployed feature checks. Its three-run 
 | Git add and commit | 92.05 s | 24.58 s | 3.75x |
 
 Hrana request deltas were unavailable in this run because the Container reconnected its data bridge before every exec, changing the `/perf` session ID. The benchmark correctly recorded those deltas as `null` rather than subtracting counters from different sessions. The lifecycle now reuses a healthy bridge and reconnects only after a drop, so subsequent reports include numeric pipeline and statement deltas. The dependency patch itself removes the only `stream.describe(&sql)` call from the compiled Hrana statement path.
+
+### Accepted: Adaptive FUSE READDIRPLUS
+
+The second optimization enables the Linux FUSE 7.21 request path and advertises `FUSE_DO_READDIRPLUS` with `FUSE_READDIRPLUS_AUTO`. The kernel can now use AgentFS's existing single-query directory entry and attribute implementation when it predicts subsequent lookups, while retaining plain `readdir` for other scans.
+
+The integration deployment passed all 33 feature checks, including traversal of 257 entries with exact names, no duplicates, and correct attributes. A three-run targeted quick report produced:
+
+| Scenario | Comparison p50 | READDIRPLUS p50 | Change |
+|---|---:|---:|---:|
+| Metadata walk after create | 2.21 s operation | 0.50 s operation | 4.39x faster |
+| Warm metadata walk | 11.55 s client baseline | 1.20 s client | 9.65x faster |
+| Git status | 9.85 s | 10.21 s | 3.6% slower |
+| Git add and commit | 24.58 s | 18.78 s | 1.31x faster |
+| Git checkout | 46.17 s baseline | 13.72 s | 3.37x faster |
+
+The median metadata walk uses 38 Hrana pipelines and 19 SQL statements for 20 entries. The small Git status regression is outweighed by the repeatable metadata, commit, and checkout improvements, and no correctness regressions were observed.

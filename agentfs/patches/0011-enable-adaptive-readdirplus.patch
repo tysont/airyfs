@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyson Trautmann <tysont@gmail.com>
+Date: Sun, 19 Jul 2026 20:00:00 -0700
+Subject: [PATCH] Enable adaptive FUSE readdirplus
+
+Advertise READDIRPLUS and READDIRPLUS_AUTO so Linux can use the existing
+single-query directory entry and attribute implementation when it expects
+subsequent lookups.
+---
+ cli/Cargo.toml  | 5 ++++-
+ cli/src/fuse.rs | 6 ++++--
+ 2 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/cli/Cargo.toml b/cli/Cargo.toml
+--- a/cli/Cargo.toml
++++ b/cli/Cargo.toml
+@@ -15,6 +15,9 @@ path = "src/main.rs"
+ [features]
+-default = ["sandbox"]
++default = ["sandbox", "abi-7-21"]
+ strict = []
++abi-7-19 = []
++abi-7-20 = ["abi-7-19"]
++abi-7-21 = ["abi-7-20"]
+ sandbox = [
+     "dep:agentfs-sandbox",
+     "dep:reverie",
+
+diff --git a/cli/src/fuse.rs b/cli/src/fuse.rs
+--- a/cli/src/fuse.rs
++++ b/cli/src/fuse.rs
+@@ -1,7 +1,7 @@
+ use crate::fuser::{
+     consts::{
+-        FUSE_ASYNC_READ, FUSE_CACHE_SYMLINKS, FUSE_NO_OPENDIR_SUPPORT, FUSE_PARALLEL_DIROPS,
+-        FUSE_WRITEBACK_CACHE,
++        FUSE_ASYNC_READ, FUSE_CACHE_SYMLINKS, FUSE_DO_READDIRPLUS, FUSE_NO_OPENDIR_SUPPORT,
++        FUSE_PARALLEL_DIROPS, FUSE_READDIRPLUS_AUTO, FUSE_WRITEBACK_CACHE,
+     },
+     fuse_forget_one, DeferredNotifier, FileAttr, FileType, Filesystem, KernelConfig, MountOption,
+     ReplyAttr,
+@@ -182,7 +182,9 @@ impl Filesystem for AgentFSFuse {
+         let mut capabilities = FUSE_ASYNC_READ
+             | FUSE_PARALLEL_DIROPS
+             | FUSE_CACHE_SYMLINKS
+-            | FUSE_NO_OPENDIR_SUPPORT;
++            | FUSE_NO_OPENDIR_SUPPORT
++            | FUSE_DO_READDIRPLUS
++            | FUSE_READDIRPLUS_AUTO;
+         if self.cache_ttl == Duration::MAX {
+             capabilities |= FUSE_WRITEBACK_CACHE;
+         }
+-- 
+2.50.1 (Apple Git-155)
