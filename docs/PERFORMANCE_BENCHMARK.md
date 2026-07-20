@@ -142,3 +142,18 @@ The integration deployment passed all 33 feature checks, including traversal of 
 | Git checkout | 46.17 s baseline | 13.72 s | 3.37x faster |
 
 The median metadata walk uses 38 Hrana pipelines and 19 SQL statements for 20 entries. The small Git status regression is outweighed by the repeatable metadata, commit, and checkout improvements, and no correctness regressions were observed.
+
+### Accepted: Single-Query FUSE Reads
+
+The third optimization combines each `pread` inode-size lookup and chunk-range lookup into one `LEFT JOIN` query. It preserves zero-length, EOF, unaligned cross-chunk, and sparse-file behavior, including reads spanning entirely missing chunks.
+
+The integration deployment passed all 33 feature checks. A close-in-time three-run targeted quick comparison produced:
+
+| Scenario | Control p50 | Single-query p50 | Change |
+|---|---:|---:|---:|
+| 16 random 4 KiB reads | 6.08 s operation | 4.80 s operation | 1.27x faster |
+| FUSE 1 MiB read | 3.13 s operation | 2.63 s operation | 1.19x faster |
+| 16 random 4 KiB writes | 20.12 s operation | 20.93 s operation | 4.0% slower |
+| FUSE 1 MiB write | 4.50 s operation | 4.32 s operation | 4.0% faster |
+
+Random reads dropped from 95 to 63 median Hrana pipelines and from 51 to 35 SQL statements. Sequential reads dropped from 64 to 45 pipelines and from 35 to 24 statements. The write controls remained within 4%, while both target read workloads improved and request amplification changed as expected.
