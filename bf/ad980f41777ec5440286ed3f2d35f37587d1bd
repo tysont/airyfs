@@ -1,0 +1,19 @@
+agentfs/build.sh
+  s_b32f5a4846e9fb::t_1dd9ceaaee86cf 66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bfad980f41777ec5440286ed3f2d35f37587d1bd",
+  "prompts": {},
+  "sessions": {
+    "s_b32f5a4846e9fb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_082e5395bffeEd8w76llzhRN4k",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
