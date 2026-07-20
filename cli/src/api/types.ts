@@ -283,9 +283,13 @@ export interface TreeViewResponse {
   truncated: boolean;
 }
 
-export interface PerfInfo {
+export interface HranaCounters {
   pipelineRequests: number;
   sqlStatements: number;
+}
+
+export interface PerfInfo extends HranaCounters {
+  sessionId: string | null;
 }
 
 export interface ContainerHealth {
@@ -309,7 +313,7 @@ export interface UsageInfo {
   };
   sqliteBytes: number;
   container: ContainerHealth;
-  hrana: PerfInfo;
+  hrana: HranaCounters;
 }
 
 export interface UsageSample {

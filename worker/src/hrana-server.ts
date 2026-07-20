@@ -236,6 +236,7 @@ async function executeStmt(
 // ---------------------------------------------------------------------------
 
 export class HranaServer {
+  readonly sessionId = crypto.randomUUID();
   private sql: SqlBackend;
   private readable: ReadableStream<Uint8Array>;
   private writable: WritableStream<Uint8Array>;

@@ -173,6 +173,12 @@ interface WorkerSocket {
   close(): Promise<void>;
 }
 
+export interface ExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
 const STARTUP_TIMEOUT_MS = 60_000;
 const CONTAINER_EXEC_TIMEOUT_MS = 310_000;
 const DESTROY_TIMEOUT_MS = 10_000;
@@ -347,7 +353,7 @@ export class AiryFS extends Container<Env> {
   // ---------------------------------------------------------------------------
 
   /** Execute a shell command in the Container against the FUSE-mounted volume. */
-  async exec(command: string, signal?: AbortSignal): Promise<unknown> {
+  async exec(command: string, signal?: AbortSignal): Promise<ExecResult> {
     if (this.activeExec || this.destroyPromise) {
       throw new HttpError(503, 'EXEC_BUSY', 'Another command or Container lifecycle operation is already running');
     }
@@ -392,7 +398,7 @@ export class AiryFS extends Container<Env> {
         throw new Error(`Container exec failed (${resp.status}): ${message}`);
       }
 
-      return resp.json();
+      return resp.json<ExecResult>();
     } finally {
       if (this.activeExec === execution) this.activeExec = null;
     }
@@ -1219,7 +1225,7 @@ export class AiryFS extends Container<Env> {
     }
 
     await this.setupBridge(signal);
-    await this.connectData(signal);
+    if (!this.activeServePromise) await this.connectData(signal);
     await this.connectInvalidation(signal);
     try {
       const response = await this.containerFetch(
@@ -2481,6 +2487,7 @@ export class AiryFS extends Container<Env> {
 
       if (url.pathname === '/perf') {
         return Response.json({
+          sessionId: this.hranaServer?.sessionId ?? null,
           pipelineRequests: this.hranaServer?.pipelineCount ?? 0,
           sqlStatements: this.hranaServer?.statementCount ?? 0,
         });

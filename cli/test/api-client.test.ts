@@ -119,7 +119,7 @@ describe('AiryFSClient', () => {
   });
 
   it('adds the volume query parameter for diagnostic routes', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ pipelineRequests: 1, sqlStatements: 2 }));
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ sessionId: 'session-1', pipelineRequests: 1, sqlStatements: 2 }));
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
 
     await client.perf();

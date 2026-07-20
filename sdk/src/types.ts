@@ -125,7 +125,8 @@ export interface ChangeQuery {
   signal?: AbortSignal;
 }
 
-export interface PerfInfo { pipelineRequests: number; sqlStatements: number }
+export interface HranaCounters { pipelineRequests: number; sqlStatements: number }
+export interface PerfInfo extends HranaCounters { sessionId: string | null }
 export interface ContainerHealth {
   state: 'connected' | 'stopped' | 'unhealthy';
   status?: string;
@@ -146,7 +147,7 @@ export interface UsageInfo {
   };
   sqliteBytes: number;
   container: ContainerHealth;
-  hrana: PerfInfo;
+  hrana: HranaCounters;
 }
 export interface UsageSample {
   sampledAt: number;

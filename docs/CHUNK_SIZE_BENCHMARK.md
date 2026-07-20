@@ -25,11 +25,11 @@ The benchmark writes and reads a 1 MiB file through the AgentFS Cloudflare adapt
 
 The 1 MiB correctness test stores 256 rows at 4 KiB and 4 rows at 256 KiB. These results demonstrate that chunk size matters for sequential direct-SDK I/O and SQL amplification. They do not predict deployed FUSE performance because local SQLite has no network latency and the Rust client may issue a different SQL workload.
 
-## Required Follow-Up
+## Deployed Follow-Up
 
-Run a deployed benchmark at 4 KiB, 64 KiB, and 256 KiB covering:
+The deployed harness now covers:
 
-- Sequential 1 MiB and 100 MiB reads and writes through FUSE.
+- Sequential 1 MiB and 95 MiB reads and writes through FUSE.
 - Random 4 KiB reads and writes.
 - Small-file creation and directory traversal.
 - Git checkout, status, add, and commit.
@@ -37,3 +37,13 @@ Run a deployed benchmark at 4 KiB, 64 KiB, and 256 KiB covering:
 - SQLite storage size and Hrana statement counts.
 
 Use the deployed results to validate the 256 KiB default and quantify FUSE-path value. Never silently migrate existing volumes.
+
+Run the full chunk-size comparison with:
+
+```bash
+AIRYFS_URL=https://your-worker.workers.dev npm run benchmark:deployed -- \
+  --profile full --chunk-sizes 4096,65536,262144 \
+  --label chunk-size-baseline --output benchmark-chunks.json
+```
+
+See [`PERFORMANCE_BENCHMARK.md`](PERFORMANCE_BENCHMARK.md) for correctness gates, report interpretation, and the optimization experiment sequence.

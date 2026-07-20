@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-19T22:35:21.008Z",
+  "endpoint": "https://dofs-int.tyson-s-sandbox.workers.dev",
+  "label": "quick-baseline-final",
+  "harnessRevision": "49c475f3ece69c89f19f147a9380f48bfe7b6fd1",
+  "harnessDirty": true,
+  "profile": "quick",
+  "runs": 3,
+  "scenarios": [
+    "direct-sequential",
+    "fuse-sequential",
+    "fuse-random",
+    "metadata",
+    "small-files",
+    "git"
+  ],
+  "configuration": {
+    "startupRuns": 3,
+    "sequentialSizes": [1048576],
+    "randomFileBytes": 4194304,
+    "randomOperations": 16,
+    "metadataFiles": 20,
+    "smallFiles": 10
+  },
+  "volumes": [
+    {
+      "chunkSize": 262144,
+      "startupMs": { "p50": 4026.551917, "p95": 5965.3691914, "p99": 6137.70850468 }
+    }
+  ],
+  "summary": [
+    {
+      "name": "direct_read_1m", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 267.87775, "clientMsP50": 267.87775, "clientMsP95": 437.0369125, "clientMsP99": 452.0732825,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "direct_write_1m", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 858.00125, "clientMsP50": 858.00125, "clientMsP95": 876.3443003, "clientMsP99": 877.97479366,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "fuse_sequential_read_1m", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 4831.459904, "clientMsP50": 6887.057958, "clientMsP95": 9281.9320083, "clientMsP99": 9494.80970166,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "fuse_sequential_write_1m", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 5395.571323, "clientMsP50": 7361.531542, "clientMsP95": 8355.251692, "clientMsP99": 8443.582372,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "fuse_random_read_4k", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 7799.485009, "clientMsP50": 11022.877167, "clientMsP95": 11203.2613545, "clientMsP99": 11219.2955045,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "fuse_random_write_4k", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 22723.916415, "clientMsP50": 25054.63825, "clientMsP95": 27314.1260878, "clientMsP99": 27514.96945116,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "fuse_metadata_walk_after_create", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 13096.323975, "clientMsP50": 15037.108333, "clientMsP95": 15312.3079705, "clientMsP99": 15336.7701605,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "fuse_metadata_walk_warm", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 9700.136236, "clientMsP50": 11546.377042, "clientMsP95": 13541.1007045, "clientMsP99": 13718.4094745,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "fuse_small_file_create", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 17619.346802, "clientMsP50": 21014.092667, "clientMsP95": 21566.0563292, "clientMsP99": 21615.11976584,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "git_status_clean", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 33386.548458, "clientMsP50": 33386.548458, "clientMsP95": 34126.2045336, "clientMsP99": 34191.95174032,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    },
+    {
+      "name": "git_add_commit", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 72315.750625, "clientMsP50": 72315.750625, "clientMsP95": 101064.8334256, "clientMsP99": 103620.30745232,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null, "commitsPerSecondP50": 0.01382824614773
+    },
+    {
+      "name": "git_checkout", "chunkSize": 262144, "samples": 3,
+      "operationMsMedian": 46170.404625, "clientMsP50": 46170.404625, "clientMsP95": 53497.2498753, "clientMsP99": 54148.52500866,
+      "pipelineRequestsMedian": null, "sqlStatementsMedian": null
+    }
+  ]
+}

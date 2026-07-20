@@ -901,21 +901,26 @@ The vendored Rust SDK and CLI test suites run in a Linux build environment with 
 
 ```bash
 AIRYFS_URL=https://your-worker.workers.dev ./e2e/test.sh
-AIRYFS_URL=https://your-worker.workers.dev node ./e2e/features.mjs
+AIRYFS_URL=https://your-worker.workers.dev npm run test:features:deployed
 ```
 
-The original end-to-end flow covers direct write to FUSE read, direct mutation invalidation, FUSE write to direct read, Git on the same mixed-access volume, open-handle leases (a held FUSE read that survives a direct unlink and a streaming rename-over), and persistence across Container destruction. The feature smoke covers change feeds, tree archives, snapshots and cloning, resumable uploads, streaming execution admission and cancellation, and durable jobs.
+The original end-to-end flow covers direct write to FUSE read, direct mutation invalidation, FUSE write to direct read, Git on the same mixed-access volume, open-handle leases (a held FUSE read that survives a direct unlink and a streaming rename-over), and persistence across Container destruction. The feature smoke also covers unaligned cross-chunk I/O, random writes, directory traversal, negative lookup invalidation, concurrent reads, change feeds, tree archives, snapshots and cloning, resumable uploads, streaming execution admission and cancellation, and durable jobs.
 
 Remote mounts use a 1-second entry and attribute TTL plus journal-driven invalidation, and lease open handles so live reads survive concurrent direct removal. See [`docs/FUSE_CACHE_TTL.md`](docs/FUSE_CACHE_TTL.md), [`docs/MUTATION_INVALIDATION.md`](docs/MUTATION_INVALIDATION.md), and [`docs/OPEN_INODE_LEASES.md`](docs/OPEN_INODE_LEASES.md) for the implementation and deployed measurements.
 
-### Chunk-Size Benchmark
+### Performance Benchmarks
 
 ```bash
 cd worker
 npm run benchmark:chunks
+cd ..
+AIRYFS_URL=https://your-worker.workers.dev npm run benchmark:deployed -- \
+  --profile quick --label baseline --output benchmark-baseline.json
+AIRYFS_URL=https://your-worker.workers.dev npm run benchmark:quick -- \
+  --label candidate --output benchmark-candidate.json
 ```
 
-See [`docs/CHUNK_SIZE_BENCHMARK.md`](docs/CHUNK_SIZE_BENCHMARK.md) for the 256 KiB default, row-amplification results, and deployed follow-up measurements.
+The Worker benchmark isolates local SQLite chunk-size behavior. The deployed harness measures direct HTTP, Container/FUSE, Hrana amplification, metadata traversal, small files, and Git workloads. See [`docs/PERFORMANCE_BENCHMARK.md`](docs/PERFORMANCE_BENCHMARK.md) for the baseline and optimization workflow and [`docs/CHUNK_SIZE_BENCHMARK.md`](docs/CHUNK_SIZE_BENCHMARK.md) for the 256 KiB default decision.
 
 ## Project Structure
 
@@ -956,6 +961,7 @@ airyfs/
   e2e/
     test.sh                     Deployed end-to-end tests
     features.mjs                Deployed new-feature smoke tests
+    benchmark.mjs               Deployed direct and FUSE performance harness
   docs/                         Design and operational notes
   scripts/
     deploy.mjs                  Guarded int/prod deployment

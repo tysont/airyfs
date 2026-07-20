@@ -7,22 +7,25 @@ import {
   resumableUploadBlob,
   waitForJob,
 } from '../sdk/dist/index.js';
+import { pythonCommand } from './benchmark-lib.mjs';
 
 const endpoint = process.env.AIRYFS_URL;
 if (!endpoint) throw new Error('AIRYFS_URL is required');
+const token = process.env.AIRYFS_TOKEN;
+const clientOptions = token ? { token } : {};
 
 const suffix = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const volume = `features-${suffix}`;
 const cloneVolume = `features-clone-${suffix}`;
 const forkVolume = `features-fork-${suffix}`;
-const client = new AiryFSClient(endpoint, volume);
-const clone = new AiryFSClient(endpoint, cloneVolume);
-const fork = new AiryFSClient(endpoint, forkVolume);
+const client = new AiryFSClient(endpoint, volume, clientOptions);
+const clone = new AiryFSClient(endpoint, cloneVolume, clientOptions);
+const fork = new AiryFSClient(endpoint, forkVolume, clientOptions);
 let passed = 0;
 
 try {
   await client.createVolume(256 * 1024);
-  equal((await client.authStatus()).auth, 'disabled', 'auth-disabled integration mode');
+  equal((await client.authStatus()).auth, token ? 'root' : 'disabled', 'integration authentication mode');
 
   const initial = await client.getChanges();
   await client.makeDirectory('/src');
@@ -49,6 +52,106 @@ try {
   const checksum = await sha256(largeBytes);
   await resumableUploadBlob(client, '/large.bin', new Blob([largeBytes]), checksum);
   equal((await client.checksum('/large.bin')).checksum, checksum, 'resumable upload checksum');
+
+  const crossChunk = new Uint8Array(2 * 256 * 1024 + 123);
+  for (let index = 0; index < crossChunk.length; index++) crossChunk[index] = index % 251;
+  await client.writeFile('/cross-chunk.bin', crossChunk.slice().buffer);
+  const sliceOffset = 256 * 1024 - 137;
+  const sliceLength = 8192;
+  const fuseRead = await client.exec(pythonCommand(`
+import hashlib, json, os
+handle = os.open('/volume/cross-chunk.bin', os.O_RDONLY)
+try:
+    whole = b''
+    while len(whole) < ${crossChunk.length}:
+        chunk = os.read(handle, 65537)
+        if not chunk: break
+        whole += chunk
+    part = os.pread(handle, ${sliceLength}, ${sliceOffset})
+finally:
+    os.close(handle)
+print(json.dumps({'whole': hashlib.sha256(whole).hexdigest(), 'part': hashlib.sha256(part).hexdigest(), 'size': len(whole)}))
+`));
+  const fuseReadResult = JSON.parse(fuseRead.stdout.trim());
+  equal(fuseReadResult.size, crossChunk.length, 'FUSE sequential binary read length');
+  equal(fuseReadResult.whole, await sha256(crossChunk), 'FUSE sequential binary read checksum');
+  equal(
+    fuseReadResult.part,
+    await sha256(crossChunk.slice(sliceOffset, sliceOffset + sliceLength)),
+    'FUSE unaligned cross-chunk pread checksum',
+  );
+  const bridgeBefore = await client.perf();
+  assert(bridgeBefore.sessionId !== null, 'Hrana bridge session established');
+
+  const randomWriteLength = 2 * 256 * 1024 + 8192;
+  const expectedRandomWrite = new Uint8Array(randomWriteLength);
+  expectedRandomWrite.fill(65, 4093, 4093 + 8192);
+  expectedRandomWrite.fill(66, 256 * 1024 - 31, 256 * 1024 - 31 + 4096);
+  await client.writeFile('/random-write.bin', new Uint8Array(randomWriteLength).buffer);
+  const fuseWriteRegression = await client.exec(pythonCommand(`
+import json, os
+handle = os.open('/volume/random-write.bin', os.O_RDWR)
+try:
+    assert os.pwrite(handle, b'A' * 8192, 4093) == 8192
+    assert os.pwrite(handle, b'B' * 4096, ${256 * 1024 - 31}) == 4096
+    os.fsync(handle)
+finally:
+    os.close(handle)
+print(json.dumps({'ok': True}))
+`));
+  assert(JSON.parse(fuseWriteRegression.stdout).ok, 'FUSE unaligned random writes complete');
+  assert(
+    bytesEqual(await client.readFileBytes('/random-write.bin'), expectedRandomWrite),
+    'direct API sees exact FUSE random-write bytes',
+  );
+  const bridgeAfter = await client.perf();
+  equal(bridgeAfter.sessionId, bridgeBefore.sessionId, 'Hrana bridge session reused across execs');
+  assert(bridgeAfter.pipelineRequests > bridgeBefore.pipelineRequests, 'Hrana bridge counters advance across execs');
+
+  const scanFiles = Array.from({ length: 257 }, (_, index) => ({
+    path: `file-${String(index).padStart(4, '0')}.txt`,
+    body: 'x',
+  }));
+  await client.importTree('/scan', archive(scanFiles), true);
+  const scan = await client.exec(pythonCommand(`
+import json, os
+entries = []
+with os.scandir('/volume/scan') as iterator:
+    for entry in iterator:
+        entries.append((entry.name, entry.stat(follow_symlinks=False).st_size))
+print(json.dumps({'count': len(entries), 'unique': len(set(name for name, _ in entries)), 'bytes': sum(size for _, size in entries), 'names': sorted(name for name, _ in entries)}))
+`));
+  const scanResult = JSON.parse(scan.stdout);
+  equal(scanResult.count, scanFiles.length, 'FUSE directory traversal entry count');
+  equal(scanResult.unique, scanFiles.length, 'FUSE directory traversal has no duplicates');
+  equal(scanResult.bytes, scanFiles.length, 'FUSE readdir attributes match file sizes');
+  equal(JSON.stringify(scanResult.names), JSON.stringify(scanFiles.map((file) => file.path)), 'FUSE directory traversal names');
+
+  const missing = await client.exec('test ! -e /volume/appeared.txt');
+  equal(missing.exitCode, 0, 'FUSE primes a negative lookup');
+  await client.writeFile('/appeared.txt', 'appeared');
+  equal((await client.exec('cat /volume/appeared.txt')).stdout, 'appeared', 'direct create invalidates FUSE negative lookup');
+
+  const concurrentFiles = Array.from({ length: 8 }, (_, index) => ({
+    path: `file-${index}.bin`,
+    body: String(index).repeat(64 * 1024),
+  }));
+  await client.importTree('/concurrent', archive(concurrentFiles), true);
+  const concurrent = await client.exec(pythonCommand(`
+import concurrent.futures, json, pathlib
+paths = list(pathlib.Path('/volume/concurrent').glob('*.bin'))
+def read(path):
+    data = path.read_bytes()
+    return path.name, len(data), __import__('hashlib').sha256(data).hexdigest()
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    results = list(executor.map(read, paths))
+print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in results), 'hashes': sorted((name, digest) for name, _, digest in results)}))
+`));
+  const concurrentResult = JSON.parse(concurrent.stdout);
+  equal(concurrentResult.files, concurrentFiles.length, 'concurrent FUSE read count');
+  equal(concurrentResult.bytes, concurrentFiles.length * 64 * 1024, 'concurrent FUSE read bytes');
+  const expectedConcurrentHashes = await Promise.all(concurrentFiles.map(async (file) => [file.path, await sha256(new TextEncoder().encode(file.body))]));
+  equal(JSON.stringify(concurrentResult.hashes), JSON.stringify(expectedConcurrentHashes), 'concurrent FUSE read contents');
 
   const stream = await client.execStream('sleep 30; printf should-not-complete');
   const iterator = stream[Symbol.asyncIterator]();
@@ -120,6 +223,14 @@ function assert(condition, name) {
   if (!condition) throw new Error(`FAIL: ${name}`);
   passed++;
   console.log(`PASS: ${name}`);
+}
+
+function bytesEqual(left, right) {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index++) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 function equal(actual, expected, name) {

@@ -6,7 +6,11 @@
   "type": "module",
   "scripts": {
     "install-cli": "node scripts/install.mjs",
-    "test:scripts": "node --test scripts/*.test.mjs"
+    "test:scripts": "node --test scripts/*.test.mjs e2e/*.test.mjs",
+    "benchmark:deployed": "node e2e/benchmark.mjs",
+    "benchmark:quick": "node e2e/benchmark.mjs --profile quick --runs 3 --baseline benchmarks/quick-baseline.json",
+    "benchmark:compare": "node e2e/compare-benchmark.mjs",
+    "test:features:deployed": "node e2e/features.mjs"
   },
   "engines": {
     "node": ">=22"
