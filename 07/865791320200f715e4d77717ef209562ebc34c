@@ -1,0 +1,59 @@
+agentfs/build.sh
+  s_788014df2da890::t_05760ed5cc00f7 10,58,66
+benchmarks/quick-baseline.json
+  s_788014df2da890::t_d754770a8b42bb 1-94
+cli/src/api/types.ts
+  s_9e4b4bb5386909::t_0483300a8d7408 286,291-294,316
+cli/test/api-client.test.ts
+  s_9e4b4bb5386909::t_30b6e611515ed6 122
+docs/CHUNK_SIZE_BENCHMARK.md
+  s_9e4b4bb5386909::t_e3a1684cd920db 28,30,32,40-49
+docs/PERFORMANCE_BENCHMARK.md
+  s_788014df2da890::t_d8138c21b3d4f8 1-128
+e2e/benchmark-lib.mjs
+  s_a182381a128870::t_157a3675b40650 1-324
+e2e/benchmark-lib.test.mjs
+  s_a182381a128870::t_e3a37493f6e589 1-152
+e2e/compare-benchmark.mjs
+  s_9e4b4bb5386909::t_433655334eee1d 1-39
+e2e/features.mjs
+  s_788014df2da890::t_c0f0b05dbf690b 10,14-15,21-23,28,56-155,228-235
+sdk/src/types.ts
+  s_9e4b4bb5386909::t_a284d203db58fc 128-129,150
+worker/src/hrana-server.ts
+  s_9e4b4bb5386909::t_a3b5d5597952c1 239
+worker/src/index.ts
+  s_788014df2da890::t_81131a7709c447 176-181,356,401,1228,2490
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "07865791320200f715e4d77717ef209562ebc34c",
+  "prompts": {},
+  "sessions": {
+    "s_788014df2da890": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_083b38488ffeJmSEnvYj4fObHv",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_9e4b4bb5386909": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0863c6cbcffeNK2K8nhrCfYGHT",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_a182381a128870": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_083c47a98ffeDAF74gxTx1vVUB",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
