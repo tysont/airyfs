@@ -1,0 +1,77 @@
+agentfs/patches/0013-collapse-pwrite-size-query.patch
+  s_e75ddacbc6cd54::t_81970083a5782b 1-75
+agentfs/patches/0014-return-readdirplus-directory-stats.patch
+  s_e75ddacbc6cd54::t_51c0d2dd3b460a 1-336
+agentfs/patches/0015-remove-create-file-existence-precheck.patch
+  s_e75ddacbc6cd54::t_ea3da1b49414bc 1-120
+agentfs/patches/0016-atomic-remote-pwrite.patch
+  s_e75ddacbc6cd54::t_2db5318c61eec0 1-111
+agentfs/patches/0017-atomic-remote-create-operations.patch
+  s_e75ddacbc6cd54::t_cc3eade3bd406a 1-210
+agentfs/patches/0018-atomic-remote-truncate.patch
+  s_e75ddacbc6cd54::t_bd219085569f23 1-58
+agentfs/patches/0019-atomic-remote-rename.patch
+  s_e75ddacbc6cd54::t_a5cf003e608fc6 1-73
+agentfs/patches/0020-fix-rename-directory-replacement.patch
+  s_e75ddacbc6cd54::t_0745d67fc15c2f 1-61
+cli/src/api/types.ts
+  s_63393d58626b85::t_af01f3f7d61970 293
+cli/test/api-client.test.ts
+  s_63393d58626b85::t_f68fc465f9b426 122
+docs/PERFORMANCE_OPTIMIZATIONS.md
+  s_e75ddacbc6cd54::t_d1198769114966 1-1167
+e2e/benchmark-lib.mjs
+  s_0e08240248c09e::t_7acccd616a2848 25,33,40,137,151-154,205,207,313-317,322-325
+e2e/benchmark-lib.test.mjs
+  s_0e08240248c09e::t_89d97fe5317a3f 40-49,67-74,88-89,94
+e2e/benchmark.mjs
+  s_0e08240248c09e::t_ff052f2be2bdda 30-34,163-237,308-315,364-373,400-409,414-447,654-723
+e2e/container-regression-lib.mjs
+  s_0e08240248c09e::t_cc4e20b3eb9423 1-57
+e2e/container-regression-lib.test.mjs
+  s_0e08240248c09e::t_837646c3fe2260 1-29
+e2e/features.mjs
+  s_0e08240248c09e::t_80971aa3e20858 10,85,103-107,115,118-221,246-294,350-364
+package.json
+  s_0e08240248c09e::t_4737bdfdf96adc 13-16
+sdk/src/types.ts
+  s_63393d58626b85::t_4e11836c128314 129
+worker/src/hrana-server.ts
+  s_0e08240248c09e::t_48b4f67a7cf295 34-35,126-164,208,212-680,699-706,709-725,757-808,820,835,842,898,905-906,944,948,954-957,967,969,975,979,981-1018
+worker/src/index.ts
+  s_0e08240248c09e::t_9fea04cb339893 228,1349,1356,2494
+worker/test/hrana-server.test.ts
+  s_0e08240248c09e::t_0d5e4e2cd33f80 34-212,218,220-225,236-237,239,457-590,819-1253
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "28463afbedf53456247f7d0f3a1082e11ffbafc2",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_63393d58626b85": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_07fd0f8c9ffegRpvo025IbaWhs",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
