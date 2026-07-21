@@ -290,6 +290,7 @@ export interface HranaCounters {
 
 export interface PerfInfo extends HranaCounters {
   sessionId: string | null;
+  sessionEpoch: number;
 }
 
 export interface ContainerHealth {

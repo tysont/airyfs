@@ -1,0 +1,210 @@
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+index 918b0da..4ec0a5d 100644
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -492,6 +492,47 @@ impl AgentFS {
+         self.pool.clone()
+     }
+
++    async fn remote_create_node(
++        &self, conn: &Connection, kind: &str, parent_ino: i64, name: &str, mode: u32,
++        uid: u32, gid: u32, rdev: u64, target: &str, now_secs: i64, now_nsec: i64,
++    ) -> Result<i64> {
++        let mut rows = conn.query(
++            "SELECT airyfs_create_node_v1(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
++            (kind, parent_ino, name, mode as i64, uid, gid, rdev as i64, target, now_secs, now_nsec),
++        ).await?;
++        let status = rows.next().await?
++            .and_then(|row| row.get_value(0i32).ok())
++            .and_then(|value| value.as_integer().copied())
++            .ok_or_else(|| Error::Internal("remote create returned no status".to_string()))?;
++        match status {
++            1.. => Ok(status),
++            0 => Err(FsError::AlreadyExists.into()),
++            -1 => Err(FsError::NotFound.into()),
++            _ => Err(Error::Internal(format!("invalid remote create status: {status}"))),
++        }
++    }
++
++    async fn remote_link(
++        &self, conn: &Connection, ino: i64, parent_ino: i64, name: &str,
++        now_secs: i64, now_nsec: i64,
++    ) -> Result<()> {
++        let mut rows = conn.query(
++            "SELECT airyfs_link_v1(?, ?, ?, ?, ?)",
++            (ino, parent_ino, name, now_secs, now_nsec),
++        ).await?;
++        let status = rows.next().await?
++            .and_then(|row| row.get_value(0i32).ok())
++            .and_then(|value| value.as_integer().copied())
++            .ok_or_else(|| Error::Internal("remote link returned no status".to_string()))?;
++        match status {
++            1.. => Ok(()),
++            0 => Err(FsError::AlreadyExists.into()),
++            -1 => Err(FsError::NotFound.into()),
++            -2 => Err(FsError::IsADirectory.into()),
++            _ => Err(Error::Internal(format!("invalid remote link status: {status}"))),
++        }
++    }
++
+     /// Initialize the database schema
+     pub async fn initialize_schema(conn: &Connection) -> Result<()> {
+         // Create config table
+@@ -1112,6 +1153,16 @@ impl AgentFS {
+
+         let name = components.last().unwrap();
+
++        if self.pool.is_remote() {
++            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++            let ino = self.remote_create_node(
++                &conn, "mkdir", parent_ino, name, DEFAULT_DIR_MODE, uid, gid, 0, "",
++                dur.as_secs() as i64, dur.subsec_nanos() as i64,
++            ).await?;
++            self.dentry_cache.insert(parent_ino, name, ino);
++            return Ok(());
++        }
++
+         // Check if already exists (single query using parent_ino we already have)
+         if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+             return Err(FsError::AlreadyExists.into());
+@@ -1198,6 +1249,16 @@ impl AgentFS {
+
+         let name = components.last().unwrap();
+
++        if self.pool.is_remote() {
++            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++            let ino = self.remote_create_node(
++                &conn, "mknod", parent_ino, name, mode, uid, gid, rdev, "",
++                dur.as_secs() as i64, dur.subsec_nanos() as i64,
++            ).await?;
++            self.dentry_cache.insert(parent_ino, name, ino);
++            return Ok(());
++        }
++
+         // Check if already exists
+         if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+             return Err(FsError::AlreadyExists.into());
+@@ -1973,6 +2034,16 @@ impl AgentFS {
+
+         let name = components.last().unwrap();
+
++        if self.pool.is_remote() {
++            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++            let ino = self.remote_create_node(
++                &conn, "symlink", parent_ino, name, S_IFLNK | 0o777, uid, gid, 0, target,
++                dur.as_secs() as i64, dur.subsec_nanos() as i64,
++            ).await?;
++            self.dentry_cache.insert(parent_ino, name, ino);
++            return Ok(());
++        }
++
+         // Check if entry already exists (single query using parent_ino we already have)
+         if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+             return Err(FsError::AlreadyExists.into());
+@@ -2089,6 +2160,16 @@ impl AgentFS {
+
+         let name = components.last().unwrap();
+
++        if self.pool.is_remote() {
++            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++            self.remote_link(
++                &conn, ino, parent_ino, name,
++                dur.as_secs() as i64, dur.subsec_nanos() as i64,
++            ).await?;
++            self.dentry_cache.insert(parent_ino, name, ino);
++            return Ok(());
++        }
++
+         // Check if new path already exists (single query using parent_ino we already have)
+         if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+             return Err(FsError::AlreadyExists.into());
+@@ -3146,6 +3227,23 @@ impl FileSystem for AgentFS {
+         }
+         let conn = self.pool.get_connection().await?;
+
++        if self.pool.is_remote() {
++            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++            let now_secs = dur.as_secs() as i64;
++            let now_nsec = dur.subsec_nanos() as i64;
++            let dir_mode = super::S_IFDIR | (mode & 0o7777);
++            let ino = self.remote_create_node(
++                &conn, "mkdir", parent_ino, name, mode, uid, gid, 0, "", now_secs, now_nsec,
++            ).await?;
++            self.dentry_cache.insert(parent_ino, name, ino);
++            return Ok(Stats {
++                ino, mode: dir_mode, nlink: 2, uid, gid, size: 0,
++                atime: now_secs, mtime: now_secs, ctime: now_secs,
++                atime_nsec: now_nsec as u32, mtime_nsec: now_nsec as u32,
++                ctime_nsec: now_nsec as u32, rdev: 0,
++            });
++        }
++
+         // Check if already exists
+         if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+             return Err(FsError::AlreadyExists.into());
+@@ -3331,6 +3429,22 @@ impl FileSystem for AgentFS {
+         }
+         let conn = self.pool.get_connection().await?;
+
++        if self.pool.is_remote() {
++            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++            let now_secs = dur.as_secs() as i64;
++            let now_nsec = dur.subsec_nanos() as i64;
++            let ino = self.remote_create_node(
++                &conn, "mknod", parent_ino, name, mode, uid, gid, rdev, "", now_secs, now_nsec,
++            ).await?;
++            self.dentry_cache.insert(parent_ino, name, ino);
++            return Ok(Stats {
++                ino, mode, nlink: 1, uid, gid, size: 0,
++                atime: now_secs, mtime: now_secs, ctime: now_secs,
++                atime_nsec: now_nsec as u32, mtime_nsec: now_nsec as u32,
++                ctime_nsec: now_nsec as u32, rdev,
++            });
++        }
++
+         // Check if already exists
+         if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+             return Err(FsError::AlreadyExists.into());
+@@ -3422,6 +3536,23 @@ impl FileSystem for AgentFS {
+         }
+         let conn = self.pool.get_connection().await?;
+
++        if self.pool.is_remote() {
++            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++            let now_secs = dur.as_secs() as i64;
++            let now_nsec = dur.subsec_nanos() as i64;
++            let mode = S_IFLNK | 0o777;
++            let ino = self.remote_create_node(
++                &conn, "symlink", parent_ino, name, mode, uid, gid, 0, target, now_secs, now_nsec,
++            ).await?;
++            self.dentry_cache.insert(parent_ino, name, ino);
++            return Ok(Stats {
++                ino, mode, nlink: 1, uid, gid, size: target.len() as i64,
++                atime: now_secs, mtime: now_secs, ctime: now_secs,
++                atime_nsec: now_nsec as u32, mtime_nsec: now_nsec as u32,
++                ctime_nsec: now_nsec as u32, rdev: 0,
++            });
++        }
++
+         // Check if entry already exists
+         if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+             return Err(FsError::AlreadyExists.into());
+@@ -3676,6 +3807,18 @@ impl FileSystem for AgentFS {
+         }
+         let conn = self.pool.get_connection().await?;
+
++        if self.pool.is_remote() {
++            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++            self.remote_link(
++                &conn, ino, newparent_ino, newname,
++                dur.as_secs() as i64, dur.subsec_nanos() as i64,
++            ).await?;
++            self.dentry_cache.insert(newparent_ino, newname, ino);
++            return self.getattr_with_conn(&conn, ino)
++                .await?
++                .ok_or(FsError::NotFound.into());
++        }
++
+         // Check if source inode exists and is not a directory
+         {
+             let mut rows = conn

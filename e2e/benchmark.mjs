@@ -27,6 +27,11 @@ const endpoint = process.env.AIRYFS_URL;
 if (!endpoint) throw new Error('AIRYFS_URL is required');
 const token = process.env.AIRYFS_TOKEN;
 const profile = PROFILES[options.profile];
+const negativeLookups = 20;
+const fsyncCalls = 20;
+const truncateCalls = 20;
+const renameCalls = 20;
+const execCalls = 5;
 const samples = [];
 const volumes = [];
 
@@ -155,6 +160,81 @@ for (const chunkSize of options.chunkSizes) {
         samples.push(warm);
       }
 
+      if (selected('negative-lookups')) {
+        const missingPath = `${root}/missing-negative-entry`;
+        const misses = await runExecSample(client, {
+          name: 'fuse_negative_lookup_repeated', chunkSize, run,
+          command: negativeLookupCommand(missingPath, negativeLookups),
+        });
+        assert(misses.result.misses === negativeLookups, `${missingPath} missing lookup count`);
+        samples.push(misses);
+      }
+
+      if (selected('fsync')) {
+        const controlPath = `${root}/fsync-control.txt`;
+        const path = `${root}/fsync-repeated.txt`;
+        await checkedExec(client, `printf x > ${fusePath(controlPath)} && printf x > ${fusePath(path)} && stat ${fusePath(controlPath)} ${fusePath(path)} >/dev/null`);
+        const control = await runExecSample(client, {
+          name: 'fuse_fsync_open_close', chunkSize, run,
+          command: fsyncCommand(controlPath, 0),
+        });
+        assert(control.result.operations === 0, `${controlPath} fsync control count`);
+        samples.push(control);
+        const synced = await runExecSample(client, {
+          name: 'fuse_fsync_repeated', chunkSize, run,
+          command: fsyncCommand(path, fsyncCalls),
+        });
+        assert(synced.result.operations === fsyncCalls, `${path} fsync count`);
+        samples.push(synced);
+      }
+
+      if (selected('truncate')) {
+        const controlPath = `${root}/truncate-control.bin`;
+        const path = `${root}/truncate-repeated.bin`;
+        const body = new Blob([new Uint8Array(profile.randomFileBytes)]);
+        await client.writeFile(controlPath, body);
+        await client.writeFile(path, body);
+        const control = await runExecSample(client, {
+          name: 'fuse_truncate_open_close', chunkSize, run,
+          command: truncateCommand(controlPath, 0, profile.randomFileBytes, chunkSize),
+        });
+        assert(control.result.operations === 0, `${controlPath} truncate control count`);
+        samples.push(control);
+        const truncated = await runExecSample(client, {
+          name: 'fuse_truncate_repeated', chunkSize, run,
+          command: truncateCommand(path, truncateCalls, profile.randomFileBytes, chunkSize),
+        });
+        assert(truncated.result.operations === truncateCalls, `${path} truncate count`);
+        assert(Number((await client.headFile(path)).headers.get('Content-Length')) === profile.randomFileBytes, `${path} final truncate length`);
+        samples.push(truncated);
+      }
+
+      if (selected('rename')) {
+        const controlPath = `${root}/rename-control-a`;
+        const path = `${root}/rename-repeated-a`;
+        await client.writeFile(controlPath, 'control');
+        await client.writeFile(path, 'renamed');
+        const control = await runExecSample(client, {
+          name: 'fuse_rename_open_close', chunkSize, run,
+          command: renameCommand(controlPath, 0),
+        });
+        assert(control.result.operations === 0, `${controlPath} rename control count`);
+        samples.push(control);
+        const renamed = await runExecSample(client, {
+          name: 'fuse_rename_repeated', chunkSize, run,
+          command: renameCommand(path, renameCalls),
+        });
+        assert(renamed.result.operations === renameCalls, `${path} rename count`);
+        assert(await client.readFileText(path) === 'renamed', `${path} final rename contents`);
+        samples.push(renamed);
+      }
+
+      if (selected('exec')) {
+        samples.push(await runRepeatedExecSample(client, {
+          name: 'container_exec_noop_repeated', chunkSize, run, count: execCalls,
+        }));
+      }
+
       if (selected('small-files')) {
         const path = `${root}/small-files`;
         await client.makeDirectory(path);
@@ -225,7 +305,14 @@ const report = {
   profile: options.profile,
   runs: options.runs,
   scenarios: options.scenarios,
-  configuration: profile,
+  configuration: {
+    ...profile,
+    ...(selected('negative-lookups') ? { negativeLookups } : {}),
+    ...(selected('fsync') ? { fsyncCalls } : {}),
+    ...(selected('truncate') ? { truncateCalls } : {}),
+    ...(selected('rename') ? { renameCalls } : {}),
+    ...(selected('exec') ? { execCalls } : {}),
+  },
   volumes,
   samples,
   summary: summarizeSamples(samples),
@@ -274,8 +361,16 @@ async function runExecSample(client, input) {
     commitsPerSecond: commits === null || result.operationMs === 0
       ? null
       : commits / (result.operationMs / 1000),
-    pipelineRequests: counterDelta(before.pipelineRequests, perf.pipelineRequests, before.sessionId, perf.sessionId),
-    sqlStatements: counterDelta(before.sqlStatements, perf.sqlStatements, before.sessionId, perf.sessionId),
+    pipelineRequests: counterDelta(
+      before.pipelineRequests, perf.pipelineRequests,
+      before.sessionId, perf.sessionId,
+      before.sessionEpoch, perf.sessionEpoch,
+    ),
+    sqlStatements: counterDelta(
+      before.sqlStatements, perf.sqlStatements,
+      before.sessionId, perf.sessionId,
+      before.sessionEpoch, perf.sessionEpoch,
+    ),
     result,
   };
 }
@@ -302,9 +397,51 @@ async function runClientSample(client, input) {
     throughputMiBps: null,
     operationsPerSecond: input.operations / (clientMs / 1000),
     commitsPerSecond: input.commits ? input.commits / (clientMs / 1000) : null,
-    pipelineRequests: counterDelta(before.pipelineRequests, perf.pipelineRequests, before.sessionId, perf.sessionId),
-    sqlStatements: counterDelta(before.sqlStatements, perf.sqlStatements, before.sessionId, perf.sessionId),
+    pipelineRequests: counterDelta(
+      before.pipelineRequests, perf.pipelineRequests,
+      before.sessionId, perf.sessionId,
+      before.sessionEpoch, perf.sessionEpoch,
+    ),
+    sqlStatements: counterDelta(
+      before.sqlStatements, perf.sqlStatements,
+      before.sessionId, perf.sessionId,
+      before.sessionEpoch, perf.sessionEpoch,
+    ),
     result: { operationMs: clientMs, operations: input.operations, commits: input.commits ?? null, stdout },
+  };
+}
+
+async function runRepeatedExecSample(client, input) {
+  const before = await client.perf();
+  const started = performance.now();
+  for (let index = 0; index < input.count; index++) {
+    const result = await client.exec('true');
+    assert(result.exitCode === 0 && result.stdout === '' && result.stderr === '', `warmed exec ${index + 1}`);
+  }
+  const clientMs = performance.now() - started;
+  const perf = await client.perf();
+  return {
+    name: input.name,
+    chunkSize: input.chunkSize,
+    run: input.run,
+    operationMs: clientMs,
+    clientMs,
+    bytes: null,
+    operations: input.count,
+    throughputMiBps: null,
+    operationsPerSecond: input.count / (clientMs / 1000),
+    commitsPerSecond: null,
+    pipelineRequests: counterDelta(
+      before.pipelineRequests, perf.pipelineRequests,
+      before.sessionId, perf.sessionId,
+      before.sessionEpoch, perf.sessionEpoch,
+    ),
+    sqlStatements: counterDelta(
+      before.sqlStatements, perf.sqlStatements,
+      before.sessionId, perf.sessionId,
+      before.sessionEpoch, perf.sessionEpoch,
+    ),
+    result: { operationMs: clientMs, operations: input.count },
   };
 }
 
@@ -511,6 +648,76 @@ for index in range(count):
         handle.write(b'x')
 elapsed = (time.perf_counter_ns() - start) / 1e6
 print(json.dumps({'operationMs': elapsed, 'operations': count, 'entries': len(os.listdir(path)), 'bytes': count}))
+`);
+}
+
+function negativeLookupCommand(path, count) {
+  return pythonCommand(`
+import json, os, time
+path = ${JSON.stringify(fusePath(path))}
+count = ${count}
+misses = 0
+start = time.perf_counter_ns()
+for _ in range(count):
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        misses += 1
+elapsed = (time.perf_counter_ns() - start) / 1e6
+assert misses == count, (misses, count)
+print(json.dumps({'operationMs': elapsed, 'operations': count, 'misses': misses}))
+`);
+}
+
+function fsyncCommand(path, count) {
+  return pythonCommand(`
+import json, os, time
+path = ${JSON.stringify(fusePath(path))}
+count = ${count}
+handle = os.open(path, os.O_RDWR)
+start = time.perf_counter_ns()
+try:
+    for _ in range(count):
+        os.fsync(handle)
+finally:
+    os.close(handle)
+elapsed = (time.perf_counter_ns() - start) / 1e6
+print(json.dumps({'operationMs': elapsed, 'operations': count}))
+`);
+}
+
+function truncateCommand(path, count, fullSize, chunkSize) {
+  return pythonCommand(`
+import json, os, time
+path = ${JSON.stringify(fusePath(path))}
+count = ${count}
+full_size = ${fullSize}
+short_size = ${chunkSize * 8 + 123}
+handle = os.open(path, os.O_RDWR)
+start = time.perf_counter_ns()
+try:
+    for index in range(count):
+        os.ftruncate(handle, short_size if index % 2 == 0 else full_size)
+finally:
+    os.close(handle)
+elapsed = (time.perf_counter_ns() - start) / 1e6
+print(json.dumps({'operationMs': elapsed, 'operations': count}))
+`);
+}
+
+function renameCommand(path, count) {
+  return pythonCommand(`
+import json, os, time
+first = ${JSON.stringify(fusePath(path))}
+second = first[:-1] + 'b'
+count = ${count}
+current, target = first, second
+start = time.perf_counter_ns()
+for _ in range(count):
+    os.rename(current, target)
+    current, target = target, current
+elapsed = (time.perf_counter_ns() - start) / 1e6
+print(json.dumps({'operationMs': elapsed, 'operations': count}))
 `);
 }
 

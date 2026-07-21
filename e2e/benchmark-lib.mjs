@@ -22,7 +22,7 @@ export const PROFILES = Object.freeze({
   }),
 });
 
-const ALL_SCENARIOS = Object.freeze([
+const DEFAULT_SCENARIOS = Object.freeze([
   'direct-sequential',
   'fuse-sequential',
   'fuse-random',
@@ -30,13 +30,14 @@ const ALL_SCENARIOS = Object.freeze([
   'small-files',
   'git',
 ]);
+const ALL_SCENARIOS = Object.freeze([...DEFAULT_SCENARIOS, 'negative-lookups', 'fsync', 'truncate', 'rename', 'exec']);
 
 export function parseBenchmarkArgs(argv) {
   const options = {
     profile: 'quick',
     chunkSizes: [256 * 1024],
     runs: 3,
-    scenarios: [...ALL_SCENARIOS],
+    scenarios: [...DEFAULT_SCENARIOS],
     prefix: 'airyfs-bench',
     label: null,
     json: false,
@@ -133,6 +134,7 @@ export function scoreReport(baseline, candidate) {
   const candidateByKey = new Map(candidate.summary.map((entry) => [`${entry.chunkSize}:${entry.name}`, entry]));
   const ratios = new Map();
   for (const before of baseline.summary) {
+    if (isControlSample(before.name)) continue;
     const after = candidateByKey.get(`${before.chunkSize}:${before.name}`);
     const ratio = weightedLatencyRatio(before, after);
     if (ratio === null) throw new Error(`Invalid latency percentiles for ${before.chunkSize}:${before.name}`);
@@ -146,7 +148,10 @@ export function scoreReport(baseline, candidate) {
     addRatio(ratios, 'startup', ratio);
   }
   const groups = Object.fromEntries([...ratios.entries()].map(([name, values]) => [name, roundScore(100 * geometricMean(values))]));
-  const expectedGroups = new Set([...baseline.summary.map((entry) => scoreGroup(entry.name)), 'startup']);
+  const expectedGroups = new Set([
+    ...baseline.summary.filter((entry) => !isControlSample(entry.name)).map((entry) => scoreGroup(entry.name)),
+    'startup',
+  ]);
   if ([...expectedGroups].some((group) => !Object.hasOwn(groups, group))) {
     throw new Error('Benchmark score is missing a workload group');
   }
@@ -197,8 +202,9 @@ export function validateComparableReports(baseline, candidate) {
   }
 }
 
-export function counterDelta(before, after, beforeSession, afterSession) {
+export function counterDelta(before, after, beforeSession, afterSession, beforeEpoch, afterEpoch) {
   return typeof beforeSession === 'string' && beforeSession === afterSession
+    && Number.isSafeInteger(beforeEpoch) && beforeEpoch >= 0 && beforeEpoch === afterEpoch
     && Number.isFinite(before) && Number.isFinite(after) && after >= before
     ? after - before
     : null;
@@ -304,8 +310,17 @@ function scoreGroup(name) {
   if (name.startsWith('fuse_random_')) return 'fuse-random';
   if (name.startsWith('fuse_metadata_')) return 'metadata';
   if (name.startsWith('fuse_small_')) return 'small-files';
+  if (name.startsWith('fuse_negative_')) return 'negative-lookups';
+  if (name.startsWith('fuse_fsync_')) return 'fsync';
+  if (name.startsWith('fuse_truncate_')) return 'truncate';
+  if (name.startsWith('fuse_rename_')) return 'rename';
+  if (name.startsWith('container_exec_')) return 'exec';
   if (name.startsWith('git_')) return 'git';
   return 'other';
+}
+
+function isControlSample(name) {
+  return name.endsWith('_open_close');
 }
 
 function addRatio(groups, name, ratio) {

@@ -1,0 +1,336 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyson Trautmann <tysont@gmail.com>
+Date: Mon, 20 Jul 2026 11:00:00 -0700
+Subject: [PATCH] Return readdirplus directory stats
+
+Fetch the directory and parent attributes alongside its entries so FUSE
+readdirplus can fill the "." and ".." rows without extra getattr calls. Add a
+default FileSystem::readdir_plus_with_directory_stats built on the existing
+primitives, override it in AgentFS with a single CTE, forward it
+through the mount adapter, and consume the enriched listing in the FUSE
+readdirplus handler.
+---
+ cli/src/fuse.rs                    |  56 ++++++--------------
+ cli/src/mount/fuse.rs              |  11 ++++
+ sdk/rust/src/filesystem/agentfs.rs | 104 ++++++++++++++++++++++++++++++++++++-
+ sdk/rust/src/filesystem/mod.rs     |  34 ++++++++++++
+ sdk/rust/src/lib.rs                |   6 +--
+ 5 files changed, 166 insertions(+), 45 deletions(-)
+
+diff --git a/cli/src/fuse.rs b/cli/src/fuse.rs
+--- a/cli/src/fuse.rs
++++ b/cli/src/fuse.rs
+@@ -477,12 +477,12 @@ impl Filesystem for AgentFSFuse {
+         tracing::debug!("FUSE::readdirplus: ino={}, offset={}", ino, offset);
+
+         let fs = self.fs.clone();
+-        let entries_result = self
++        let listing_result = self
+             .runtime
+-            .block_on(async move { fs.readdir_plus(ino as i64).await });
++            .block_on(async move { fs.readdir_plus_with_directory_stats(ino as i64).await });
+
+-        let entries = match entries_result {
+-            Ok(Some(entries)) => entries,
++        let listing = match listing_result {
++            Ok(Some(listing)) => listing,
+             Ok(None) => {
+                 reply.error(libc::ENOENT);
+                 return;
+@@ -493,59 +493,35 @@ impl Filesystem for AgentFSFuse {
+             }
+         };
+
+-        // Get current directory stats for "."
+-        let fs = self.fs.clone();
+-        let dir_stats = self
+-            .runtime
+-            .block_on(async move { fs.getattr(ino as i64).await })
+-            .ok()
+-            .flatten();
+-
+-        // Determine parent inode and stats for ".." entry
+-        // In the inode-based API we don't track parent relationships directly.
+-        // Use root's stats for ".." as a fallback - the kernel handles proper ".." resolution.
+-        let (parent_ino, parent_stats) = if ino == 1 {
+-            (1u64, dir_stats.clone()) // Root's parent is itself
+-        } else {
+-            // Use root inode as fallback for parent
+-            let fs = self.fs.clone();
+-            let parent_stats = self
+-                .runtime
+-                .block_on(async move { fs.getattr(1).await })
+-                .ok()
+-                .flatten();
+-            (1u64, parent_stats)
+-        };
++        let dir_stats = listing.directory;
++        let parent_stats = listing.parent;
++        let parent_ino = parent_stats.ino as u64;
+
+         // Build the entries list with full attributes
+         let mut offset_counter = 0i64;
+
+         // Add "." entry
+         if offset <= offset_counter {
+-            if let Some(ref stats) = dir_stats {
+-                let attr = fillattr(stats);
+-                if reply.add(ino, offset_counter + 1, ".", &self.cache_ttl, &attr, 0) {
+-                    reply.ok();
+-                    return;
+-                }
++            let attr = fillattr(&dir_stats);
++            if reply.add(ino, offset_counter + 1, ".", &self.cache_ttl, &attr, 0) {
++                reply.ok();
++                return;
+             }
+         }
+         offset_counter += 1;
+
+         // Add ".." entry
+         if offset <= offset_counter {
+-            if let Some(ref stats) = parent_stats {
+-                let attr = fillattr(stats);
+-                if reply.add(parent_ino, offset_counter + 1, "..", &self.cache_ttl, &attr, 0) {
+-                    reply.ok();
+-                    return;
+-                }
++            let attr = fillattr(&parent_stats);
++            if reply.add(parent_ino, offset_counter + 1, "..", &self.cache_ttl, &attr, 0) {
++                reply.ok();
++                return;
+             }
+         }
+         offset_counter += 1;
+
+         // Add directory entries with their attributes
+-        for entry in &entries {
++        for entry in &listing.entries {
+             if offset <= offset_counter {
+                 let attr = fillattr(&entry.stats);
+
+diff --git a/cli/src/mount/fuse.rs b/cli/src/mount/fuse.rs
+--- a/cli/src/mount/fuse.rs
++++ b/cli/src/mount/fuse.rs
+@@ -120,6 +120,17 @@ impl agentfs_sdk::FileSystem for MutexFsAdapter {
+         self.inner.lock().await.readdir_plus(ino).await
+     }
+
++    async fn readdir_plus_with_directory_stats(
++        &self,
++        ino: i64,
++    ) -> std::result::Result<Option<agentfs_sdk::DirectoryListing>, agentfs_sdk::error::Error> {
++        self.inner
++            .lock()
++            .await
++            .readdir_plus_with_directory_stats(ino)
++            .await
++    }
++
+     async fn chmod(
+         &self,
+         ino: i64,
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
+ use libsql::{Builder, Connection, TransactionBehavior, Value};
+
+ use super::{
+-    BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, Stats, TimeChange,
+-    DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, MAX_NAME_LEN, S_IFLNK, S_IFMT, S_IFREG,
++    BoxedFile, DirEntry, DirectoryListing, File, FileSystem, FilesystemStats, FsError, Stats,
++    TimeChange, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, MAX_NAME_LEN, S_IFLNK, S_IFMT, S_IFREG,
+ };
+ use crate::connection_pool::ConnectionPool;
+ use crate::schema::AGENTFS_SCHEMA_VERSION;
+@@ -2873,6 +2873,79 @@ impl FileSystem for AgentFS {
+         Ok(Some(entries))
+     }
+
++    async fn readdir_plus_with_directory_stats(
++        &self,
++        ino: i64,
++    ) -> Result<Option<DirectoryListing>> {
++        let conn = self.pool.get_connection().await?;
++        let stmt = conn
++            .prepare(
++                "WITH directory AS (\
++                   SELECT i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime, i.rdev, \
++                          i.atime_nsec, i.mtime_nsec, i.ctime_nsec, \
++                          COALESCE((SELECT parent_ino FROM fs_dentry WHERE ino = i.ino LIMIT 1), i.ino) AS parent_ino \
++                   FROM fs_inode i WHERE i.ino = ?\
++                 ) \
++                 SELECT d.ino, d.mode, d.nlink, d.uid, d.gid, d.size, d.atime, d.mtime, d.ctime, d.rdev, \
++                        d.atime_nsec, d.mtime_nsec, d.ctime_nsec, 0 AS entry_kind, '' AS name \
++                 FROM directory d \
++                 UNION ALL \
++                 SELECT p.ino, p.mode, p.nlink, p.uid, p.gid, p.size, p.atime, p.mtime, p.ctime, p.rdev, \
++                        p.atime_nsec, p.mtime_nsec, p.ctime_nsec, 1 AS entry_kind, '' AS name \
++                 FROM directory d JOIN fs_inode p ON p.ino = d.parent_ino \
++                 UNION ALL \
++                 SELECT i.ino, i.mode, i.nlink, i.uid, i.gid, i.size, i.atime, i.mtime, i.ctime, i.rdev, \
++                        i.atime_nsec, i.mtime_nsec, i.ctime_nsec, 2 AS entry_kind, e.name \
++                 FROM directory d JOIN fs_dentry e ON e.parent_ino = d.ino JOIN fs_inode i ON i.ino = e.ino \
++                 ORDER BY entry_kind, name",
++            )
++            .await?;
++        let mut rows = stmt.query([ino]).await?;
++        let mut directory = None;
++        let mut parent = None;
++        let mut entries = Vec::new();
++
++        while let Some(row) = rows.next().await? {
++            let stats = Self::build_stats_from_row(&row)?;
++            let entry_kind = row
++                .get_value(13i32)
++                .ok()
++                .and_then(|value| value.as_integer().copied())
++                .unwrap_or(-1);
++            match entry_kind {
++                0 => directory = Some(stats),
++                1 => parent = Some(stats),
++                2 => {
++                    let name = row
++                        .get_value(14i32)
++                        .ok()
++                        .and_then(|value| match value {
++                            Value::Text(name) => Some(name.clone()),
++                            _ => None,
++                        })
++                        .unwrap_or_default();
++                    if !name.is_empty() {
++                        entries.push(DirEntry { name, stats });
++                    }
++                }
++                _ => {}
++            }
++        }
++
++        let Some(directory) = directory else {
++            return Ok(None);
++        };
++        if !directory.is_directory() {
++            return Err(FsError::NotADirectory.into());
++        }
++        let parent = parent.unwrap_or_else(|| directory.clone());
++        Ok(Some(DirectoryListing {
++            directory,
++            parent,
++            entries,
++        }))
++    }
++
+     async fn chmod(&self, ino: i64, mode: u32) -> Result<()> {
+         let conn = self.pool.get_connection().await?;
+
+@@ -4541,6 +4614,33 @@ mod tests {
+         Ok(())
+     }
+
++    #[tokio::test]
++    async fn test_readdir_plus_returns_directory_and_parent_stats() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        fs.mkdir("/parent", 0, 0).await?;
++        fs.mkdir("/parent/child", 0, 0).await?;
++        let parent_ino = fs.resolve_path("/parent").await?.unwrap();
++        let child_ino = fs.resolve_path("/parent/child").await?.unwrap();
++
++        let root = fs
++            .readdir_plus_with_directory_stats(ROOT_INO)
++            .await?
++            .unwrap();
++        assert_eq!(root.directory.ino, ROOT_INO);
++        assert_eq!(root.parent.ino, ROOT_INO);
++
++        let child = fs
++            .readdir_plus_with_directory_stats(child_ino)
++            .await?
++            .unwrap();
++        assert_eq!(child.directory.ino, child_ino);
++        assert_eq!(child.parent.ino, parent_ino);
++        assert!(child.directory.is_directory());
++        assert!(child.parent.is_directory());
++
++        Ok(())
++    }
++
+     #[tokio::test]
+     async fn test_pwrite_basic() -> Result<()> {
+         let (fs, _dir) = create_test_fs().await?;
+diff --git a/sdk/rust/src/filesystem/mod.rs b/sdk/rust/src/filesystem/mod.rs
+--- a/sdk/rust/src/filesystem/mod.rs
++++ b/sdk/rust/src/filesystem/mod.rs
+@@ -86,6 +86,7 @@ pub const S_IFIFO: u32 = 0o010000; // FIFO (named pipe)
+ pub const S_IFCHR: u32 = 0o020000; // Character device
+ pub const S_IFBLK: u32 = 0o060000; // Block device
+ pub const S_IFSOCK: u32 = 0o140000; // Socket
++const ROOT_INO: i64 = 1;
+
+ // Default permissions
+ pub const DEFAULT_FILE_MODE: u32 = S_IFREG | 0o644; // Regular file, rw-r--r--
+@@ -138,6 +139,14 @@ pub struct DirEntry {
+     pub stats: Stats,
+ }
+
++/// Directory entries plus attributes for the directory and its parent.
++#[derive(Debug, Clone)]
++pub struct DirectoryListing {
++    pub directory: Stats,
++    pub parent: Stats,
++    pub entries: Vec<DirEntry>,
++}
++
+ impl Stats {
+     pub fn is_file(&self) -> bool {
+         (self.mode & S_IFMT) == S_IFREG
+@@ -218,6 +227,31 @@ pub trait FileSystem: Send + Sync {
+     /// Returns `Ok(None)` if the directory does not exist.
+     async fn readdir_plus(&self, ino: i64) -> Result<Option<Vec<DirEntry>>>;
+
++    /// List directory contents with the attributes needed for `.` and `..`.
++    async fn readdir_plus_with_directory_stats(
++        &self,
++        ino: i64,
++    ) -> Result<Option<DirectoryListing>> {
++        let Some(entries) = self.readdir_plus(ino).await? else {
++            return Ok(None);
++        };
++        let Some(directory) = self.getattr(ino).await? else {
++            return Ok(None);
++        };
++        let parent = if ino == ROOT_INO {
++            directory.clone()
++        } else {
++            self.getattr(ROOT_INO)
++                .await?
++                .unwrap_or_else(|| directory.clone())
++        };
++        Ok(Some(DirectoryListing {
++            directory,
++            parent,
++            entries,
++        }))
++    }
++
+     /// Change file mode/permissions by inode.
+     async fn chmod(&self, ino: i64, mode: u32) -> Result<()>;
+
+diff --git a/sdk/rust/src/lib.rs b/sdk/rust/src/lib.rs
+--- a/sdk/rust/src/lib.rs
++++ b/sdk/rust/src/lib.rs
+@@ -16,9 +16,9 @@ use libsql::{Builder, Value};
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ pub use filesystem::HostFS;
+ pub use filesystem::{
+-    BoxedFile, DirEntry, File, FileSystem, FilesystemStats, FsError, OverlayFS, Stats, TimeChange,
+-    DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT,
+-    S_IFREG, S_IFSOCK,
++    BoxedFile, DirEntry, DirectoryListing, File, FileSystem, FilesystemStats, FsError, OverlayFS,
++    Stats, TimeChange, DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
++    S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK,
+ };
+ pub use kvstore::KvStore;
+ pub use schema::{SchemaVersion, AGENTFS_SCHEMA_VERSION};
+--
+2.50.1 (Apple Git-155)

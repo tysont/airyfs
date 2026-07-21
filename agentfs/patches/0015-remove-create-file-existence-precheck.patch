@@ -1,0 +1,120 @@
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+index 08e81bc..3ccfb6a 100644
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -1261,10 +1261,6 @@ impl AgentFS {
+
+         let name = components.last().unwrap();
+
+-        if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+-            return Err(FsError::AlreadyExists.into());
+-        }
+-
+         let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;
+
+         let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+@@ -1298,11 +1294,15 @@ impl AgentFS {
+                 .ok_or_else(|| Error::Internal("failed to get inode".to_string()))?
+         };
+
+-        conn.execute(
+-            "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
++        let inserted = conn.execute(
++            "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?) \
++             ON CONFLICT(parent_ino, name) DO NOTHING",
+             (name.as_str(), parent_ino, ino),
+         )
+         .await?;
++        if inserted == 0 {
++            return Err(FsError::AlreadyExists.into());
++        }
+
+         txn.commit().await?;
+
+@@ -3211,11 +3211,6 @@ impl FileSystem for AgentFS {
+         }
+         let conn = self.pool.get_connection().await?;
+
+-        // Check if already exists
+-        if self.lookup_child(&conn, parent_ino, name).await?.is_some() {
+-            return Err(FsError::AlreadyExists.into());
+-        }
+-
+         let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;
+
+         let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+@@ -3250,11 +3245,15 @@ impl FileSystem for AgentFS {
+                 .ok_or_else(|| Error::Internal("failed to get inode".to_string()))?
+         };
+
+-        conn.execute(
+-            "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?)",
++        let inserted = conn.execute(
++            "INSERT INTO fs_dentry (name, parent_ino, ino) VALUES (?, ?, ?) \
++             ON CONFLICT(parent_ino, name) DO NOTHING",
+             (name, parent_ino, ino),
+         )
+         .await?;
++        if inserted == 0 {
++            return Err(FsError::AlreadyExists.into());
++        }
+
+         // Update parent directory ctime and mtime
+         conn.execute(
+@@ -5487,4 +5486,56 @@ mod tests {
+         assert_eq!(open_count(&fs, ino).await?, 2, "second pin must increment open_count");
+         Ok(())
+     }
++
++    async fn orphan_inode_count(fs: &AgentFS) -> Result<i64> {
++        let conn = fs.get_connection().await?;
++        let mut rows = conn
++            .query(
++                "SELECT COUNT(*) FROM fs_inode i \
++                 LEFT JOIN fs_dentry d ON d.ino = i.ino \
++                 WHERE i.ino != ? AND d.ino IS NULL",
++                [ROOT_INO],
++            )
++            .await?;
++        Ok(rows
++            .next()
++            .await?
++            .and_then(|row| row.get_value(0i32).ok())
++            .and_then(|value| value.as_integer().copied())
++            .unwrap_or(0))
++    }
++
++    #[tokio::test]
++    async fn test_create_file_conflict_maps_to_eexist_without_orphan() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        fs.create_file("/same.txt", DEFAULT_FILE_MODE, 0, 0).await?;
++
++        let duplicate = fs.create_file("/same.txt", DEFAULT_FILE_MODE, 0, 0).await;
++        assert!(matches!(duplicate, Err(Error::Fs(FsError::AlreadyExists))));
++        assert_eq!(orphan_inode_count(&fs).await?, 0);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn test_concurrent_create_file_has_one_winner_and_no_orphan() -> Result<()> {
++        let (fs, _dir) = create_test_fs().await?;
++        let first = fs.clone();
++        let second = fs.clone();
++        let (left, right) = tokio::join!(
++            FileSystem::create_file(&first, ROOT_INO, "race.txt", DEFAULT_FILE_MODE, 0, 0),
++            FileSystem::create_file(&second, ROOT_INO, "race.txt", DEFAULT_FILE_MODE, 0, 0),
++        );
++
++        let results = [left, right];
++        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
++        assert_eq!(
++            results
++                .iter()
++                .filter(|result| matches!(result, Err(Error::Fs(FsError::AlreadyExists))))
++                .count(),
++            1,
++        );
++        assert_eq!(orphan_inode_count(&fs).await?, 0);
++        Ok(())
++    }
+ }

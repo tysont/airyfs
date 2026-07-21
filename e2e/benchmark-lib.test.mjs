@@ -37,6 +37,16 @@ test('parses benchmark selections and validates chunk sizes', () => {
   assert.throws(() => parseBenchmarkArgs(['--chunk-sizes', '5000']), /Invalid chunk size/);
   assert.throws(() => parseBenchmarkArgs(['--scenarios', 'unknown']), /Unknown scenarios/);
   assert.throws(() => parseBenchmarkArgs(['--scenarios', ',,']), /At least one scenario/);
+  assert.deepEqual(parseBenchmarkArgs(['--scenarios', 'negative-lookups']).scenarios, ['negative-lookups']);
+  assert.deepEqual(parseBenchmarkArgs(['--scenarios', 'fsync']).scenarios, ['fsync']);
+  assert.deepEqual(parseBenchmarkArgs(['--scenarios', 'truncate']).scenarios, ['truncate']);
+  assert.deepEqual(parseBenchmarkArgs(['--scenarios', 'rename']).scenarios, ['rename']);
+  assert.deepEqual(parseBenchmarkArgs(['--scenarios', 'exec']).scenarios, ['exec']);
+  assert.equal(parseBenchmarkArgs([]).scenarios.includes('negative-lookups'), false);
+  assert.equal(parseBenchmarkArgs([]).scenarios.includes('fsync'), false);
+  assert.equal(parseBenchmarkArgs([]).scenarios.includes('truncate'), false);
+  assert.equal(parseBenchmarkArgs([]).scenarios.includes('rename'), false);
+  assert.equal(parseBenchmarkArgs([]).scenarios.includes('exec'), false);
 });
 
 test('compares matching benchmark scenarios', () => {
@@ -54,11 +64,14 @@ test('compares matching benchmark scenarios', () => {
   }]);
 });
 
-test('computes counter deltas without misreporting session resets', () => {
-  assert.equal(counterDelta(10, 14, 'one', 'one'), 4);
-  assert.equal(counterDelta(10, 14, 'one', 'two'), null);
-  assert.equal(counterDelta(10, 2, 'one', 'one'), null);
-  assert.equal(counterDelta(undefined, 2, 'one', 'one'), null);
+test('computes counter deltas only within one session epoch', () => {
+  assert.equal(counterDelta(10, 14, 'one', 'one', 1, 1), 4);
+  assert.equal(counterDelta(10, 14, 'one', 'two', 1, 1), null);
+  assert.equal(counterDelta(10, 2, 'one', 'one', 1, 2), null);
+  assert.equal(counterDelta(10, 14, 'one', 'one', 1, 2), null);
+  assert.equal(counterDelta(10, 14, 'one', 'one', undefined, undefined), null);
+  assert.equal(counterDelta(10, 14, 'one', 'one', -1, -1), null);
+  assert.equal(counterDelta(undefined, 14, 'one', 'one', 1, 1), null);
 });
 
 test('rejects benchmark comparisons with missing or incompatible samples', () => {
@@ -72,10 +85,13 @@ test('rejects benchmark comparisons with missing or incompatible samples', () =>
 test('scores balanced workload groups from p50, p95, and p99 latency', () => {
   const baseline = scoreFixture(100, 100);
   const candidate = scoreFixture(50, 200);
+  baseline.summary.push(summaryEntry('fuse_rename_open_close', 1000));
+  candidate.summary.push(summaryEntry('fuse_rename_open_close', 1));
   const score = scoreReport(baseline, candidate);
   assert.equal(score.groups.direct, 200);
   assert.equal(score.groups.git, 50);
   assert.equal(score.groups.startup, 100);
+  assert.equal(score.groups.rename, undefined);
   assert.equal(score.overall, 100);
   const invalid = structuredClone(candidate);
   invalid.summary[0].clientMsP99 = null;

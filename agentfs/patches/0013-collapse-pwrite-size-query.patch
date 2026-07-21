@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyson Trautmann <tysont@gmail.com>
+Date: Mon, 20 Jul 2026 10:20:00 -0700
+Subject: [PATCH] Fold pwrite size lookup into inode update
+
+Use SQLite's scalar MAX function to preserve an inode's existing size during
+in-place writes. This removes the serial size query from each non-empty pwrite
+without changing chunk writes or transaction boundaries.
+---
+ sdk/rust/src/filesystem/agentfs.rs | 38 +++++++++++++-----------------
+ 1 file changed, 17 insertions(+), 21 deletions(-)
+
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -199,21 +199,6 @@ impl File for AgentFSFile {
+
+         let conn = self.pool.get_connection().await?;
+         let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;
+-        // Get current file size
+-        let current_size = {
+-            let stmt = conn
+-                .prepare("SELECT size FROM fs_inode WHERE ino = ?")
+-                .await?;
+-            let mut rows = stmt.query([self.ino]).await?;
+-            if let Some(row) = rows.next().await? {
+-                row.get_value(0i32)
+-                    .ok()
+-                    .and_then(|v| v.as_integer().copied())
+-                    .unwrap_or(0) as u64
+-            } else {
+-                0
+-            }
+-        };
+
+         // Write the actual data (sparse gaps are handled by pread which fills
+         // missing chunks with zeros, so no need to zero-fill here)
+@@ -221,14 +206,14 @@ impl File for AgentFSFile {
+             .await?;
+
+         // Update file size and mtime
+-        let new_size = std::cmp::max(current_size, offset + data.len() as u64);
++        let write_end = offset + data.len() as u64;
+         let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+         let now_secs = dur.as_secs() as i64;
+         let now_nsec = dur.subsec_nanos() as i64;
+         let stmt = conn
+-            .prepare("UPDATE fs_inode SET size = ?, mtime = ?, mtime_nsec = ? WHERE ino = ?")
++            .prepare("UPDATE fs_inode SET size = MAX(size, ?), mtime = ?, mtime_nsec = ? WHERE ino = ?")
+             .await?;
+-        stmt.execute((new_size as i64, now_secs, now_nsec, self.ino))
++        stmt.execute((write_end as i64, now_secs, now_nsec, self.ino))
+             .await?;
+         drop(stmt);
+         txn.commit().await?;
+@@ -4574,6 +4559,17 @@ mod tests {
+         assert_eq!(&result[0..50], &vec![0u8; 50][..]);
+         assert_eq!(&result[55..100], &vec![0u8; 45][..]);
+
++        let before = file.fstat().await?;
++        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        file.pwrite(10, &[9, 8, 7]).await?;
++        let after = file.fstat().await?;
++
++        assert_eq!(after.size, before.size);
++        assert!(
++            (after.mtime, after.mtime_nsec) > (before.mtime, before.mtime_nsec),
++            "in-place pwrite must advance mtime"
++        );
++
+         Ok(())
+     }
+
+--
+2.50.1 (Apple Git-155)

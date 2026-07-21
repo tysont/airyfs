@@ -7,7 +7,7 @@ import {
   resumableUploadBlob,
   waitForJob,
 } from '../sdk/dist/index.js';
-import { pythonCommand } from './benchmark-lib.mjs';
+import { counterDelta, pythonCommand } from './benchmark-lib.mjs';
 
 const endpoint = process.env.AIRYFS_URL;
 if (!endpoint) throw new Error('AIRYFS_URL is required');
@@ -82,6 +82,7 @@ print(json.dumps({'whole': hashlib.sha256(whole).hexdigest(), 'part': hashlib.sh
   );
   const bridgeBefore = await client.perf();
   assert(bridgeBefore.sessionId !== null, 'Hrana bridge session established');
+  assert(Number.isSafeInteger(bridgeBefore.sessionEpoch), 'Hrana bridge session epoch exposed');
 
   const randomWriteLength = 2 * 256 * 1024 + 8192;
   const expectedRandomWrite = new Uint8Array(randomWriteLength);
@@ -99,6 +100,11 @@ finally:
     os.close(handle)
 print(json.dumps({'ok': True}))
 `));
+  equal(
+    fuseWriteRegression.exitCode,
+    0,
+    `FUSE unaligned random-write command succeeds; stderr=${fuseWriteRegression.stderr.trim()}`,
+  );
   assert(JSON.parse(fuseWriteRegression.stdout).ok, 'FUSE unaligned random writes complete');
   assert(
     bytesEqual(await client.readFileBytes('/random-write.bin'), expectedRandomWrite),
@@ -106,7 +112,112 @@ print(json.dumps({'ok': True}))
   );
   const bridgeAfter = await client.perf();
   equal(bridgeAfter.sessionId, bridgeBefore.sessionId, 'Hrana bridge session reused across execs');
+  equal(bridgeAfter.sessionEpoch, bridgeBefore.sessionEpoch, 'Hrana bridge epoch reused across execs');
   assert(bridgeAfter.pipelineRequests > bridgeBefore.pipelineRequests, 'Hrana bridge counters advance across execs');
+
+  const truncateOriginal = new Uint8Array(2 * 256 * 1024 + 123);
+  for (let index = 0; index < truncateOriginal.length; index++) truncateOriginal[index] = index % 251;
+  await client.writeFile('/truncate.bin', truncateOriginal.slice().buffer);
+  const truncateTo = async (size) => client.exec(pythonCommand(`
+import os
+handle = os.open('/volume/truncate.bin', os.O_RDWR)
+try:
+    os.ftruncate(handle, ${size})
+finally:
+    os.close(handle)
+`));
+  const shrinkSize = 256 * 1024 + 17;
+  equal((await truncateTo(shrinkSize)).exitCode, 0, 'FUSE cross-chunk truncate succeeds');
+  assert(bytesEqual(await client.readFileBytes('/truncate.bin'), truncateOriginal.slice(0, shrinkSize)), 'direct API sees exact FUSE truncate bytes');
+  const extendedSize = 2 * 256 * 1024 + 4096;
+  equal((await truncateTo(extendedSize)).exitCode, 0, 'FUSE sparse extension succeeds');
+  const extendedExpected = new Uint8Array(extendedSize);
+  extendedExpected.set(truncateOriginal.subarray(0, shrinkSize));
+  assert(bytesEqual(await client.readFileBytes('/truncate.bin'), extendedExpected), 'FUSE sparse extension zero-fills new range');
+  equal((await truncateTo(0)).exitCode, 0, 'FUSE truncate to zero succeeds');
+  equal((await client.readFileBytes('/truncate.bin')).byteLength, 0, 'direct API sees zero-length FUSE truncate');
+
+  const createFamily = await client.exec(pythonCommand(`
+import json, os, stat
+base = '/volume/create-family'
+os.mkdir(base)
+os.mkdir(f'{base}/directory', 0o750)
+os.mknod(f'{base}/node', stat.S_IFREG | 0o640)
+os.symlink('node', f'{base}/symlink')
+os.link(f'{base}/node', f'{base}/hardlink')
+directory = os.stat(f'{base}/directory')
+node = os.stat(f'{base}/node')
+hardlink = os.stat(f'{base}/hardlink')
+print(json.dumps({
+    'directory_mode': stat.S_IMODE(directory.st_mode),
+    'directory_is_dir': stat.S_ISDIR(directory.st_mode),
+    'node_mode': stat.S_IMODE(node.st_mode),
+    'node_is_file': stat.S_ISREG(node.st_mode),
+    'same_inode': node.st_ino == hardlink.st_ino,
+    'nlink': node.st_nlink,
+    'symlink_target': os.readlink(f'{base}/symlink'),
+}))
+`));
+  equal(createFamily.exitCode, 0, `FUSE create-family command succeeds; stderr=${createFamily.stderr.trim()}`);
+  const createFamilyResult = JSON.parse(createFamily.stdout);
+  assert(createFamilyResult.directory_is_dir, 'FUSE mkdir creates a directory');
+  equal(createFamilyResult.directory_mode, 0o750, 'FUSE mkdir preserves mode');
+  assert(createFamilyResult.node_is_file, 'FUSE mknod creates a regular file');
+  equal(createFamilyResult.node_mode, 0o640, 'FUSE mknod preserves mode');
+  assert(createFamilyResult.same_inode && createFamilyResult.nlink === 2, 'FUSE hard link shares inode and link count');
+  equal(createFamilyResult.symlink_target, 'node', 'FUSE symlink preserves target');
+
+  const renameFamily = await client.exec(pythonCommand(`
+import errno, json, os
+base = '/volume/rename-family'
+os.mkdir(base)
+with open(f'{base}/source', 'w') as handle: handle.write('source')
+with open(f'{base}/destination', 'w') as handle: handle.write('destination')
+held = os.open(f'{base}/destination', os.O_RDONLY)
+os.rename(f'{base}/source', f'{base}/destination')
+path_body = open(f'{base}/destination').read()
+held_body = os.read(held, 64).decode()
+os.close(held)
+os.mkdir(f'{base}/parent')
+os.mkdir(f'{base}/parent/child')
+cycle_errno = None
+try:
+    os.rename(f'{base}/parent', f'{base}/parent/child/cycle')
+except OSError as error:
+    cycle_errno = error.errno
+os.mkdir(f'{base}/empty')
+os.mkdir(f'{base}/nonempty')
+with open(f'{base}/nonempty/child', 'w') as handle: handle.write('x')
+nonempty_errno = None
+try:
+    os.rename(f'{base}/empty', f'{base}/nonempty')
+except OSError as error:
+    nonempty_errno = error.errno
+os.mkdir(f'{base}/empty-source')
+os.mkdir(f'{base}/empty-destination')
+links_before = os.stat(base).st_nlink
+os.rename(f'{base}/empty-source', f'{base}/empty-destination')
+links_after = os.stat(base).st_nlink
+os.rename(f'{base}/destination', f'{base}/destination')
+print(json.dumps({
+    'path_body': path_body,
+    'held_body': held_body,
+    'cycle_errno': cycle_errno,
+    'nonempty_errno': nonempty_errno,
+    'empty_replaced': os.path.isdir(f'{base}/empty-destination') and not os.path.exists(f'{base}/empty-source'),
+    'directory_links_removed': links_before - links_after,
+    'same_path_exists': os.path.isfile(f'{base}/destination'),
+}))
+`));
+  equal(renameFamily.exitCode, 0, `FUSE rename-family command succeeds; stderr=${renameFamily.stderr.trim()}`);
+  const renameFamilyResult = JSON.parse(renameFamily.stdout);
+  equal(renameFamilyResult.path_body, 'source', 'FUSE rename-over exposes source at destination');
+  equal(renameFamilyResult.held_body, 'destination', 'FUSE rename-over retains open destination inode');
+  equal(renameFamilyResult.cycle_errno, 22, 'FUSE rename rejects directory cycles with EINVAL');
+  equal(renameFamilyResult.nonempty_errno, 39, 'FUSE rename rejects nonempty directory replacement');
+  assert(renameFamilyResult.empty_replaced, 'FUSE rename replaces an empty directory');
+  equal(renameFamilyResult.directory_links_removed, 1, 'FUSE empty-directory replacement updates parent links');
+  assert(renameFamilyResult.same_path_exists, 'FUSE same-path rename is a no-op');
 
   const scanFiles = Array.from({ length: 257 }, (_, index) => ({
     path: `file-${String(index).padStart(4, '0')}.txt`,
@@ -131,6 +242,55 @@ print(json.dumps({'count': len(entries), 'unique': len(set(name for name, _ in e
   equal(missing.exitCode, 0, 'FUSE primes a negative lookup');
   await client.writeFile('/appeared.txt', 'appeared');
   equal((await client.exec('cat /volume/appeared.txt')).stdout, 'appeared', 'direct create invalidates FUSE negative lookup');
+
+  await client.writeFile('/cache-visibility.txt', 'before');
+  await client.exec('cat /volume/cache-visibility.txt >/dev/null; stat /volume/cache-visibility.txt >/dev/null');
+  await client.writeFile('/cache-visibility.txt', 'after-overwrite');
+  const overwriteVisible = await client.exec(pythonCommand(`
+import json, os
+path = '/volume/cache-visibility.txt'
+print(json.dumps({'body': open(path).read(), 'size': os.stat(path).st_size}))
+`));
+  equal(
+    JSON.stringify(JSON.parse(overwriteVisible.stdout)),
+    JSON.stringify({ body: 'after-overwrite', size: 15 }),
+    'direct overwrite invalidates FUSE data and attributes',
+  );
+
+  await client.exec('stat /volume/cache-visibility.txt >/dev/null');
+  await client.truncate('/cache-visibility.txt', 5);
+  const truncateVisible = await client.exec(pythonCommand(`
+import json, os
+path = '/volume/cache-visibility.txt'
+print(json.dumps({'body': open(path).read(), 'size': os.stat(path).st_size}))
+`));
+  equal(
+    JSON.stringify(JSON.parse(truncateVisible.stdout)),
+    JSON.stringify({ body: 'after', size: 5 }),
+    'direct truncate invalidates FUSE data and attributes',
+  );
+
+  await client.exec('stat /volume/cache-visibility.txt >/dev/null');
+  await client.chmod('/cache-visibility.txt', 0o600);
+  equal(
+    Number((await client.exec("stat -c '%a' /volume/cache-visibility.txt")).stdout.trim()),
+    600,
+    'direct chmod invalidates FUSE attributes',
+  );
+
+  await client.exec('stat /volume/cache-visibility.txt >/dev/null; test ! -e /volume/cache-renamed.txt');
+  await client.rename('/cache-visibility.txt', '/cache-renamed.txt');
+  equal(
+    (await client.exec('test ! -e /volume/cache-visibility.txt && test -f /volume/cache-renamed.txt')).exitCode,
+    0,
+    'direct rename invalidates FUSE entries and attributes',
+  );
+
+  await client.exec('stat /volume/cache-renamed.txt >/dev/null');
+  await client.deleteFile('/cache-renamed.txt', true);
+  equal((await client.exec('test ! -e /volume/cache-renamed.txt')).exitCode, 0, 'direct delete invalidates FUSE entry');
+  await client.writeFile('/cache-renamed.txt', 'recreated');
+  equal((await client.exec('cat /volume/cache-renamed.txt')).stdout, 'recreated', 'direct recreate invalidates FUSE negative lookup');
 
   const concurrentFiles = Array.from({ length: 8 }, (_, index) => ({
     path: `file-${index}.bin`,
@@ -187,6 +347,21 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   assert(fuseChanges.events.some((event) => event.path === '/from-fuse.txt'), 'FUSE-origin change feed');
 
   await client.deleteSnapshot(snapshot.id);
+  const reconnectBefore = await client.perf();
+  await client.destroyContainer();
+  equal((await client.exec('true')).exitCode, 0, 'Hrana bridge reconnects after Container restart');
+  const reconnectAfter = await client.perf();
+  assert(reconnectAfter.sessionId !== reconnectBefore.sessionId, 'Hrana bridge session changes on reconnect');
+  assert(reconnectAfter.sessionEpoch > reconnectBefore.sessionEpoch, 'Hrana bridge epoch advances on reconnect');
+  equal(
+    counterDelta(
+      reconnectBefore.pipelineRequests, reconnectAfter.pipelineRequests,
+      reconnectBefore.sessionId, reconnectAfter.sessionId,
+      reconnectBefore.sessionEpoch, reconnectAfter.sessionEpoch,
+    ),
+    null,
+    'Hrana bridge reconnect invalidates counter delta',
+  );
   console.log(`Feature smoke passed: ${passed} checks on ${volume}`);
 } finally {
   await Promise.allSettled([client.destroyContainer(), clone.destroyContainer()]);

@@ -1,0 +1,111 @@
+diff --git a/sdk/rust/src/connection_pool.rs b/sdk/rust/src/connection_pool.rs
+index 3f14a3c..e312433 100644
+--- a/sdk/rust/src/connection_pool.rs
++++ b/sdk/rust/src/connection_pool.rs
+@@ -25,6 +25,7 @@ pub struct ConnectionPool {
+
+ struct ConnectionPoolInner {
+     db: Database,
++    remote: bool,
+     /// Available connections ready to be reused
+     pool: Mutex<Vec<Connection>>,
+     /// Semaphore to limit concurrent connections
+@@ -36,7 +37,7 @@ struct ConnectionPoolInner {
+ impl ConnectionPool {
+     /// Create a new connection pool from a database.
+     pub fn new(db: Database) -> Self {
+-        Self::with_timeout(db, DEFAULT_TIMEOUT)
++        Self::with_timeout(db, DEFAULT_TIMEOUT, false)
+     }
+
+     /// Create a new connection pool for a remote database.
+@@ -52,14 +53,15 @@ impl ConnectionPool {
+             .build()
+             .await
+             .map_err(|e| Error::Internal(format!("failed to connect to remote database: {e}")))?;
+-        Ok(Self::with_timeout(db, DEFAULT_TIMEOUT))
++        Ok(Self::with_timeout(db, DEFAULT_TIMEOUT, true))
+     }
+
+     /// Create a connection pool with a custom timeout.
+-    fn with_timeout(db: Database, timeout: Duration) -> Self {
++    fn with_timeout(db: Database, timeout: Duration, remote: bool) -> Self {
+         Self {
+             inner: Arc::new(ConnectionPoolInner {
+                 db,
++                remote,
+                 pool: Mutex::new(Vec::new()),
+                 semaphore: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+                 timeout,
+@@ -110,6 +112,10 @@ impl ConnectionPool {
+     pub fn database(&self) -> &Database {
+         &self.inner.db
+     }
++
++    pub fn is_remote(&self) -> bool {
++        self.inner.remote
++    }
+ }
+
+ /// A connection borrowed from the pool.
+@@ -201,7 +207,7 @@ mod tests {
+     async fn test_connection_pool_timeout_error() {
+         // Create pool with very short timeout
+         let db = Builder::new_local(":memory:").build().await.unwrap();
+-        let pool = ConnectionPool::with_timeout(db, Duration::from_millis(50));
++        let pool = ConnectionPool::with_timeout(db, Duration::from_millis(50), false);
+
+         // Hold the one connection
+         let _conn1 = pool.get_connection().await.unwrap();
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+index 3ccfb6a..4381b86 100644
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -198,11 +198,37 @@ impl File for AgentFSFile {
+         }
+
+         let conn = self.pool.get_connection().await?;
++        if self.pool.is_remote() {
++            let write_end = offset
++                .checked_add(data.len() as u64)
++                .ok_or_else(|| Error::Internal("write offset overflow".to_string()))?;
++            if write_end > 9_007_199_254_740_991 {
++                return Err(Error::Internal("write exceeds remote integer range".to_string()));
++            }
++            let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++            let mut rows = conn.query(
++                "SELECT airyfs_pwrite_v1(?, ?, ?, ?, ?, ?)",
++                (
++                    self.ino,
++                    offset as i64,
++                    Value::Blob(data.to_vec()),
++                    self.chunk_size as i64,
++                    dur.as_secs() as i64,
++                    dur.subsec_nanos() as i64,
++                ),
++            )
++            .await?;
++            if rows.next().await?.is_none() {
++                return Err(Error::Internal("remote pwrite returned no result".to_string()));
++            }
++            return Ok(());
++        }
++
+         let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;
+
+         // Write the actual data (sparse gaps are handled by pread which fills
+         // missing chunks with zeros, so no need to zero-fill here)
+-        self.write_data_at_offset_with_conn(&conn, offset, data)
++        self.write_data_at_offset_with_conn(&txn, offset, data)
+             .await?;
+
+         // Update file size and mtime
+@@ -210,7 +236,7 @@ impl File for AgentFSFile {
+         let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
+         let now_secs = dur.as_secs() as i64;
+         let now_nsec = dur.subsec_nanos() as i64;
+-        let stmt = conn
++        let stmt = txn
+             .prepare("UPDATE fs_inode SET size = MAX(size, ?), mtime = ?, mtime_nsec = ? WHERE ino = ?")
+             .await?;
+         stmt.execute((write_end as i64, now_secs, now_nsec, self.ino))

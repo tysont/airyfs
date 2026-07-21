@@ -1,0 +1,58 @@
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+index 4ec0a5d..341dd60 100644
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -82,6 +82,31 @@ pub struct AgentFSFile {
+     chunk_size: usize,
+ }
+
++async fn remote_truncate(
++    conn: &Connection, ino: i64, new_size: u64, chunk_size: usize,
++) -> Result<()> {
++    let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++    let mut rows = conn.query(
++        "SELECT airyfs_truncate_v1(?, ?, ?, ?, ?)",
++        (
++            ino,
++            new_size as i64,
++            chunk_size as i64,
++            dur.as_secs() as i64,
++            dur.subsec_nanos() as i64,
++        ),
++    ).await?;
++    let status = rows.next().await?
++        .and_then(|row| row.get_value(0i32).ok())
++        .and_then(|value| value.as_integer().copied())
++        .ok_or_else(|| Error::Internal("remote truncate returned no status".to_string()))?;
++    match status {
++        1.. => Ok(()),
++        -1 => Err(FsError::NotFound.into()),
++        _ => Err(Error::Internal(format!("invalid remote truncate status: {status}"))),
++    }
++}
++
+ #[async_trait]
+ impl File for AgentFSFile {
+     async fn pread(&self, offset: u64, size: u64) -> Result<Vec<u8>> {
+@@ -250,6 +275,10 @@ impl File for AgentFSFile {
+     async fn truncate(&self, new_size: u64) -> Result<()> {
+         let conn = self.pool.get_connection().await?;
+
++        if self.pool.is_remote() {
++            return remote_truncate(&conn, self.ino, new_size, self.chunk_size).await;
++        }
++
+         // Get current size
+         let current_size = {
+             let mut rows = conn
+@@ -1714,6 +1743,10 @@ impl AgentFS {
+             .await?
+             .ok_or(FsError::NotFound)?;
+
++        if self.pool.is_remote() {
++            return remote_truncate(&conn, ino, new_size, self.chunk_size).await;
++        }
++
+         // Get current size
+         let current_size = {
+             let mut rows = conn

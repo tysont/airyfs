@@ -10,7 +10,10 @@
     "benchmark:deployed": "node e2e/benchmark.mjs",
     "benchmark:quick": "node e2e/benchmark.mjs --profile quick --runs 3 --baseline benchmarks/quick-baseline.json",
     "benchmark:compare": "node e2e/compare-benchmark.mjs",
-    "test:features:deployed": "node e2e/features.mjs"
+    "test:features:deployed": "node e2e/features.mjs",
+    "test:regression:quick": "node e2e/container-regression.mjs --profile quick",
+    "test:regression:broad": "node e2e/container-regression.mjs --profile broad",
+    "test:prepush:deployed": "npm run test:features:deployed && npm run test:regression:broad"
   },
   "engines": {
     "node": ">=22"

@@ -126,7 +126,7 @@ export interface ChangeQuery {
 }
 
 export interface HranaCounters { pipelineRequests: number; sqlStatements: number }
-export interface PerfInfo extends HranaCounters { sessionId: string | null }
+export interface PerfInfo extends HranaCounters { sessionId: string | null; sessionEpoch: number }
 export interface ContainerHealth {
   state: 'connected' | 'stopped' | 'unhealthy';
   status?: string;

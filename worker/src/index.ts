@@ -225,6 +225,7 @@ export class AiryFS extends Container<Env> {
   private dataSocket: WorkerSocket | null = null;
   private invalidationSocket: WorkerSocket | null = null;
   private hranaServer: HranaServer | null = null;
+  private hranaSessionEpoch = 0;
   private readonly access = new VolumeAccessCoordinator();
   private metricsCache: { expiresAt: number; text: string } | null = null;
   private metricsPromise: Promise<string> | null = null;
@@ -1345,12 +1346,14 @@ export class AiryFS extends Container<Env> {
     }
     await previousSocket?.close().catch(() => undefined);
 
+    this.hranaSessionEpoch++;
     this.hranaServer = new HranaServer({
       readable: socket.readable,
       writable: socket.writable,
       sql: wrapSqlStorage(this.ctx.storage.sql),
       writeLock: () => this.access.acquireWrite('*'),
       onWrite: () => this.scheduleWebhookDelivery(),
+      transactionSync: (callback) => this.ctx.storage.transactionSync(callback),
     });
 
     const servePromise = this.hranaServer.serve();
@@ -2488,6 +2491,7 @@ export class AiryFS extends Container<Env> {
       if (url.pathname === '/perf') {
         return Response.json({
           sessionId: this.hranaServer?.sessionId ?? null,
+          sessionEpoch: this.hranaSessionEpoch,
           pipelineRequests: this.hranaServer?.pipelineCount ?? 0,
           sqlStatements: this.hranaServer?.statementCount ?? 0,
         });

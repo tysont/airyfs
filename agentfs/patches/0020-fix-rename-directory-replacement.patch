@@ -1,0 +1,61 @@
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+index 3e8d041..c1f3155 100644
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -2578,11 +2578,18 @@ impl AgentFS {
+                     .await?;
+                 stmt.execute((dst_parent_ino, dst_name.as_str())).await?;
+
+-                // Decrement link count
+-                let stmt = conn
+-                    .prepare("UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?")
+-                    .await?;
+-                stmt.execute([dst_ino]).await?;
++                if dst_stats.is_directory() {
++                    conn.execute("UPDATE fs_inode SET nlink = 0 WHERE ino = ?", [dst_ino]).await?;
++                    conn.execute(
++                        "UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?",
++                        [dst_parent_ino],
++                    ).await?;
++                } else {
++                    conn.execute(
++                        "UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?",
++                        [dst_ino],
++                    ).await?;
++                }
+
+                 // Clean up destination inode if no more links
+                 let link_count = self.get_link_count(&conn, dst_ino).await?;
+@@ -4033,16 +4040,27 @@ impl FileSystem for AgentFS {
+                     .await?;
+                 stmt.execute((newparent_ino, newname)).await?;
+
+-                // Decrement link count and update ctime on destination inode
++                // Remove the destination's links and update its ctime.
+                 let dur_dec = SystemTime::now()
+                     .duration_since(UNIX_EPOCH)
+                     .unwrap_or_default();
+                 let now_dec = dur_dec.as_secs() as i64;
+                 let now_dec_nsec = dur_dec.subsec_nanos() as i64;
+-                let stmt = conn
+-                    .prepare("UPDATE fs_inode SET nlink = nlink - 1, ctime = ?, ctime_nsec = ? WHERE ino = ?")
+-                    .await?;
+-                stmt.execute((now_dec, now_dec_nsec, dst_ino)).await?;
++                if dst_stats.is_directory() {
++                    conn.execute(
++                        "UPDATE fs_inode SET nlink = 0, ctime = ?, ctime_nsec = ? WHERE ino = ?",
++                        (now_dec, now_dec_nsec, dst_ino),
++                    ).await?;
++                    conn.execute(
++                        "UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?",
++                        [newparent_ino],
++                    ).await?;
++                } else {
++                    conn.execute(
++                        "UPDATE fs_inode SET nlink = nlink - 1, ctime = ?, ctime_nsec = ? WHERE ino = ?",
++                        (now_dec, now_dec_nsec, dst_ino),
++                    ).await?;
++                }
+
+                 // Clean up the replaced destination inode if it has no more
+                 // links and no live handle leases it. A leased destination is

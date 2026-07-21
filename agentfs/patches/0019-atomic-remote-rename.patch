@@ -1,0 +1,73 @@
+diff --git a/sdk/rust/src/filesystem/agentfs.rs b/sdk/rust/src/filesystem/agentfs.rs
+index 341dd60..3e8d041 100644
+--- a/sdk/rust/src/filesystem/agentfs.rs
++++ b/sdk/rust/src/filesystem/agentfs.rs
+@@ -562,6 +562,34 @@ impl AgentFS {
+         }
+     }
+
++    async fn remote_rename(
++        &self, conn: &Connection, old_parent_ino: i64, old_name: &str,
++        new_parent_ino: i64, new_name: &str,
++    ) -> Result<i64> {
++        let dur = SystemTime::now().duration_since(UNIX_EPOCH)?;
++        let mut rows = conn.query(
++            "SELECT airyfs_rename_v1(?, ?, ?, ?, ?, ?)",
++            (
++                old_parent_ino, old_name, new_parent_ino, new_name,
++                dur.as_secs() as i64, dur.subsec_nanos() as i64,
++            ),
++        ).await?;
++        let status = rows.next().await?
++            .and_then(|row| row.get_value(0i32).ok())
++            .and_then(|value| value.as_integer().copied())
++            .ok_or_else(|| Error::Internal("remote rename returned no status".to_string()))?;
++        match status {
++            1.. => Ok(status),
++            -1 => Err(FsError::NotFound.into()),
++            -2 => Err(FsError::IsADirectory.into()),
++            -3 => Err(FsError::NotADirectory.into()),
++            -4 => Err(FsError::NotEmpty.into()),
++            -5 => Err(FsError::InvalidRename.into()),
++            -6 => Err(FsError::RootOperation.into()),
++            _ => Err(Error::Internal(format!("invalid remote rename status: {status}"))),
++        }
++    }
++
+     /// Initialize the database schema
+     pub async fn initialize_schema(conn: &Connection) -> Result<()> {
+         // Create config table
+@@ -2494,6 +2522,16 @@ impl AgentFS {
+             .await?
+             .ok_or(FsError::NotFound)?;
+
++        if self.pool.is_remote() {
++            let renamed_ino = self.remote_rename(
++                &conn, src_parent_ino, src_name, dst_parent_ino, dst_name,
++            ).await?;
++            self.dentry_cache.remove(src_parent_ino, src_name);
++            self.dentry_cache.remove(dst_parent_ino, dst_name);
++            self.dentry_cache.insert(dst_parent_ino, dst_name, renamed_ino);
++            return Ok(());
++        }
++
+         // Clone strings for use inside the transaction closure
+         let src_name = src_name.clone();
+         let dst_name = dst_name.clone();
+@@ -3943,6 +3981,16 @@ impl FileSystem for AgentFS {
+             .await?
+             .ok_or(FsError::NotFound)?;
+
++        if self.pool.is_remote() {
++            let renamed_ino = self.remote_rename(
++                &conn, oldparent_ino, oldname, newparent_ino, newname,
++            ).await?;
++            self.dentry_cache.remove(oldparent_ino, oldname);
++            self.dentry_cache.remove(newparent_ino, newname);
++            self.dentry_cache.insert(newparent_ino, newname, renamed_ino);
++            return Ok(());
++        }
++
+         let txn = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;
+
+         let result: Result<()> = async {

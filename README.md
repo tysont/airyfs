@@ -902,9 +902,14 @@ The vendored Rust SDK and CLI test suites run in a Linux build environment with 
 ```bash
 AIRYFS_URL=https://your-worker.workers.dev ./e2e/test.sh
 AIRYFS_URL=https://your-worker.workers.dev npm run test:features:deployed
+AIRYFS_URL=https://your-worker.workers.dev npm run test:regression:quick
+AIRYFS_URL=https://your-worker.workers.dev npm run test:regression:broad
+AIRYFS_URL=https://your-worker.workers.dev npm run test:prepush:deployed
 ```
 
 The original end-to-end flow covers direct write to FUSE read, direct mutation invalidation, FUSE write to direct read, Git on the same mixed-access volume, open-handle leases (a held FUSE read that survives a direct unlink and a streaming rename-over), and persistence across Container destruction. The feature smoke also covers unaligned cross-chunk I/O, random writes, directory traversal, negative lookup invalidation, concurrent reads, change feeds, tree archives, snapshots and cloning, resumable uploads, streaming execution admission and cancellation, and durable jobs.
+
+The Container regression harness models typical non-Git agent workloads. The quick profile checks runtime availability, POSIX file lifecycle, direct API/FUSE coherence, and Node.js-to-Python data flow. The broad profile adds mixed binary I/O, concurrent metadata operations, a native `make`/`g++` build, archive handling, error semantics, streaming output, and restart persistence. The pre-push command runs the feature smoke followed by the broad profile.
 
 Remote mounts use a 1-second entry and attribute TTL plus journal-driven invalidation, and lease open handles so live reads survive concurrent direct removal. See [`docs/FUSE_CACHE_TTL.md`](docs/FUSE_CACHE_TTL.md), [`docs/MUTATION_INVALIDATION.md`](docs/MUTATION_INVALIDATION.md), and [`docs/OPEN_INODE_LEASES.md`](docs/OPEN_INODE_LEASES.md) for the implementation and deployed measurements.
 
