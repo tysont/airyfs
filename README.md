@@ -31,7 +31,7 @@ Every volume request routes through its AiryFS Durable Object. Direct operations
 
 Four interfaces operate on the same volume.
 
-- **AgentFS inside the Durable Object.** Application code uses AgentFS, the embedded SQLite filesystem library AiryFS builds on, directly against `ctx.storage.sql`.
+- **AgentFS inside the Durable Object.** Application code calls AgentFS, the embedded SQLite filesystem library AiryFS is built on, directly against `ctx.storage.sql`.
 - **HTTP and Workers RPC.** Remote applications stream files, inspect metadata, mutate paths, and run commands.
 - **The TypeScript SDK.** Node, browser, and Worker applications use a typed client with helpers for jobs, change feeds, and resumable transfers.
 - **The `airyfs` CLI.** Developers get familiar filesystem commands, named sessions, bulk transfers, snapshots, jobs, diagnostics, and an interactive shell.
@@ -55,9 +55,11 @@ Cloudflare currently limits each SQLite-backed Durable Object to 10 GB. Files, s
 
 ## How AiryFS Compares
 
-**Using AgentFS or a similar library directly.** A library that maps filesystem methods onto `ctx.storage.sql` gives you fast reads and writes inside the Durable Object. That is exactly what the AiryFS direct path is. A library alone, however, cannot let a process in a Container call `open`, `stat`, or `readdir` against those files. AiryFS adds the Container lifecycle, remote SQL transport, and FUSE mount that expose the same rows as `/volume`, while keeping direct access so ordinary operations never pay for the mount.
+Several familiar approaches solve part of what AiryFS solves. Each section below describes one alternative and how AiryFS differs from it.
 
-**A Container workspace synced to storage.** A Container-local disk is convenient for execution, but it makes compute the gateway to the files. Reading one file or serving one artifact requires a running Container, and persisting the workspace usually means an external volume, object store, or clone-and-sync process. That second system brings its own consistency questions about upload completion, write visibility, partial synchronization, and recovery after compute disappears. AiryFS keeps the Durable Object authoritative and treats the Container as a replaceable client. Losing the Container requires a remount, not data recovery.
+**A filesystem library over SQLite (such as AgentFS on its own).** A library that maps filesystem calls onto `ctx.storage.sql` gives fast reads and writes, but only from code running inside the Durable Object. A process in a Container cannot `open`, `stat`, or `readdir` those rows, because nothing exposes them as a real filesystem. AiryFS uses such a library for its direct path and adds what the library cannot: the Container lifecycle, remote SQL transport, and FUSE mount that present the same rows as a real filesystem at `/volume`. Direct access still runs inside the Durable Object, so ordinary operations never pay for the mount.
+
+**A Container workspace synced to storage.** A Container-local disk is convenient for execution, but it makes compute the gateway to the files. Reading one file or serving one artifact requires a running Container, and persisting the workspace usually means an external volume, object store, or clone-and-sync process. That second system raises its own consistency questions: upload completion, write visibility, partial synchronization, and recovery after compute disappears. AiryFS keeps the Durable Object authoritative and treats the Container as a replaceable client. Losing the Container requires a remount, not data recovery.
 
 **Object-storage FUSE layers.** An s3fs-, JuiceFS-, or R2-backed filesystem makes object storage another persistent system and needs a separate model for directories, links, metadata, and atomic path mutations. AiryFS uses SQLite transactions, indexes, and AgentFS's inode and dentry model inside the same Durable Object that coordinates the namespace.
 
@@ -92,7 +94,7 @@ async runPython(source: string): Promise<{
 }
 ```
 
-This method can also be called over Workers RPC on an `AiryFS` stub. The built-in AiryFS wrappers already coordinate access and append mutation-journal entries. Custom methods that call the underlying AgentFS instance directly must use `VolumeAccessCoordinator` for overlapping content access and must record direct mutations so mounted FUSE clients invalidate stale cache entries.
+This method can also be called over Workers RPC on an `AiryFS` stub. The built-in AiryFS wrappers already coordinate access and append mutation-journal entries. Custom methods that call the underlying AgentFS instance directly must guard overlapping content access with `VolumeAccessCoordinator` and must record direct mutations so mounted FUSE clients invalidate stale cache entries.
 
 The underlying AgentFS interface includes `readFile`, `writeFile`, `readdir`, `readdirPlus`, `stat`, `lstat`, `mkdir`, `rm`, `rename`, `copyFile`, `symlink`, `readlink`, `access`, `statfs`, and random-access handles through `open`; file handles provide operations such as `truncate(size)`. AiryFS adds coordinated direct primitives for timestamps, permissions, true hard links, bounded append, and subtree usage where the TypeScript AgentFS interface has no equivalent.
 
@@ -399,7 +401,7 @@ AiryFS is not a replacement for AgentFS. It is the Cloudflare Durable Object and
 
 ### Why AiryFS Patches AgentFS
 
-AiryFS vendors pristine AgentFS v0.6.4 at commit `3a5ed2b88e5d5a5f9b2c7fe02d012b50fd19e3c0` and applies an ordered patch series. The patches add the direct remote libSQL connection, bounded FUSE caching, cross-runtime cache invalidation, and lease-aware open-inode behavior needed when Durable Object code and remote FUSE clients mutate one filesystem. AiryFS prefers changes in its own Worker, bridge, and Container layers whenever AgentFS does not need to change, so the patch series is the explicit compatibility surface that remains.
+AiryFS vendors pristine AgentFS v0.6.4 at commit `3a5ed2b88e5d5a5f9b2c7fe02d012b50fd19e3c0` and applies an ordered patch series. The patches add the direct remote libSQL connection, bounded FUSE caching, cross-runtime cache invalidation, and lease-aware open-inode behavior needed when Durable Object code and remote FUSE clients mutate one filesystem. Any change that can live in the AiryFS Worker, bridge, or Container layers instead of AgentFS goes there, so the patch series stays the minimal compatibility surface.
 
 `agentfs/build.sh` materializes a fresh tree, verifies and applies each patch in order, runs the TypeScript and Rust test suites, and builds the Linux CLI used by the Container. See [`docs/AGENTFS_PATCHES.md`](docs/AGENTFS_PATCHES.md) for the complete patch inventory, the upstream refresh procedure, and maintenance rules.
 
@@ -584,7 +586,7 @@ Direct `lstat`, `touch`, and `chmod` do not traverse symbolic links. `lstat` rep
 
 Volumes default to 256 KiB chunks. Explicit chunk sizes must be powers of two from 4 KiB through 1 MiB. Existing volumes retain their stored chunk size, and a conflicting size returns `409 CHUNK_SIZE_IMMUTABLE` after filesystem data exists. Any filesystem request implicitly creates an unconfigured volume with the default.
 
-The volume registry is not on the filesystem data path. Each volume publishes its name and chunk size once, then records that registration in its own SQLite database. Ordinary file, S3, site, and execution requests continue routing directly to the volume Durable Object. Existing deployments populate the new registry lazily as volumes are used.
+The volume registry is not on the filesystem data path. Each volume publishes its name and chunk size once, then records that registration in its own SQLite database. Ordinary file, S3, site, and execution requests continue routing directly to the volume Durable Object. Existing deployments populate the registry lazily as volumes are used.
 
 File writes do not create missing parent directories. Create the directory first with `PUT /v1/volumes/V/directories/path`; otherwise the write returns `ENOENT`.
 
@@ -687,13 +689,13 @@ The compatibility file endpoints use the same binary-safe streaming, range, atom
 
 ## Execution Contract
 
-The SDK and CLI run `exec` as a durable command by default. They persist the command with one idempotency key before scheduling, stream or reconstruct output from durable logs, and expose the job ID as the command ID. The lower-level HTTP `/exec` route remains available for transient immediate-admission execution and powers `--no-wait`. Commands run with:
+The SDK and CLI run `exec` as a durable command by default. They persist the command with one idempotency key before scheduling, stream or reconstruct output from durable logs, and expose the job ID as the command ID. The lower-level HTTP `/exec` route remains available for transient execution that is admitted immediately, and it powers `--no-wait`. Commands run with:
 
 - `cwd=/volume`
 - `HOME=/root`
 - A standard system `PATH`
 - A 300-second process timeout, bounded by a 310-second Worker-side Container request deadline
-- A 10 MiB transient buffered-exec response limit; durable execution retains up to 50 MiB in paginated logs
+- A 10 MiB response limit for transient buffered exec, while durable execution retains up to 50 MiB in paginated logs
 
 The SDK response contains `commandId`, `exitCode`, `stdout`, `stderr`, and `outputTruncated` when the durable 50 MiB log limit was reached. Reusing an `idempotencyKey` with the same command and working directory returns the existing command instead of executing it twice; changing either field returns `409 IDEMPOTENCY_CONFLICT`. Submission and status/log polling retry transient transport failures plus HTTP 502, 503, and 504. Polling failure does not cancel a still-running command. A dead FUSE daemon produces a structured `503` instead of running the command in an unmounted directory. Startup has a separate 60-second bound.
 
