@@ -1,0 +1,79 @@
+cli/src/api/client.ts
+  s_0e08240248c09e::t_e2a5f69b73fad2 4,20,307-342,351,360,366-375,420,426,438-439,443,447,451-552,863-887,889-890
+cli/src/api/errors.ts
+  s_0e08240248c09e::t_3089c27154958e 23-29
+cli/src/api/types.ts
+  s_0e08240248c09e::t_6d5984f7adb520 24,28-34,45,149,302-305,309,312-315,319-320
+cli/src/commands/index.ts
+  s_0e08240248c09e::t_2f0e80f9e88305 1262-1264,1267-1270,1283,1289,1292-1296,1303-1305,1315-1365,1409-1410,1420,1426-1428,1440-1442,1457,1599,2854
+cli/test/api-client.test.ts
+  s_0e08240248c09e::t_ec8a6010157d5f 9-17,183-184,191-199,206-207,215-238,240,246-247,253-254
+cli/test/commands.int.test.ts
+  s_0e08240248c09e::t_b6cb93249783e1 33-39,220,224-251,261,274,281,284,291,317,330,346,348-349,575-639,719-727
+cli/test/job-commands.test.ts
+  s_0e08240248c09e::t_14e90775b10d31 26
+container/src/bridge.test.ts
+  s_0e08240248c09e::t_1ff190b847bbbe 80-98
+container/src/bridge.ts
+  s_0e08240248c09e::t_c1977107d3012e 48-54,92-103,398,443-458,469-470,474-478
+container/src/command-server.test.ts
+  s_0e08240248c09e::t_a97910aeae2c83 131-140,264-284
+container/src/command-server.ts
+  s_0e08240248c09e::t_36374d638de0e5 8,77,300-306,309,313-316,320-321,333
+docs/TRANSPORT_HARDENING.md
+  s_0e08240248c09e::t_644f934cf5db4b 19-21,32-37
+e2e/features.mjs
+  s_0e08240248c09e::t_ea331b2ffd4e1b 322
+sdk/src/client.ts
+  s_0e08240248c09e::t_bc1335308e3e9b 4,17,240-271,280-281,290,294-303,388,393,403-404,407,411-516,699-726
+sdk/src/errors.ts
+  s_0e08240248c09e::t_36a2e4489aa96e 23-30
+sdk/src/helpers.ts
+  s_0e08240248c09e::t_5f2cc9b0abc618 19
+sdk/src/index.ts
+  s_0e08240248c09e::t_2b3441a802067f 5
+sdk/src/types.ts
+  s_0e08240248c09e::t_df0398d20da8c0 38-45,50,84,136-143,145,148-151,155-156
+sdk/test/client.test.ts
+  s_0e08240248c09e::t_dca3c03d136d45 14-25,173-206
+sdk/test/durable-exec.test.ts
+  s_0e08240248c09e::t_13d40f3b2e00c4 1-125
+worker/src/exec-circuit.ts
+  s_0e08240248c09e::t_ce96ef68fba54e 1-75
+worker/src/exec-stream.ts
+  s_0e08240248c09e::t_675eb35491a987 41-115
+worker/src/exec-watchdog.ts
+  s_0e08240248c09e::t_d24fa60bb40262 1-42
+worker/src/files-api.ts
+  s_0e08240248c09e::t_54eb7c9eadfcb6 72-79
+worker/src/hrana-server.ts
+  s_0e08240248c09e::t_66a2c05bf36972 821,899-903,908-912,919-931,951-963
+worker/src/index.ts
+  s_0e08240248c09e::t_511a064b21feb7 39-41,187-194,231-236,368-391,401,405-410,412-419,423,432-463,465-475,477-478,482-488,490,494,497-505,509-517,536,538,544-549,551,554-555,559-567,570-577,579,583,586-591,595-603,634,638-652,1429,2663-2666,2683-2693,2699-2713
+worker/src/jobs.ts
+  s_0e08240248c09e::t_5f0d844b777b7f 16,20,266-271,360,414,598-602,625,676,707,709
+worker/test/exec-circuit.test.ts
+  s_0e08240248c09e::t_d09a303d2f9d8d 1-59
+worker/test/exec-stream.test.ts
+  s_0e08240248c09e::t_90b402a3eb4d46 6,88-124
+worker/test/exec-watchdog.test.ts
+  s_0e08240248c09e::t_e2587f78dc5c4e 1-67
+worker/test/jobs.test.ts
+  s_0e08240248c09e::t_d84aa12f9d2f21 128,136-145,187,193,399-411
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5d30f24057c501867a5071df375356a2c66fac40",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
