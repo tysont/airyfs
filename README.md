@@ -247,7 +247,65 @@ A session stores an endpoint, volume, and remote working directory under `~/.air
 
 CLI `exec` is durable by default. It persists one command ID before execution, retries transient submission and polling failures without changing the idempotency key, replays paginated output from durable logs, and never automatically replays an admitted command whose outcome is ambiguous. `--idempotency-key` lets a caller recover the same command explicitly; reusing a key with a different command or working directory returns `409 IDEMPOTENCY_CONFLICT`. `--no-wait` selects the lower-level transient route and fails immediately on `EXEC_BUSY`. `--container` disables direct read-only fast paths, while `--no-stream` buffers the durable result locally. `--timeout` applies only to Container startup for `--pty`; it does not cancel an admitted durable command. `SIGINT` cancels a foreground durable `exec`; interrupting `job submit --wait` only stops the local wait and leaves the submitted job running. HTML gateway failures are normalized into concise CLI errors instead of printed as markup.
 
-See [`cli/README.md`](cli/README.md) for the full CLI usage guide, including commands, sessions, shell behavior, and machine-readable output.
+For development without linking the binaries, run `npm run dev -- <arguments>` from `cli/`. A manual installation uses `npm install`, `npm run build`, and `npm link` in that directory.
+
+#### Sessions
+
+A named session keeps an endpoint, volume, bearer token, and current remote directory together in `~/.airyfs/config.json`; `AIRYFS_HOME` selects another local state directory. Session selection resolves in this order: global `--session`, `AIRYFS_SESSION`, then the persisted current session. There is no implicit default. Creating a session selects it, while deleting one removes only local state and never deletes its remote volume.
+
+```bash
+airy session create int --endpoint https://airyfs-int.example.com --volume scratch
+airy session create prod --endpoint https://airyfs.example.com --volume project
+airy session list
+airy session use prod
+airy session edit prod --volume another-project
+airy session rename prod production
+airy session delete production
+
+# Portable session blobs include the bearer token. Treat them as credentials.
+airy session export prod
+airy session import airyfs1:... home
+```
+
+In a TTY, `session create` prompts for omitted values. Scripts must provide the name, endpoint, and volume. Separate terminals can stay pinned independently with commands such as `AIRYFS_SESSION=int airy shell` and `AIRYFS_SESSION=prod airy status`.
+
+#### CLI Command Surface
+
+Remote paths use POSIX semantics and resolve relative to the active session directory. `cd` validates a target before persisting it. Direct filesystem commands do not start the Container.
+
+| Area | Commands |
+|---|---|
+| Navigation | `pwd`, `cd`, `ls`, `tree` |
+| File inspection | `cat`, `head`, `tail`, `stat`, `lstat`, `file`, `readlink`, `du`, `checksum` |
+| File mutation | `write`, `append`, `mkdir`, `rmdir`, `rm`, `mv`, `cp`, `ln`, `truncate`, `touch`, `chmod` |
+| Transfer | `upload`, `download`, `put`, `get`, `push`, `pull` with resumable file and transactional tree modes |
+| Recovery | `trash list`, `trash restore`, `trash purge`, `undo`, and snapshot create/list/diff/restore/clone/delete |
+| Execution | `warm`, durable `exec`, interactive `exec --pty`, and `job submit/list/status/logs/cancel` |
+| Automation | `schedule create/list/enable/disable/delete`, `watch`, and webhook create/list/delete |
+| Services | `service create/list/start/stop/delete/logs` |
+| Search and data | `find`, `glob`, `grep`, `sql`, and `kv set/get` |
+| Publishing | `site publish/deploy/rollback/status/unpublish`, `share`, `asset`, and `browser-upload` |
+| Volume operations | `volume create/info/list/fork/quota`, `usage`, `usage-history`, `metrics`, `perf`, `db-info`, `status`, and `destroy` |
+| Authentication | `auth status/login/logout/passwd` and capability creation/revocation |
+
+`cat` and `head` write raw bytes and cannot be combined with `--json` or `--quiet`; use `get` for binary files that should not go to the terminal. `upload` and `download` inspect the source and handle either one file or, with `--recursive`, a directory archive. The lower-level `put`/`get` and `push`/`pull` commands remain available.
+
+CLI-specific `exec` options must precede the remote command. Arguments after the first command word pass through unchanged. A shell expression supplied as one argument is sent as written:
+
+```bash
+airy exec --idempotency-key tool-v1 tool --json --output result.json
+airy exec 'find . -type f | sort'
+```
+
+#### Interactive Shell And Global Output
+
+`airy shell` accepts the same commands as one-shot invocation and supports quoting, backslash escaping, history, remote-path and session completion, `help`, `clear`, `exit`, and `quit`. History is stored in `~/.airyfs/history`. It can start without an active session so session administration remains available. Commands that need to own stdin, including `write`, valueless `kv set`, interactive `destroy`, and `exec --pty`, are unavailable inside the shell.
+
+Global options precede the command: `--session <name>` selects a session for one invocation, `--json` emits structured output where supported, `--no-color` disables ANSI styling, and `--quiet` suppresses non-error output.
+
+```bash
+airy --session int --json ls
+```
 
 ## What You Can Do
 
@@ -426,7 +484,11 @@ Every bridge request has a 30-second response deadline and an 8 MiB frame limit.
 
 The bridge returns `503` with `Retry-After` when the Durable Object TCP connection is absent or admission is full. Pipeline transport failures become `502` responses to the libSQL client. A volume permits one active Container command. Durable SDK and CLI commands wait in the job queue; transient HTTP execution and CLI `--no-wait` receive `503 EXEC_BUSY` when another command already holds the slot.
 
-See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transport invariants, cancellation behavior, and bounds.
+### Operational Diagnostics And Runtime Failure Boundary
+
+Container health reports whether the data bridge has a Durable Object TCP connection, aggregate pending, queued, and admitted requests across active and retired generations, and Node.js process memory and resource usage. A bridge failure with admitted work emits `bridge_connection_failed`. Worker responses at status 500 or above emit `request_failed` with a bounded route label, edge request ID, status, error code, and Hrana session identity. User-controlled paths, command bodies, raw error messages, and SQL text are not logged.
+
+A July 2026 integration investigation reproduced intermittent buffered-exec hangs under sustained filesystem activity on both `lite` and `basic` Container instances. Immediately before a hang, the bridge remained connected with no pending, queued, or admitted work. During the hang, independent probes to the bridge and command-server ports both failed with `Error proxying request to container: The operation was aborted due to timeout`, while the Durable Object remained responsive and its Hrana counters stopped advancing with no active operation or filesystem lock holder. This localizes that failure mode to an unresponsive Container process, VM, or network proxy below edge routing and the Durable Object SQL/Hrana server. A mounted-FUSE check or Hrana probe before admission cannot prevent a runtime from becoming unresponsive afterward; heartbeats, generation quarantine, durable outcomes, and the circuit breaker bound its impact instead.
 
 ## API
 
@@ -901,7 +963,7 @@ npm test
 npm run build
 ```
 
-The CLI suite uses isolated temporary configuration and local mock servers. It covers session concurrency and auth migration, streaming and resumable files, transactional tree transfer, snapshots, streaming/cancellable exec, durable jobs, change watching, safe startup retries, at-most-once command submission after ambiguous failures, concise gateway errors, shell behavior, and completion. It does not access `~/.airyfs` or a deployed endpoint.
+The CLI suite uses isolated temporary configuration and local mock servers. It covers session concurrency and auth migration, streaming and resumable files, transactional tree transfer, snapshots, durable idempotent submission, paginated output polling, `unknown` outcomes, explicit transient execution, change watching, concise gateway errors, shell behavior, and completion. It does not access `~/.airyfs` or a deployed endpoint.
 
 ### TypeScript SDK Tests
 

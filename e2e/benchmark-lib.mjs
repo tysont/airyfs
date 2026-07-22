@@ -210,6 +210,26 @@ export function counterDelta(before, after, beforeSession, afterSession, beforeE
     : null;
 }
 
+/** Describe a durable exec failure without losing the command identity or terminal state. */
+export async function commandDiagnostics(client, result) {
+  let status = 'unavailable';
+  if (result.commandId) {
+    try {
+      status = (await client.getJob(result.commandId)).status;
+    } catch {
+      status = 'lookup-failed';
+    }
+  }
+  return JSON.stringify({
+    commandId: result.commandId ?? null,
+    status,
+    exitCode: result.exitCode,
+    outputTruncated: result.outputTruncated ?? false,
+    stdout: result.stdout.slice(-2_000),
+    stderr: result.stderr.slice(-2_000),
+  });
+}
+
 export function parseCommandResult(stdout) {
   const line = stdout.trim().split('\n').filter(Boolean).at(-1);
   if (!line) throw new Error('Benchmark command returned no JSON result');

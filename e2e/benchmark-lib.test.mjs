@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  commandDiagnostics,
   compareSummaries,
   counterDelta,
   parseBenchmarkArgs,
@@ -72,6 +73,18 @@ test('computes counter deltas only within one session epoch', () => {
   assert.equal(counterDelta(10, 14, 'one', 'one', undefined, undefined), null);
   assert.equal(counterDelta(10, 14, 'one', 'one', -1, -1), null);
   assert.equal(counterDelta(undefined, 14, 'one', 'one', 1, 1), null);
+});
+
+test('preserves durable command identity and status in failure diagnostics', async () => {
+  const client = { getJob: async (id) => ({ id, status: 'unknown' }) };
+  const diagnostics = JSON.parse(await commandDiagnostics(client, {
+    commandId: 'command-1', exitCode: 1, outputTruncated: true,
+    stdout: 'partial output', stderr: 'runtime lost',
+  }));
+  assert.deepEqual(diagnostics, {
+    commandId: 'command-1', status: 'unknown', exitCode: 1, outputTruncated: true,
+    stdout: 'partial output', stderr: 'runtime lost',
+  });
 });
 
 test('rejects benchmark comparisons with missing or incompatible samples', () => {

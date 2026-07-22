@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict';
 import { AiryFSClient } from '../sdk/dist/index.js';
-import { pythonCommand, shellQuote } from './benchmark-lib.mjs';
+import { commandDiagnostics, pythonCommand, shellQuote } from './benchmark-lib.mjs';
 import { parseRegressionArgs, REGRESSION_PROFILES, regressionHelp } from './container-regression-lib.mjs';
 
 const options = parseRegressionArgs(process.argv.slice(2));
@@ -322,15 +322,22 @@ console.log(`Container regression passed: ${checks} checks across ${REGRESSION_P
 
 async function exec(command) {
   const result = await client.exec(command, AbortSignal.timeout(timeout));
-  equal(result.exitCode, 0, `command succeeds; stderr=${result.stderr.trim()}`);
+  if (result.exitCode !== 0) {
+    throw new Error(`command failed: ${await commandDiagnostics(client, result)}`);
+  }
+  checks++;
   return result;
 }
 
 async function execJson(command) {
   const result = await exec(command);
   const line = result.stdout.trim().split('\n').filter(Boolean).at(-1);
-  if (!line) throw new Error('command returned no JSON result');
-  return JSON.parse(line);
+  if (!line) throw new Error(`command returned no JSON result: ${await commandDiagnostics(client, result)}`);
+  try {
+    return JSON.parse(line);
+  } catch (error) {
+    throw new Error(`command returned invalid JSON: ${await commandDiagnostics(client, result)}`, { cause: error });
+  }
 }
 
 function check(condition, message) {

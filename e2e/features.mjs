@@ -7,7 +7,7 @@ import {
   resumableUploadBlob,
   waitForJob,
 } from '../sdk/dist/index.js';
-import { counterDelta, pythonCommand } from './benchmark-lib.mjs';
+import { commandDiagnostics, counterDelta, pythonCommand } from './benchmark-lib.mjs';
 
 const endpoint = process.env.AIRYFS_URL;
 if (!endpoint) throw new Error('AIRYFS_URL is required');
@@ -58,7 +58,7 @@ try {
   await client.writeFile('/cross-chunk.bin', crossChunk.slice().buffer);
   const sliceOffset = 256 * 1024 - 137;
   const sliceLength = 8192;
-  const fuseRead = await client.exec(pythonCommand(`
+  const fuseRead = await exec(pythonCommand(`
 import hashlib, json, os
 handle = os.open('/volume/cross-chunk.bin', os.O_RDONLY)
 try:
@@ -72,7 +72,7 @@ finally:
     os.close(handle)
 print(json.dumps({'whole': hashlib.sha256(whole).hexdigest(), 'part': hashlib.sha256(part).hexdigest(), 'size': len(whole)}))
 `));
-  const fuseReadResult = JSON.parse(fuseRead.stdout.trim());
+  const fuseReadResult = await parseCommandJson(fuseRead, 'FUSE sequential binary read');
   equal(fuseReadResult.size, crossChunk.length, 'FUSE sequential binary read length');
   equal(fuseReadResult.whole, await sha256(crossChunk), 'FUSE sequential binary read checksum');
   equal(
@@ -89,7 +89,7 @@ print(json.dumps({'whole': hashlib.sha256(whole).hexdigest(), 'part': hashlib.sh
   expectedRandomWrite.fill(65, 4093, 4093 + 8192);
   expectedRandomWrite.fill(66, 256 * 1024 - 31, 256 * 1024 - 31 + 4096);
   await client.writeFile('/random-write.bin', new Uint8Array(randomWriteLength).buffer);
-  const fuseWriteRegression = await client.exec(pythonCommand(`
+  const fuseWriteRegression = await exec(pythonCommand(`
 import json, os
 handle = os.open('/volume/random-write.bin', os.O_RDWR)
 try:
@@ -105,7 +105,7 @@ print(json.dumps({'ok': True}))
     0,
     `FUSE unaligned random-write command succeeds; stderr=${fuseWriteRegression.stderr.trim()}`,
   );
-  assert(JSON.parse(fuseWriteRegression.stdout).ok, 'FUSE unaligned random writes complete');
+  assert((await parseCommandJson(fuseWriteRegression, 'FUSE unaligned random writes')).ok, 'FUSE unaligned random writes complete');
   assert(
     bytesEqual(await client.readFileBytes('/random-write.bin'), expectedRandomWrite),
     'direct API sees exact FUSE random-write bytes',
@@ -137,7 +137,7 @@ finally:
   equal((await truncateTo(0)).exitCode, 0, 'FUSE truncate to zero succeeds');
   equal((await client.readFileBytes('/truncate.bin')).byteLength, 0, 'direct API sees zero-length FUSE truncate');
 
-  const createFamily = await client.exec(pythonCommand(`
+  const createFamily = await exec(pythonCommand(`
 import json, os, stat
 base = '/volume/create-family'
 os.mkdir(base)
@@ -159,7 +159,7 @@ print(json.dumps({
 }))
 `));
   equal(createFamily.exitCode, 0, `FUSE create-family command succeeds; stderr=${createFamily.stderr.trim()}`);
-  const createFamilyResult = JSON.parse(createFamily.stdout);
+  const createFamilyResult = await parseCommandJson(createFamily, 'FUSE create-family');
   assert(createFamilyResult.directory_is_dir, 'FUSE mkdir creates a directory');
   equal(createFamilyResult.directory_mode, 0o750, 'FUSE mkdir preserves mode');
   assert(createFamilyResult.node_is_file, 'FUSE mknod creates a regular file');
@@ -167,7 +167,7 @@ print(json.dumps({
   assert(createFamilyResult.same_inode && createFamilyResult.nlink === 2, 'FUSE hard link shares inode and link count');
   equal(createFamilyResult.symlink_target, 'node', 'FUSE symlink preserves target');
 
-  const renameFamily = await client.exec(pythonCommand(`
+  const renameFamily = await exec(pythonCommand(`
 import errno, json, os
 base = '/volume/rename-family'
 os.mkdir(base)
@@ -210,7 +210,7 @@ print(json.dumps({
 }))
 `));
   equal(renameFamily.exitCode, 0, `FUSE rename-family command succeeds; stderr=${renameFamily.stderr.trim()}`);
-  const renameFamilyResult = JSON.parse(renameFamily.stdout);
+  const renameFamilyResult = await parseCommandJson(renameFamily, 'FUSE rename-family');
   equal(renameFamilyResult.path_body, 'source', 'FUSE rename-over exposes source at destination');
   equal(renameFamilyResult.held_body, 'destination', 'FUSE rename-over retains open destination inode');
   equal(renameFamilyResult.cycle_errno, 22, 'FUSE rename rejects directory cycles with EINVAL');
@@ -224,7 +224,7 @@ print(json.dumps({
     body: 'x',
   }));
   await client.importTree('/scan', archive(scanFiles), true);
-  const scan = await client.exec(pythonCommand(`
+  const scan = await exec(pythonCommand(`
 import json, os
 entries = []
 with os.scandir('/volume/scan') as iterator:
@@ -232,72 +232,72 @@ with os.scandir('/volume/scan') as iterator:
         entries.append((entry.name, entry.stat(follow_symlinks=False).st_size))
 print(json.dumps({'count': len(entries), 'unique': len(set(name for name, _ in entries)), 'bytes': sum(size for _, size in entries), 'names': sorted(name for name, _ in entries)}))
 `));
-  const scanResult = JSON.parse(scan.stdout);
+  const scanResult = await parseCommandJson(scan, 'FUSE directory traversal');
   equal(scanResult.count, scanFiles.length, 'FUSE directory traversal entry count');
   equal(scanResult.unique, scanFiles.length, 'FUSE directory traversal has no duplicates');
   equal(scanResult.bytes, scanFiles.length, 'FUSE readdir attributes match file sizes');
   equal(JSON.stringify(scanResult.names), JSON.stringify(scanFiles.map((file) => file.path)), 'FUSE directory traversal names');
 
-  const missing = await client.exec('test ! -e /volume/appeared.txt');
+  const missing = await exec('test ! -e /volume/appeared.txt');
   equal(missing.exitCode, 0, 'FUSE primes a negative lookup');
   await client.writeFile('/appeared.txt', 'appeared');
-  equal((await client.exec('cat /volume/appeared.txt')).stdout, 'appeared', 'direct create invalidates FUSE negative lookup');
+  equal((await exec('cat /volume/appeared.txt')).stdout, 'appeared', 'direct create invalidates FUSE negative lookup');
 
   await client.writeFile('/cache-visibility.txt', 'before');
-  await client.exec('cat /volume/cache-visibility.txt >/dev/null; stat /volume/cache-visibility.txt >/dev/null');
+  await exec('cat /volume/cache-visibility.txt >/dev/null; stat /volume/cache-visibility.txt >/dev/null');
   await client.writeFile('/cache-visibility.txt', 'after-overwrite');
-  const overwriteVisible = await client.exec(pythonCommand(`
+  const overwriteVisible = await exec(pythonCommand(`
 import json, os
 path = '/volume/cache-visibility.txt'
 print(json.dumps({'body': open(path).read(), 'size': os.stat(path).st_size}))
 `));
   equal(
-    JSON.stringify(JSON.parse(overwriteVisible.stdout)),
+    JSON.stringify(await parseCommandJson(overwriteVisible, 'direct overwrite visibility')),
     JSON.stringify({ body: 'after-overwrite', size: 15 }),
     'direct overwrite invalidates FUSE data and attributes',
   );
 
-  await client.exec('stat /volume/cache-visibility.txt >/dev/null');
+  await exec('stat /volume/cache-visibility.txt >/dev/null');
   await client.truncate('/cache-visibility.txt', 5);
-  const truncateVisible = await client.exec(pythonCommand(`
+  const truncateVisible = await exec(pythonCommand(`
 import json, os
 path = '/volume/cache-visibility.txt'
 print(json.dumps({'body': open(path).read(), 'size': os.stat(path).st_size}))
 `));
   equal(
-    JSON.stringify(JSON.parse(truncateVisible.stdout)),
+    JSON.stringify(await parseCommandJson(truncateVisible, 'direct truncate visibility')),
     JSON.stringify({ body: 'after', size: 5 }),
     'direct truncate invalidates FUSE data and attributes',
   );
 
-  await client.exec('stat /volume/cache-visibility.txt >/dev/null');
+  await exec('stat /volume/cache-visibility.txt >/dev/null');
   await client.chmod('/cache-visibility.txt', 0o600);
   equal(
-    Number((await client.exec("stat -c '%a' /volume/cache-visibility.txt")).stdout.trim()),
+    Number((await exec("stat -c '%a' /volume/cache-visibility.txt")).stdout.trim()),
     600,
     'direct chmod invalidates FUSE attributes',
   );
 
-  await client.exec('stat /volume/cache-visibility.txt >/dev/null; test ! -e /volume/cache-renamed.txt');
+  await exec('stat /volume/cache-visibility.txt >/dev/null; test ! -e /volume/cache-renamed.txt');
   await client.rename('/cache-visibility.txt', '/cache-renamed.txt');
   equal(
-    (await client.exec('test ! -e /volume/cache-visibility.txt && test -f /volume/cache-renamed.txt')).exitCode,
+    (await exec('test ! -e /volume/cache-visibility.txt && test -f /volume/cache-renamed.txt')).exitCode,
     0,
     'direct rename invalidates FUSE entries and attributes',
   );
 
-  await client.exec('stat /volume/cache-renamed.txt >/dev/null');
+  await exec('stat /volume/cache-renamed.txt >/dev/null');
   await client.deleteFile('/cache-renamed.txt', true);
-  equal((await client.exec('test ! -e /volume/cache-renamed.txt')).exitCode, 0, 'direct delete invalidates FUSE entry');
+  equal((await exec('test ! -e /volume/cache-renamed.txt')).exitCode, 0, 'direct delete invalidates FUSE entry');
   await client.writeFile('/cache-renamed.txt', 'recreated');
-  equal((await client.exec('cat /volume/cache-renamed.txt')).stdout, 'recreated', 'direct recreate invalidates FUSE negative lookup');
+  equal((await exec('cat /volume/cache-renamed.txt')).stdout, 'recreated', 'direct recreate invalidates FUSE negative lookup');
 
   const concurrentFiles = Array.from({ length: 8 }, (_, index) => ({
     path: `file-${index}.bin`,
     body: String(index).repeat(64 * 1024),
   }));
   await client.importTree('/concurrent', archive(concurrentFiles), true);
-  const concurrent = await client.exec(pythonCommand(`
+  const concurrent = await exec(pythonCommand(`
 import concurrent.futures, json, pathlib
 paths = list(pathlib.Path('/volume/concurrent').glob('*.bin'))
 def read(path):
@@ -307,7 +307,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
     results = list(executor.map(read, paths))
 print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in results), 'hashes': sorted((name, digest) for name, _, digest in results)}))
 `));
-  const concurrentResult = JSON.parse(concurrent.stdout);
+  const concurrentResult = await parseCommandJson(concurrent, 'concurrent FUSE reads');
   equal(concurrentResult.files, concurrentFiles.length, 'concurrent FUSE read count');
   equal(concurrentResult.bytes, concurrentFiles.length * 64 * 1024, 'concurrent FUSE read bytes');
   const expectedConcurrentHashes = await Promise.all(concurrentFiles.map(async (file) => [file.path, await sha256(new TextEncoder().encode(file.body))]));
@@ -341,7 +341,7 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   equal(output.join(''), 'job-output', 'durable job persisted output');
 
   const beforeFuse = await client.getChanges();
-  const fuseWrite = await client.exec('printf from-fuse > /volume/from-fuse.txt');
+  const fuseWrite = await exec('printf from-fuse > /volume/from-fuse.txt');
   equal(fuseWrite.exitCode, 0, 'FUSE write command');
   const fuseChanges = await client.getChanges({ since: beforeFuse.cursor, path: '/from-fuse.txt' });
   assert(fuseChanges.events.some((event) => event.path === '/from-fuse.txt'), 'FUSE-origin change feed');
@@ -349,7 +349,7 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   await client.deleteSnapshot(snapshot.id);
   const reconnectBefore = await client.perf();
   await client.destroyContainer();
-  equal((await client.exec('true')).exitCode, 0, 'Hrana bridge reconnects after Container restart');
+  equal((await exec('true')).exitCode, 0, 'Hrana bridge reconnects after Container restart');
   const reconnectAfter = await client.perf();
   assert(reconnectAfter.sessionId !== reconnectBefore.sessionId, 'Hrana bridge session changes on reconnect');
   assert(reconnectAfter.sessionEpoch > reconnectBefore.sessionEpoch, 'Hrana bridge epoch advances on reconnect');
@@ -383,6 +383,24 @@ function frame(header) {
   new DataView(result.buffer).setUint32(0, body.byteLength, false);
   result.set(body, 4);
   return result;
+}
+
+async function exec(command) {
+  const result = await client.exec(command);
+  if (result.exitCode !== 0) {
+    throw new Error(`Command failed: ${await commandDiagnostics(client, result)}`);
+  }
+  return result;
+}
+
+async function parseCommandJson(result, label) {
+  const line = result.stdout.trim().split('\n').filter(Boolean).at(-1);
+  if (!line) throw new Error(`${label} returned no JSON: ${await commandDiagnostics(client, result)}`);
+  try {
+    return JSON.parse(line);
+  } catch (error) {
+    throw new Error(`${label} returned invalid JSON: ${await commandDiagnostics(client, result)}`, { cause: error });
+  }
 }
 
 async function sha256(bytes) {
