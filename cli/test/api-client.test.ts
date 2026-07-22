@@ -6,6 +6,15 @@ import { AiryFSClient } from '../src/api/client.js';
 import { AiryFSApiError, AiryFSTransportError, responseError } from '../src/api/errors.js';
 import { encodeRemotePath, resolveRemotePath } from '../src/api/paths.js';
 
+function commandJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'abc', idempotencyKey: 'key', command: 'echo hi', cwd: '/', status: 'succeeded',
+    execId: 'abc', exitCode: 0, error: null, cancelRequested: false, outputBytes: 2,
+    outputTruncated: false, createdAt: 1, updatedAt: 2, startedAt: 1, finishedAt: 2,
+    ...overrides,
+  };
+}
+
 describe('remote paths', () => {
   it('resolves relative paths without escaping the volume root', () => {
     expect(resolveRemotePath('/a/b', '../c')).toBe('/a/c');
@@ -171,31 +180,31 @@ describe('AiryFSClient', () => {
   });
 
   it('throws a typed error for unsuccessful responses', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
-      error: { code: 'EXEC_BUSY', message: 'busy' },
+    const fetchMock = vi.fn<typeof fetch>(async () => Response.json({
+      error: { code: 'UNAVAILABLE', message: 'busy' },
     }, { status: 503 }));
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
 
     await expect(client.exec('true')).rejects.toBeInstanceOf(AiryFSApiError);
   });
 
-  it('streams exec events from an NDJSON response with ?stream=true', async () => {
-    const body = [
-      '{"type":"start","id":"abc"}',
-      '{"type":"stdout","id":"abc","data":"aGk="}',
-      '{"type":"exit","id":"abc","exitCode":3}',
-    ].join('\n') + '\n';
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(body, { headers: { 'Content-Type': 'application/x-ndjson' } }),
-    );
+  it('streams durable exec events from persisted job state', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = input.toString();
+      if (url.endsWith('/jobs') && init?.method === 'POST') return Response.json(commandJob({ status: 'running', exitCode: null }));
+      if (url.includes('/logs')) return Response.json(url.includes('after=')
+        ? { entries: [], next: null }
+        : { entries: [{ seq: 0, stream: 'stdout', data: 'aGk=', timestamp: 1 }], next: null });
+      return Response.json(commandJob({ status: 'failed', exitCode: 3 }));
+    });
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
 
     const events = [];
     for await (const event of await client.execStream('echo hi')) events.push(event);
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/exec?stream=true');
-    expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ command: 'echo hi' }) });
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/jobs');
+    expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ command: 'echo hi', cwd: '/' }) });
     expect(events).toEqual([
       { type: 'start', id: 'abc' },
       { type: 'stdout', id: 'abc', data: 'aGk=' },
@@ -203,24 +212,46 @@ describe('AiryFSClient', () => {
     ]);
   });
 
-  it('throws before streaming when the server rejects the request', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+  it('drains every durable log page before returning the terminal result', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = input.toString();
+      if (url.endsWith('/jobs') && init?.method === 'POST') {
+        return Response.json(commandJob({ status: 'running', exitCode: null }));
+      }
+      if (url.endsWith('/logs')) return Response.json({
+        entries: [{ seq: 0, stream: 'stdout', data: 'YQ==', timestamp: 1 }], next: 0,
+      });
+      if (url.endsWith('/logs?after=0')) return Response.json({
+        entries: [{ seq: 1, stream: 'stdout', data: 'Yg==', timestamp: 2 }], next: null,
+      });
+      if (url.endsWith('/logs?after=1')) return Response.json({ entries: [], next: null });
+      return Response.json(commandJob({ outputTruncated: true }));
+    });
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await expect(client.exec('printf ab')).resolves.toEqual({
+      commandId: 'abc', exitCode: 0, stdout: 'ab', stderr: '', outputTruncated: true,
+    });
+  });
+
+  it('throws before streaming when durable submission is rejected', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => Response.json({
       error: { code: 'EXEC_BUSY', message: 'busy' },
-    }, { status: 503 }));
+    }, { status: 409 }));
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
 
     await expect(client.execStream('true')).rejects.toBeInstanceOf(AiryFSApiError);
   });
 
-  it('posts the id to the cancel route', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ ok: true }));
+  it('posts a durable command id to the job cancel route', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json(commandJob({ status: 'canceled' })));
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
 
     await client.cancelExec('run-42');
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/exec/cancel');
-    expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ id: 'run-42' }) });
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/jobs/run-42/cancel');
+    expect(init).toMatchObject({ method: 'POST' });
   });
 
   it('builds an encoded long-poll change-feed request', async () => {

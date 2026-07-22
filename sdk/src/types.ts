@@ -35,12 +35,19 @@ export interface TrashEntry {
   deletedAt: number;
 }
 export interface RestoredTrashEntry extends TrashEntry { restoredPath: string }
-export interface ExecResult { exitCode: number; stdout: string; stderr: string }
+export interface ExecResult { commandId?: string; exitCode: number; stdout: string; stderr: string; outputTruncated?: boolean }
+export interface ExecOptions {
+  signal?: AbortSignal;
+  /** Reuse this key to recover the same command after a client or network failure. */
+  idempotencyKey?: string;
+  /** Durable status polling interval. Defaults to 250 ms. */
+  pollInterval?: number;
+}
 export type ExecEvent =
   | { type: 'start'; id: string }
   | { type: 'stdout'; id: string; data: string }
   | { type: 'stderr'; id: string; data: string }
-  | { type: 'exit'; id: string; exitCode: number; signal?: string; timedOut?: boolean };
+  | { type: 'exit'; id: string; exitCode: number; signal?: string; timedOut?: boolean; outputTruncated?: boolean };
 
 export interface TreeSummary { files: number; directories: number; symlinks: number; bytes: number }
 export interface SnapshotInfo {
@@ -74,7 +81,7 @@ export interface UploadStatus {
 export interface UploadCompleteResult extends FileStats { path: string; checksum: string }
 export interface ChecksumResult { algorithm: 'sha256'; checksum: string; size: number; ino: number }
 
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'unknown';
 export interface Job {
   id: string;
   idempotencyKey: string;
@@ -126,14 +133,27 @@ export interface ChangeQuery {
 }
 
 export interface HranaCounters { pipelineRequests: number; sqlStatements: number }
-export interface PerfInfo extends HranaCounters { sessionId: string | null; sessionEpoch: number }
+export interface PerfInfo extends HranaCounters {
+  sessionId: string | null;
+  sessionEpoch: number;
+  activeOperation?: { kind: string; startedAt: number } | null;
+  locks?: { activeReaders: number; activeWriters: number; waiters: number };
+  execCircuit?: { state: 'closed' | 'open' | 'half-open'; failures: number; retryAfterMs: number };
+  runtimeGeneration?: number;
+}
 export interface ContainerHealth {
-  state: 'connected' | 'stopped' | 'unhealthy';
+  state: 'healthy' | 'stopped' | 'stopping' | 'stopped_with_code' | string;
   status?: string;
   bridgeStarted?: boolean;
+  bridgeConnected?: boolean;
+  bridgePending?: number;
+  bridgeQueued?: number;
+  bridgeAdmitted?: number;
   fuseMounted?: boolean;
   fuseExitCode?: number | null;
   cwd?: string;
+  processMemory?: Record<string, number>;
+  processResources?: Record<string, number>;
   error?: string;
 }
 export interface UsageInfo {

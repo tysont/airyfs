@@ -1,7 +1,7 @@
 // ABOUTME: Complete typed HTTP client for every AiryFS volume resource.
 // ABOUTME: Keeps transport web-standard and leaves orchestration to reusable helpers.
 
-import { AiryFSTransportError, responseError } from './errors.js';
+import { AiryFSApiError, AiryFSCommandOutcomeUnknownError, AiryFSTransportError, responseError } from './errors.js';
 import { decodeNdjsonStream } from './ndjson.js';
 import { encodeRemotePath } from './paths.js';
 import type {
@@ -14,6 +14,7 @@ import type {
   DirectoryEntry,
   AiryFSClientOptions,
   ExecEvent,
+  ExecOptions,
   ExecResult,
   Job,
   JobLogPage,
@@ -236,7 +237,38 @@ export class AiryFSClient {
     } as RequestInit & { duplex: 'half' })).json() as Promise<TreeSummary>;
   }
 
-  exec(command: string, signal?: AbortSignal): Promise<ExecResult> {
+  async exec(command: string, signalOrOptions?: AbortSignal | ExecOptions): Promise<ExecResult> {
+    const options = execOptions(signalOrOptions);
+    let commandId: string | undefined;
+    let stdout = '';
+    let stderr = '';
+    let exitCode = 1;
+    let outputTruncated = false;
+    const stdoutDecoder = new TextDecoder();
+    const stderrDecoder = new TextDecoder();
+    for await (const event of await this.execStream(command, options)) {
+      if (event.type === 'start') commandId = event.id;
+      else if (event.type === 'stdout') stdout += stdoutDecoder.decode(fromBase64(event.data), { stream: true });
+      else if (event.type === 'stderr') stderr += stderrDecoder.decode(fromBase64(event.data), { stream: true });
+      else if (event.type === 'exit') {
+        exitCode = event.exitCode;
+        outputTruncated = event.outputTruncated ?? false;
+      }
+    }
+    stdout += stdoutDecoder.decode();
+    stderr += stderrDecoder.decode();
+    return { commandId, exitCode, stdout, stderr, ...(outputTruncated ? { outputTruncated: true } : {}) };
+  }
+
+  async execStream(command: string, signalOrOptions?: AbortSignal | ExecOptions): Promise<AsyncIterable<ExecEvent>> {
+    const options = execOptions(signalOrOptions);
+    const key = options.idempotencyKey ?? crypto.randomUUID();
+    const job = await this.submitJobWithRetry(command, '/', key, options.signal);
+    return this.followCommand(job, options);
+  }
+
+  /** Execute without durable tracking. Prefer {@link exec} unless immediate admission is required. */
+  execTransient(command: string, signal?: AbortSignal): Promise<ExecResult> {
     return this.json<ExecResult>(`${this.volumeBase}/exec`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -245,7 +277,8 @@ export class AiryFSClient {
     });
   }
 
-  async execStream(command: string, signal?: AbortSignal): Promise<AsyncIterable<ExecEvent>> {
+  /** Stream without durable tracking. Prefer {@link execStream} for recoverable execution. */
+  async execStreamTransient(command: string, signal?: AbortSignal): Promise<AsyncIterable<ExecEvent>> {
     const url = new URL(this.url(`${this.volumeBase}/exec`));
     url.searchParams.set('stream', 'true');
     const response = await this.requestUrl(url, {
@@ -254,15 +287,20 @@ export class AiryFSClient {
       body: JSON.stringify({ command }),
       signal,
     });
-    return response.body ? decodeNdjsonStream<ExecEvent>(response.body) : emptyEvents();
+    return response.body ? decodeNdjsonStream<ExecEvent>(response.body) : emptyTransientEvents();
   }
 
   async cancelExec(id: string): Promise<void> {
-    await this.request(`${this.volumeBase}/exec/cancel`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    });
+    try {
+      await this.cancelJob(id);
+    } catch (error) {
+      if (!(error instanceof AiryFSApiError) || error.code !== 'JOB_NOT_FOUND') throw error;
+      await this.request(`${this.volumeBase}/exec/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+    }
   }
 
   createPtyTicket(): Promise<{ ticket: string; expiresAt: number }> {
@@ -347,11 +385,12 @@ export class AiryFSClient {
     await this.request(this.resourcePath('uploads', path), { method: 'DELETE' });
   }
 
-  submitJob(command: string, cwd = '/', idempotencyKey: string = crypto.randomUUID()): Promise<Job> {
+  submitJob(command: string, cwd = '/', idempotencyKey: string = crypto.randomUUID(), signal?: AbortSignal): Promise<Job> {
     return this.json<Job>(`${this.volumeBase}/jobs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
       body: JSON.stringify({ command, cwd }),
+      signal,
     });
   }
 
@@ -361,19 +400,120 @@ export class AiryFSClient {
     return (await this.requestUrl(url)).json() as Promise<Job[]>;
   }
 
-  getJob(id: string): Promise<Job> {
-    return this.json<Job>(`${this.volumeBase}/jobs/${encodeURIComponent(id)}`);
+  getJob(id: string, signal?: AbortSignal): Promise<Job> {
+    return this.json<Job>(`${this.volumeBase}/jobs/${encodeURIComponent(id)}`, { signal });
   }
 
-  async getJobLogs(id: string, after?: number, limit?: number): Promise<JobLogPage> {
+  async getJobLogs(id: string, after?: number, limit?: number, signal?: AbortSignal): Promise<JobLogPage> {
     const url = new URL(this.url(`${this.volumeBase}/jobs/${encodeURIComponent(id)}/logs`));
     if (after !== undefined) url.searchParams.set('after', String(after));
     if (limit !== undefined) url.searchParams.set('limit', String(limit));
-    return (await this.requestUrl(url)).json() as Promise<JobLogPage>;
+    return (await this.requestUrl(url, { signal })).json() as Promise<JobLogPage>;
   }
 
-  cancelJob(id: string): Promise<Job> {
-    return this.json<Job>(`${this.volumeBase}/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+  cancelJob(id: string, signal?: AbortSignal): Promise<Job> {
+    return this.json<Job>(`${this.volumeBase}/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST', signal });
+  }
+
+  private async submitJobWithRetry(
+    command: string,
+    cwd: string,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<Job> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      signal?.throwIfAborted();
+      try {
+        return await this.submitJob(command, cwd, idempotencyKey, signal);
+      } catch (error) {
+        lastError = error;
+        const retryable = error instanceof AiryFSTransportError
+          || (error instanceof AiryFSApiError && [502, 503, 504].includes(error.status));
+        if (!retryable || attempt === 2) throw error;
+        await abortableDelay(200 * (2 ** attempt), signal);
+      }
+    }
+    throw lastError;
+  }
+
+  private followCommand(initial: Job, options: ExecOptions): AsyncIterable<ExecEvent> {
+    const client = this;
+    return (async function* (): AsyncGenerator<ExecEvent> {
+      const id = initial.id;
+      let cursor: number | undefined;
+      let terminal = false;
+      let pollFailed = false;
+      try {
+        yield { type: 'start', id };
+        let job = initial;
+        while (true) {
+          options.signal?.throwIfAborted();
+          let page = await client.retryCommandRead(() => client.getJobLogs(id, cursor, undefined, options.signal), options.signal);
+          cursor = client.advanceLogCursor(page, cursor);
+          for (const entry of page.entries) {
+            yield { type: entry.stream, id, data: entry.data };
+          }
+          job = await client.retryCommandRead(() => client.getJob(id, options.signal), options.signal);
+          if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'canceled' || job.status === 'unknown') {
+            do {
+              page = await client.retryCommandRead(() => client.getJobLogs(id, cursor, undefined, options.signal), options.signal);
+              cursor = client.advanceLogCursor(page, cursor);
+              for (const entry of page.entries) yield { type: entry.stream, id, data: entry.data };
+            } while (page.next !== null);
+            terminal = true;
+            if (job.status === 'unknown') {
+              throw new AiryFSCommandOutcomeUnknownError(id, job.error ?? undefined);
+            }
+            if (job.exitCode === null && job.status === 'failed') {
+              throw new AiryFSApiError(503, 'COMMAND_FAILED', job.error ?? 'Command failed before reporting an exit code');
+            }
+            yield {
+              type: 'exit',
+              id,
+              exitCode: job.exitCode ?? (job.status === 'canceled' ? 130 : 1),
+              ...(job.outputTruncated ? { outputTruncated: true } : {}),
+              ...(job.status === 'canceled' ? { signal: 'SIGTERM' } : {}),
+            };
+            return;
+          }
+          await abortableDelay(options.pollInterval ?? 250, options.signal);
+        }
+      } catch (error) {
+        pollFailed = true;
+        throw error;
+      } finally {
+        if (!terminal && (!pollFailed || options.signal?.aborted)) {
+          await client.cancelJob(id, AbortSignal.timeout(5_000));
+        }
+      }
+    })();
+  }
+
+  private advanceLogCursor(page: JobLogPage, cursor: number | undefined): number | undefined {
+    for (const entry of page.entries) {
+      if (cursor !== undefined && entry.seq <= cursor) throw new Error(`Command log cursor did not advance beyond ${cursor}`);
+      cursor = entry.seq;
+    }
+    if (page.next !== null && page.entries.length === 0) throw new Error('Command log page did not advance');
+    return cursor;
+  }
+
+  private async retryCommandRead<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      signal?.throwIfAborted();
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        const retryable = error instanceof AiryFSTransportError
+          || error instanceof AiryFSApiError && [502, 503, 504].includes(error.status);
+        if (!retryable || attempt === 2) throw error;
+        await abortableDelay(200 * (2 ** attempt), signal);
+      }
+    }
+    throw lastError;
   }
 
   async getChanges(options: ChangeQuery = {}): Promise<ChangePage> {
@@ -556,7 +696,34 @@ export class AiryFSClient {
   }
 }
 
-async function* emptyEvents(): AsyncGenerator<ExecEvent> {}
+function execOptions(value?: AbortSignal | ExecOptions): ExecOptions {
+  if (!value) return {};
+  return 'aborted' in value && typeof value.addEventListener === 'function'
+    ? { signal: value as AbortSignal }
+    : value as ExecOptions;
+}
+
+function fromBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function* emptyTransientEvents(): AsyncGenerator<ExecEvent> {}
 
 function encodeBase64(data: Uint8Array): string {
   let binary = '';

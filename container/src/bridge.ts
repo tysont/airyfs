@@ -45,6 +45,13 @@ interface BridgeChannel {
 export interface BridgeServers {
   tcpPort: number;
   httpPort: number;
+  status(): { connected: boolean; pending: number; queued: number; admitted: number };
+  close(): Promise<void>;
+}
+
+export interface Bridge {
+  data: BridgeServers;
+  invalidation: BridgeServers;
   close(): Promise<void>;
 }
 
@@ -82,6 +89,18 @@ function closeRetiredChannelIfDrained(channel: BridgeChannel): void {
 
 function failConnection(channel: BridgeChannel, socket: Socket, error: Error): void {
   if (channel.doSocket !== socket) return;
+  const pending = channel.pendingQueue.length;
+  const queued = channel.writeQueue.length;
+  const admitted = channel.admittedHttpRequests;
+  if (pending > 0 || queued > 0 || admitted > 0) {
+    console.error(JSON.stringify({
+      event: 'bridge_connection_failed',
+      error: error.message,
+      pending,
+      queued,
+      admitted,
+    }));
+  }
   channel.doSocket = null;
   channel.tcpBuffer = Buffer.alloc(0);
   rejectPending(channel, error);
@@ -376,6 +395,7 @@ export async function startChannel(tcpPort: number, httpPort: number): Promise<B
 
   const httpServer = createHttpServer(async (req, res) => {
     if (req.method === 'GET') {
+      // AgentFS uses this endpoint only to confirm that the local bridge is listening.
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('ok');
       return;
@@ -420,6 +440,22 @@ export async function startChannel(tcpPort: number, httpPort: number): Promise<B
   return {
     tcpPort: boundTcpPort,
     httpPort: boundHttpPort,
+    status() {
+      let pending = 0;
+      let queued = 0;
+      let admitted = 0;
+      for (const generation of generations) {
+        pending += generation.pendingQueue.length;
+        queued += generation.writeQueue.length;
+        admitted += generation.admittedHttpRequests;
+      }
+      return {
+        connected: channel?.doSocket !== null && channel?.doSocket.destroyed === false,
+        pending,
+        queued,
+        admitted,
+      };
+    },
     async close(): Promise<void> {
       for (const generation of generations) {
         if (generation.doSocket && !generation.doSocket.destroyed) generation.doSocket.destroy();
@@ -430,9 +466,14 @@ export async function startChannel(tcpPort: number, httpPort: number): Promise<B
   };
 }
 
-export async function startBridge(): Promise<void> {
-  await Promise.all([
+export async function startBridge(): Promise<Bridge> {
+  const [data, invalidation] = await Promise.all([
     startChannel(9000, 8080),
     startChannel(9001, 8081),
   ]);
+  return {
+    data,
+    invalidation,
+    close: async () => Promise.all([data.close(), invalidation.close()]).then(() => undefined),
+  };
 }

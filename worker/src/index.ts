@@ -36,7 +36,9 @@ import {
 } from './files-api';
 import { FilesystemPrimitives } from './filesystem-primitives';
 import { encodeTreeStream, type TreeSummary } from './archive';
-import { holdStreamUntilDone } from './exec-stream';
+import { enforceStreamHeartbeat, holdStreamUntilDone } from './exec-stream';
+import { monitorExecLiveness } from './exec-watchdog';
+import { ExecCircuit } from './exec-circuit';
 import { sseToNdjson } from './sse-stream';
 import { postContainerHttpStream } from './container-http-stream';
 import { importTree } from './tree-import';
@@ -182,6 +184,14 @@ export interface ExecResult {
 const STARTUP_TIMEOUT_MS = 60_000;
 const CONTAINER_EXEC_TIMEOUT_MS = 310_000;
 const DESTROY_TIMEOUT_MS = 10_000;
+const EXEC_WATCHDOG_INITIAL_DELAY_MS = 10_000;
+const EXEC_WATCHDOG_INTERVAL_MS = 5_000;
+const EXEC_WATCHDOG_PROBE_TIMEOUT_MS = 5_000;
+const EXEC_WATCHDOG_MAX_FAILURES = 3;
+const EXEC_CIRCUIT_FAILURE_THRESHOLD = 3;
+const EXEC_CIRCUIT_WINDOW_MS = 2 * 60_000;
+const EXEC_CIRCUIT_COOLDOWN_MS = 30_000;
+const EXEC_STREAM_HEARTBEAT_TIMEOUT_MS = 15_000;
 const CHANGE_LONG_POLL_MAX_MS = 25_000;
 const CHANGE_LONG_POLL_INTERVAL_MS = 200;
 const METRICS_CACHE_MS = 5_000;
@@ -218,6 +228,12 @@ export class AiryFS extends Container<Env> {
   private activeServePromise: Promise<void> | null = null;
   private invalidationServePromise: Promise<void> | null = null;
   private activeExec: symbol | null = null;
+  private runtimeGeneration = 0;
+  private readonly execCircuit = new ExecCircuit({
+    threshold: EXEC_CIRCUIT_FAILURE_THRESHOLD,
+    windowMs: EXEC_CIRCUIT_WINDOW_MS,
+    cooldownMs: EXEC_CIRCUIT_COOLDOWN_MS,
+  });
   /** In-memory single-flight guard for the scheduled queue runner. */
   private jobRunning = false;
   private webhookDeliveryRunning = false;
@@ -349,6 +365,30 @@ export class AiryFS extends Container<Env> {
     // must not clear state belonging to a replacement Container generation.
   }
 
+  private assertExecCircuit(): void {
+    const retryAfterMs = this.execCircuit.admit();
+    if (retryAfterMs <= 0) return;
+    throw new HttpError(
+      503,
+      'CONTAINER_QUARANTINED',
+      'Container execution is temporarily quarantined after repeated runtime failures',
+      { 'Retry-After': String(Math.max(1, Math.ceil(retryAfterMs / 1000))) },
+    );
+  }
+
+  private currentRuntimeGeneration(): number {
+    if (this.runtimeGeneration === 0) this.runtimeGeneration = 1;
+    return this.runtimeGeneration;
+  }
+
+  private async quarantineRuntime(generation: number): Promise<void> {
+    if (generation !== this.runtimeGeneration) return;
+    this.runtimeGeneration++;
+    this.execCircuit.recordFailure();
+    this.clearRuntimeConnections();
+    await this.destroyBounded();
+  }
+
   // ---------------------------------------------------------------------------
   // Core API
   // ---------------------------------------------------------------------------
@@ -358,19 +398,29 @@ export class AiryFS extends Container<Env> {
     if (this.activeExec || this.destroyPromise) {
       throw new HttpError(503, 'EXEC_BUSY', 'Another command or Container lifecycle operation is already running');
     }
+    this.assertExecCircuit();
     const execution = Symbol('exec');
     this.activeExec = execution;
     try {
-      await this.ensureContainer(signal);
+      try {
+        await this.ensureContainer(signal);
+      } catch (error) {
+        this.execCircuit.recordFailure();
+        throw error;
+      }
       signal?.throwIfAborted();
+      const generation = this.currentRuntimeGeneration();
 
-      const commandSignals = [AbortSignal.timeout(
-        command === ':' ? STARTUP_TIMEOUT_MS : CONTAINER_EXEC_TIMEOUT_MS
-      )];
+      const commandAbort = new AbortController();
+      const watchdogStop = new AbortController();
+      const commandSignals = [
+        commandAbort.signal,
+        AbortSignal.timeout(command === ':' ? STARTUP_TIMEOUT_MS : CONTAINER_EXEC_TIMEOUT_MS),
+      ];
       if (command === ':' && signal) commandSignals.push(signal);
       let resp: Response;
       try {
-        resp = await this.containerFetch(
+        const fetchPromise = this.containerFetch(
           new Request('http://localhost/exec', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -379,27 +429,92 @@ export class AiryFS extends Container<Env> {
           }),
           4000
         );
+        const watchdogPromise = monitorExecLiveness({
+          signal: watchdogStop.signal,
+          initialDelayMs: EXEC_WATCHDOG_INITIAL_DELAY_MS,
+          intervalMs: EXEC_WATCHDOG_INTERVAL_MS,
+          maxFailures: EXEC_WATCHDOG_MAX_FAILURES,
+          probe: async () => {
+            const probeSignal = AbortSignal.any([
+              watchdogStop.signal,
+              AbortSignal.timeout(EXEC_WATCHDOG_PROBE_TIMEOUT_MS),
+            ]);
+            const response = await this.containerFetch(
+              new Request('http://localhost/ping', { signal: probeSignal }),
+              4000,
+            );
+            return response.ok;
+          },
+        });
+        const outcome = await Promise.race([
+          fetchPromise.then((response) => ({ kind: 'response' as const, response })),
+          watchdogPromise.then((tripped) => ({ kind: tripped ? 'watchdog' as const : 'stopped' as const })),
+        ]);
+        if (outcome.kind !== 'response') {
+          if (outcome.kind === 'stopped') throw new Error('Container watchdog stopped unexpectedly');
+          commandAbort.abort();
+          await this.quarantineRuntime(generation);
+          throw new HttpError(
+            503,
+            'COMMAND_OUTCOME_UNKNOWN',
+            'Container became unresponsive after command admission; the command may have run',
+          );
+        }
+        resp = outcome.response;
       } catch (error) {
-        if (command !== ':') throw error;
-        this.clearRuntimeConnections();
-        await this.destroyBounded();
+        if (error instanceof HttpError && error.code === 'COMMAND_OUTCOME_UNKNOWN') throw error;
+        if (command !== ':') {
+          commandAbort.abort();
+          await this.quarantineRuntime(generation);
+          throw new HttpError(
+            503,
+            'COMMAND_OUTCOME_UNKNOWN',
+            'Lost contact with the Container after command admission; the command may have run',
+          );
+        }
+        await this.quarantineRuntime(generation);
         throw new HttpError(503, 'CONTAINER_UNAVAILABLE', 'Container preflight timed out; retry startup');
+      } finally {
+        watchdogStop.abort();
       }
 
       if (!resp.ok) {
-        const message = await resp.text();
+        let message: string;
+        try {
+          message = await resp.text();
+        } catch {
+          await this.quarantineRuntime(generation);
+          throw new HttpError(503, 'COMMAND_OUTCOME_UNKNOWN', 'Lost the Container response after command admission; the command may have run');
+        }
         if (resp.status === 503 && message.includes('FUSE unavailable')) {
-          this.clearRuntimeConnections();
-          await this.destroyBounded();
+          await this.quarantineRuntime(generation);
           throw new HttpError(503, 'CONTAINER_UNAVAILABLE', message);
         }
         if (resp.status === 503) {
+          this.execCircuit.recordSuccess();
           throw new HttpError(503, 'EXEC_BUSY', 'Another command is already running');
         }
+        if (resp.status >= 500) {
+          await this.quarantineRuntime(generation);
+          throw new HttpError(
+            503,
+            'COMMAND_OUTCOME_UNKNOWN',
+            'The Container failed after command admission; the command may have run',
+          );
+        }
+        this.execCircuit.recordSuccess();
         throw new Error(`Container exec failed (${resp.status}): ${message}`);
       }
 
-      return resp.json<ExecResult>();
+      let result: ExecResult;
+      try {
+        result = await resp.json<ExecResult>();
+      } catch {
+        await this.quarantineRuntime(generation);
+        throw new HttpError(503, 'COMMAND_OUTCOME_UNKNOWN', 'Could not decode the Container response after command admission; the command may have run');
+      }
+      this.execCircuit.recordSuccess();
+      return result;
     } finally {
       if (this.activeExec === execution) this.activeExec = null;
     }
@@ -418,37 +533,74 @@ export class AiryFS extends Container<Env> {
     if (this.activeExec || this.destroyPromise) {
       throw new HttpError(503, 'EXEC_BUSY', 'Another command or Container lifecycle operation is already running');
     }
+    this.assertExecCircuit();
     const execution = Symbol('exec-stream');
+    let generation = 0;
     this.activeExec = execution;
     const release = (): void => {
       if (this.activeExec === execution) this.activeExec = null;
     };
     try {
-      await this.ensureContainer(signal);
+      try {
+        await this.ensureContainer(signal);
+      } catch (error) {
+        this.execCircuit.recordFailure();
+        throw error;
+      }
       signal?.throwIfAborted();
+      generation = this.currentRuntimeGeneration();
 
       const id = crypto.randomUUID();
-      const commandSignals = [AbortSignal.timeout(CONTAINER_EXEC_TIMEOUT_MS)];
+      const commandAbort = new AbortController();
+      const commandSignals = [commandAbort.signal, AbortSignal.timeout(CONTAINER_EXEC_TIMEOUT_MS)];
       if (signal) commandSignals.push(signal);
 
       const commandSignal = AbortSignal.any(commandSignals);
-      const socket = this.ctx.container!.getTcpPort(4000).connect('0.0.0.0:4000');
-      const resp = await postContainerHttpStream(socket, '/exec/stream', { command, id }, commandSignal);
+      let resp: Awaited<ReturnType<typeof postContainerHttpStream>>;
+      try {
+        const socket = this.ctx.container!.getTcpPort(4000).connect('0.0.0.0:4000');
+        resp = await postContainerHttpStream(socket, '/exec/stream', { command, id }, commandSignal);
+      } catch {
+        commandAbort.abort();
+        await this.quarantineRuntime(generation);
+        throw new HttpError(503, 'COMMAND_OUTCOME_UNKNOWN', 'Lost the Container stream during command admission; the command may have run');
+      }
 
       if (resp.status < 200 || resp.status >= 300) {
-        const message = await new Response(resp.body).text();
+        let message: string;
+        try {
+          message = await new Response(resp.body).text();
+        } catch {
+          commandAbort.abort();
+          await this.quarantineRuntime(generation);
+          throw new HttpError(503, 'COMMAND_OUTCOME_UNKNOWN', 'Lost the Container stream after command admission; the command may have run');
+        }
         if (resp.status === 503 && message.includes('FUSE unavailable')) {
-          this.clearRuntimeConnections();
-          await this.destroyBounded();
+          await this.quarantineRuntime(generation);
           throw new HttpError(503, 'CONTAINER_UNAVAILABLE', message);
         }
         if (resp.status === 503) {
+          this.execCircuit.recordSuccess();
           throw new HttpError(503, 'EXEC_BUSY', 'Another command is already running');
         }
+        if (resp.status >= 500) {
+          commandAbort.abort();
+          await this.quarantineRuntime(generation);
+          throw new HttpError(503, 'COMMAND_OUTCOME_UNKNOWN', 'The Container stream failed after command admission; the command may have run');
+        }
+        this.execCircuit.recordSuccess();
         throw new Error(`Container exec failed (${resp.status}): ${message}`);
       }
 
-      return holdStreamUntilDone(sseToNdjson(resp.body), release);
+      const monitored = enforceStreamHeartbeat(sseToNdjson(resp.body), {
+        timeoutMs: EXEC_STREAM_HEARTBEAT_TIMEOUT_MS,
+        onFailure: async () => {
+          commandAbort.abort();
+          await this.quarantineRuntime(generation);
+        },
+        onComplete: () => this.execCircuit.recordSuccess(),
+      });
+      return holdStreamUntilDone(monitored, release);
     } catch (error) {
       release();
       throw error;
@@ -479,12 +631,25 @@ export class AiryFS extends Container<Env> {
     if (this.activeExec || this.destroyPromise) {
       throw new HttpError(503, 'EXEC_BUSY', 'Another command or Container lifecycle operation is already running');
     }
+    this.assertExecCircuit();
     const execution = Symbol('exec-pty');
     this.activeExec = execution;
     try {
-      await this.ensureContainer();
-      const socket = this.ctx.container!.getTcpPort(4001).connect('0.0.0.0:4001') as WorkerSocket;
-      await socket.opened;
+      try {
+        await this.ensureContainer();
+      } catch (error) {
+        this.execCircuit.recordFailure();
+        throw error;
+      }
+      let socket: WorkerSocket;
+      try {
+        socket = this.ctx.container!.getTcpPort(4001).connect('0.0.0.0:4001') as WorkerSocket;
+        await socket.opened;
+      } catch (error) {
+        this.execCircuit.recordFailure();
+        throw error;
+      }
+      this.execCircuit.recordSuccess();
       const pair = new WebSocketPair();
       const client = pair[0];
       const server = pair[1];
@@ -1261,6 +1426,7 @@ export class AiryFS extends Container<Env> {
         portReadyTimeoutMS: STARTUP_TIMEOUT_MS,
       },
     });
+    this.runtimeGeneration++;
 
     // 2. Start bridge in-process
     await this.setupBridge(signal);
@@ -2494,6 +2660,10 @@ export class AiryFS extends Container<Env> {
           sessionEpoch: this.hranaSessionEpoch,
           pipelineRequests: this.hranaServer?.pipelineCount ?? 0,
           sqlStatements: this.hranaServer?.statementCount ?? 0,
+          activeOperation: this.hranaServer?.activeOperation ?? null,
+          locks: this.access.status(),
+          execCircuit: this.execCircuit.snapshot(),
+          runtimeGeneration: this.runtimeGeneration,
         });
       }
 
@@ -2510,9 +2680,35 @@ export class AiryFS extends Container<Env> {
       return new Response('Not found', { status: 404 });
     } catch (error) {
       const response = errorResponse(error);
+      if (response.status >= 500) {
+        console.error(JSON.stringify({
+          event: 'request_failed',
+          requestId: request.headers.get('cf-ray') ?? crypto.randomUUID(),
+          route: safeRequestRoute(url.pathname),
+          status: response.status,
+          errorCode: error instanceof HttpError ? error.code : 'INTERNAL_ERROR',
+          sessionId: this.hranaServer?.sessionId ?? null,
+          sessionEpoch: this.hranaSessionEpoch,
+        }));
+      }
       return browserUploadRequest ? withBrowserUploadCors(response) : response;
     }
   }
+}
+
+/** Return a bounded route label without logging user-controlled paths or volume names. */
+function safeRequestRoute(pathname: string): string {
+  if (pathname === '/s' || pathname.startsWith('/s/')) return '/s/:volume/*';
+  if (pathname.startsWith('/d/')) return '/d/:volume/:share';
+  if (pathname.startsWith('/dav/')) return '/dav/:volume/*';
+  if (pathname.startsWith('/p/')) return '/p/:volume/*';
+  try {
+    const route = parseV1Route(pathname);
+    if (route) return `/v1/volumes/:volume/${route.resource}${route.path === '/' ? '' : '/*'}`;
+  } catch {
+    return 'invalid';
+  }
+  return LEGACY_VOLUME_PATHS.has(pathname) ? pathname : 'unmatched';
 }
 
 function withBrowserUploadCors(response: Response): Response {

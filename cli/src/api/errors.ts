@@ -20,6 +20,13 @@ export class AiryFSTransportError extends Error {
   }
 }
 
+export class AiryFSCommandOutcomeUnknownError extends Error {
+  constructor(readonly commandId: string, message = 'Command outcome is unknown') {
+    super(`${message} (command ${commandId})`);
+    this.name = 'AiryFSCommandOutcomeUnknownError';
+  }
+}
+
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 
 export async function responseError(response: Response): Promise<AiryFSApiError> {

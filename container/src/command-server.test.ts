@@ -128,6 +128,16 @@ test('separates stderr from stdout', async () => {
   assert.equal(decode('stderr'), 'err');
 });
 
+test('emits heartbeats while a silent command runs', async () => {
+  const base = await start();
+  const response = await fetch(`${base}/exec/stream`, {
+    method: 'POST',
+    body: JSON.stringify({ command: 'sleep 2', id: 'silent' }),
+  });
+  const body = await response.text();
+  assert.match(body, /event: heartbeat\ndata: \{\}\n\n/);
+});
+
 test('rejects a second command while one is running, then admits after it finishes', async () => {
   const base = await start();
   const longRun = fetch(`${base}/exec/stream`, {
@@ -249,6 +259,27 @@ test('buffered /exec still returns a single JSON object', async () => {
   });
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { exitCode: 3, stdout: 'hi', stderr: '' });
+});
+
+test('ping remains responsive while a command is running', async () => {
+  const base = await start();
+  const response = await fetch(`${base}/exec/stream`, {
+    method: 'POST',
+    body: JSON.stringify({ command: 'sleep 1', id: 'ping-run' }),
+  });
+  const iterator = iterateEvents(response);
+  await iterator.next();
+
+  const ping = await fetch(`${base}/ping`);
+  assert.equal(ping.status, 200);
+  assert.deepEqual(await ping.json(), { status: 'ok' });
+  for await (const _ of iterator) { /* drain */ }
+});
+
+test('health routing accepts query parameters but not prefixes', async () => {
+  const base = await start();
+  assert.equal((await fetch(`${base}/health?detail=1`)).status, 200);
+  assert.equal((await fetch(`${base}/healthcheck`)).status, 404);
 });
 
 test('buffered and streaming share one active slot', async () => {

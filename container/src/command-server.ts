@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { exec, spawn, type ChildProcess } from 'child_process';
 import { mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
+import type { Bridge } from './bridge.js';
 import { createExecutionSlot, type ExecutionSlot } from './execution-slot.js';
 import { createPtyServer, PTY_PORT } from './pty-server.js';
 import { createServiceServer, SERVICE_CONTROL_PORT } from './service-server.js';
@@ -73,6 +74,7 @@ function jsonResponse(res: ServerResponse, status: number, value: unknown, heade
 export function createCommandServer(slot: ExecutionSlot = createExecutionSlot()): Server {
   let cwd = '/tmp';
   let bridgeStarted = false;
+  let bridge: Bridge | null = null;
   let fuseProcess: ChildProcess | null = null;
   let fuseExitCode: number | null = null;
   // Exactly one command runs at a time across buffered and streaming endpoints.
@@ -295,15 +297,28 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
   }
 
   return createServer(async (req, res) => {
-    if (req.method === 'GET' && req.url === '/health') {
+    const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+    if (req.method === 'GET' && pathname === '/ping') {
+      jsonResponse(res, 200, { status: 'ok' });
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/health') {
       const mounted = await isMounted();
       if (mounted && cwd !== MOUNT_POINT) cwd = MOUNT_POINT;
+      const bridgeStatus = bridge?.data.status() ?? { connected: false, pending: 0, queued: 0, admitted: 0 };
       jsonResponse(res, 200, {
         status: 'ok',
         bridgeStarted,
+        bridgeConnected: bridgeStatus.connected,
+        bridgePending: bridgeStatus.pending,
+        bridgeQueued: bridgeStatus.queued,
+        bridgeAdmitted: bridgeStatus.admitted,
         fuseMounted: mounted,
         fuseExitCode,
         cwd,
+        processMemory: process.memoryUsage(),
+        processResources: process.resourceUsage(),
       });
       return;
     }
@@ -315,7 +330,7 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
       }
       try {
         const { startBridge } = await import('./bridge.js');
-        await startBridge();
+        bridge = await startBridge();
         bridgeStarted = true;
         jsonResponse(res, 200, { ok: true });
       } catch (err) {

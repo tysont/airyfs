@@ -77,6 +77,25 @@ test('pipelines serialized writes and resolves responses in FIFO order', async (
   assert.equal(secondFrame.toString(), '{"request":2}');
 });
 
+test('reports connection and queue state', async () => {
+  const { socket } = await setup();
+  assert.deepEqual(bridge!.status(), { connected: true, pending: 0, queued: 0, admitted: 0 });
+
+  const pending = fetch(`http://127.0.0.1:${bridge!.httpPort}/v3/pipeline`, { method: 'POST', body: '{}' });
+  const frame = JSON.parse((await readFrame(socket)).toString());
+  assert.deepEqual(frame, {});
+  assert.deepEqual(bridge!.status(), { connected: true, pending: 1, queued: 0, admitted: 1 });
+  writeFrame(socket, Buffer.from('{}'));
+
+  assert.equal((await pending).status, 200);
+  assert.deepEqual(bridge!.status(), { connected: true, pending: 0, queued: 0, admitted: 0 });
+});
+
+test('reports a disconnected channel', async () => {
+  bridge = await startChannel(0, 0);
+  assert.deepEqual(bridge.status(), { connected: false, pending: 0, queued: 0, admitted: 0 });
+});
+
 test('rejects admission above the bounded queue', async () => {
   const { base, socket } = await setup();
   const requests = Array.from({ length: MAX_PENDING_REQUESTS }, (_, index) =>

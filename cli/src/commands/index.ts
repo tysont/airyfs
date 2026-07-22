@@ -1259,9 +1259,15 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
     .option('--no-wait', 'fail immediately if another command is running')
     .option('--no-stream', 'disable live streaming and buffer the full result (text mode)')
     .option('--pty', 'run interactively in a remote pseudo-terminal')
-    .option('--timeout <duration>', 'maximum startup and busy-wait time', '90s')
+    .option('--container', 'force execution through the Container instead of a direct read-only fast path')
+    .option('--idempotency-key <key>', 'reuse the same durable command across submission retries')
+    .option('--timeout <duration>', 'maximum Container startup time for --pty', '90s')
     .description('Execute a command in the volume Container')
     .action(async (parts: string[], options, command) => perform(runtime, command, async (context) => {
+      if (!options.wait && options.idempotencyKey) {
+        throw new ConfigError('`--idempotency-key` cannot be combined with `--no-wait`');
+      }
+      if (!options.container && !options.pty && await tryDirectReadOnlyExec(context, runtime, parts)) return;
       const commandText = commandForExec(parts);
       const remoteDirectory = context.cwd === '/' ? '/volume' : `/volume${context.cwd}`;
       const fullCommand = `cd -- ${shellQuote(remoteDirectory)} && ${commandText}`;
@@ -1273,25 +1279,30 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
       const spinner = createSpinner(context, `Running in ${context.volume}:${context.cwd}`);
       spinner?.start();
       try {
-        // Resolve startup failures with a retry-safe no-op before submitting the
-        // user command, whose outcome can be ambiguous after a transport error.
-        await execWithRetry(context, ':', deadline, true);
         if (options.pty) {
+          await execWithRetry(context, ':', deadline, true);
           spinner?.stop();
           await runPtyExec(context, runtime, fullCommand);
           return;
         }
         if (streaming) {
-          await runStreamingExec(context, runtime, fullCommand, spinner);
+          await runStreamingExec(context, runtime, fullCommand, spinner, !options.wait, options.idempotencyKey);
           return;
         }
-        const result = await execWithRetry(context, fullCommand, deadline, false);
+        const result = options.wait
+          ? await context.client().exec(fullCommand, {
+            idempotencyKey: options.idempotencyKey,
+          })
+          : await context.client().execTransient(fullCommand);
         spinner?.stop();
         if (context.output.json) {
           context.output.value(result);
         } else {
           context.output.text(result.stdout);
           if (result.stderr) context.output.stderr.write(result.stderr);
+          if (result.outputTruncated && !context.output.quiet) {
+            context.output.stderr.write('Command output was truncated after reaching the durable log limit.\n');
+          }
         }
         runtime.exitCode = result.exitCode;
       } catch (error) {
@@ -1299,6 +1310,57 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
         throw error;
       }
     }));
+}
+
+/** Execute an exact, structured read-only argv without parsing shell text. */
+async function tryDirectReadOnlyExec(
+  context: CommandContext,
+  runtime: Runtime,
+  parts: string[],
+): Promise<boolean> {
+  const [name, ...args] = parts;
+  let stdout: Uint8Array | null = null;
+
+  if (name === 'pwd' && args.length === 0) {
+    stdout = new TextEncoder().encode(context.cwd === '/' ? '/volume\n' : `/volume${context.cwd}\n`);
+  } else if (name === 'readlink' && args.length === 1 && safeExecPath(args[0])) {
+    stdout = new TextEncoder().encode(`${await context.client().readlink(context.path(args[0]))}\n`);
+  } else if (name === 'ls' && args.length <= 1 && (args.length === 0 || safeExecPath(args[0]))) {
+    const argument = args[0] ?? '.';
+    const target = context.path(argument);
+    const stat = await context.client().lstat(target);
+    if (stat.type !== 'directory') {
+      stdout = new TextEncoder().encode(`${argument}\n`);
+    } else {
+      const entries = (await context.client().listDirectory(target))
+        .filter((entry) => !entry.name.startsWith('.'))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      stdout = new TextEncoder().encode(entries.map((entry) => entry.name).join('\n') + (entries.length ? '\n' : ''));
+    }
+  } else if (name === 'cat' && args.length > 0 && args.every(safeExecPath)) {
+    if (context.output.json) return false;
+    for (const argument of args) {
+      const response = await context.client().readFile(context.path(argument));
+      if (context.output.quiet) await response.arrayBuffer();
+      else await pipeResponse(response, context.output.stdout, false);
+    }
+    runtime.exitCode = 0;
+    return true;
+  } else {
+    return false;
+  }
+
+  if (context.output.json) {
+    context.output.value({ exitCode: 0, stdout: new TextDecoder().decode(stdout), stderr: '' });
+  } else if (!context.output.quiet) {
+    context.output.stdout.write(stdout);
+  }
+  runtime.exitCode = 0;
+  return true;
+}
+
+function safeExecPath(value: string): boolean {
+  return value !== '' && !value.startsWith('/') && !value.startsWith('-') && !value.split('/').includes('..');
 }
 
 async function runPtyExec(context: CommandContext, runtime: Runtime, fullCommand: string): Promise<void> {
@@ -1344,6 +1406,8 @@ async function runStreamingExec(
   runtime: Runtime,
   fullCommand: string,
   spinner: ReturnType<typeof ora> | null,
+  transient = false,
+  idempotencyKey?: string,
 ): Promise<void> {
   const controller = new AbortController();
   let startId: string | undefined;
@@ -1353,14 +1417,15 @@ async function runStreamingExec(
 
   const onInterrupt = (): void => {
     interrupted = true;
-    // Only an admitted command has an id to cancel; always abort the local read.
-    if (startId) void context.client().cancelExec(startId).catch(() => undefined);
+    // Aborting the durable stream cancels its admitted command in the SDK.
     controller.abort();
   };
   process.once('SIGINT', onInterrupt);
 
   try {
-    const events = await context.client().execStream(fullCommand, controller.signal);
+    const events = transient
+      ? await context.client().execStreamTransient(fullCommand, controller.signal)
+      : await context.client().execStream(fullCommand, { signal: controller.signal, idempotencyKey });
     for await (const event of events) {
       if (event.type === 'start') {
         startId = event.id;
@@ -1372,6 +1437,9 @@ async function runStreamingExec(
       } else if (event.type === 'exit') {
         exitCode = event.exitCode;
         sawExit = true;
+        if (event.outputTruncated && !context.output.quiet) {
+          context.output.stderr.write('Command output was truncated after reaching the durable log limit.\n');
+        }
       }
     }
   } catch (error) {
@@ -1386,7 +1454,7 @@ async function runStreamingExec(
   runtime.exitCode = interrupted && !sawExit ? 130 : exitCode;
 }
 
-const TERMINAL_JOB_STATUSES: readonly JobStatus[] = ['succeeded', 'failed', 'canceled'];
+const TERMINAL_JOB_STATUSES: readonly JobStatus[] = ['succeeded', 'failed', 'canceled', 'unknown'];
 
 function isTerminalJob(status: JobStatus): boolean {
   return TERMINAL_JOB_STATUSES.includes(status);
@@ -1528,7 +1596,7 @@ function registerJobCommands(program: Command, runtime: Runtime): void {
 
   job.command('list')
     .alias('ls')
-    .option('--status <status>', 'filter by queued, running, succeeded, failed, or canceled')
+    .option('--status <status>', 'filter by queued, running, succeeded, failed, canceled, or unknown')
     .description('List durable jobs')
     .action(async (options, command) => perform(runtime, command, async (context) => {
       const jobs = await context.client().listJobs(options.status as JobStatus | undefined);
@@ -2783,7 +2851,7 @@ async function execWithRetry(
       const signal = retryTransient && remaining > 0
         ? AbortSignal.timeout(Math.max(1, remaining))
         : undefined;
-      return await context.client().exec(command, signal);
+      return await context.client().execTransient(command, signal);
     } catch (error) {
       const retryable = (error instanceof AiryFSApiError && error.code === 'EXEC_BUSY')
         || (retryTransient && (error instanceof AiryFSTransportError

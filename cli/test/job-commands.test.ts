@@ -23,7 +23,7 @@ interface JobRecord {
   idempotencyKey: string;
   command: string;
   cwd: string;
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'unknown';
   execId: string | null;
   exitCode: number | null;
   error: string | null;

@@ -16,6 +16,9 @@ AiryFS keeps the Hrana wire protocol as length-prefixed JSON and hardens each in
 - Disconnecting a dispatched request rejects its HTTP waiter, then consumes and discards the eventual response without shifting later FIFO responses.
 - Running Durable Object SQLite statements cannot be preempted.
 - Active timeouts, write failures, malformed or oversized responses, and socket closure fail the connection and all admitted work because FIFO alignment can no longer be guaranteed.
+- Buffered transient exec probes a dedicated control-plane endpoint and quarantines the runtime after three consecutive failures.
+- Streaming exec requires heartbeat or output bytes at least every 15 seconds. Losing an admitted stream records the durable command as `unknown`; AiryFS never automatically replays it.
+- Runtime generations prevent stale failures from destroying a replacement Container. Three infrastructure failures inside two minutes open a 30-second circuit, followed by one half-open recovery attempt.
 
 ## Bounds
 
@@ -25,6 +28,12 @@ AiryFS keeps the Hrana wire protocol as length-prefixed JSON and hardens each in
 - Every active request has a 30-second response deadline.
 
 The 8 MiB limit accommodates a configured 1 MiB filesystem chunk after JSON and base64 expansion while bounding memory in both the Container and Worker.
+
+## Operational Diagnostics
+
+The Container health response reports whether the data bridge has a DO TCP connection, aggregate pending, queued, and admitted request counts across active and retired generations, and Node.js process memory/resource usage. A bridge connection failure with admitted work emits a structured `bridge_connection_failed` log. Worker errors at status 500 or above emit `request_failed` with the edge request ID, route, status, Hrana session, and session epoch; command bodies and SQL text are never logged.
+
+A July 2026 integration investigation reproduced intermittent buffered exec hangs under sustained filesystem activity on both `lite` and `basic` instances. Immediately before a hang, the bridge was connected with no pending, queued, or admitted work. During the hang, independent probes to the bridge and command-server ports both failed with `Error proxying request to container: The operation was aborted due to timeout`, while the Durable Object remained responsive and its Hrana counters stopped advancing with no active operation or filesystem lock holder. This localizes that failure mode to an unresponsive Container process, VM, or network proxy, below edge routing and the Durable Object SQL/Hrana server. A mounted FUSE check or Hrana socket probe before the command cannot prevent a runtime that becomes unresponsive after admission.
 
 ## Verification
 

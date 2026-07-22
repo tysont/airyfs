@@ -21,9 +21,17 @@ export interface DirectoryEntry extends FileStats {
 export interface DiskUsage { bytes: number; inodes: number }
 
 export interface ExecResult {
+  commandId?: string;
   exitCode: number;
   stdout: string;
   stderr: string;
+  outputTruncated?: boolean;
+}
+
+export interface ExecOptions {
+  signal?: AbortSignal;
+  idempotencyKey?: string;
+  pollInterval?: number;
 }
 
 /**
@@ -34,7 +42,7 @@ export type ExecEvent =
   | { type: 'start'; id: string }
   | { type: 'stdout'; id: string; data: string }
   | { type: 'stderr'; id: string; data: string }
-  | { type: 'exit'; id: string; exitCode: number; signal?: string; timedOut?: boolean };
+  | { type: 'exit'; id: string; exitCode: number; signal?: string; timedOut?: boolean; outputTruncated?: boolean };
 
 export interface VolumeInfo {
   chunkSize: number;
@@ -138,7 +146,7 @@ export interface AssetInfo {
   created: boolean;
 }
 
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'unknown';
 
 export interface Job {
   id: string;
@@ -291,15 +299,25 @@ export interface HranaCounters {
 export interface PerfInfo extends HranaCounters {
   sessionId: string | null;
   sessionEpoch: number;
+  activeOperation?: { kind: string; startedAt: number } | null;
+  locks?: { activeReaders: number; activeWriters: number; waiters: number };
+  execCircuit?: { state: 'closed' | 'open' | 'half-open'; failures: number; retryAfterMs: number };
+  runtimeGeneration?: number;
 }
 
 export interface ContainerHealth {
-  state: 'connected' | 'stopped' | 'unhealthy';
+  state: 'healthy' | 'stopped' | 'stopping' | 'stopped_with_code' | string;
   status?: string;
   bridgeStarted?: boolean;
+  bridgeConnected?: boolean;
+  bridgePending?: number;
+  bridgeQueued?: number;
+  bridgeAdmitted?: number;
   fuseMounted?: boolean;
   fuseExitCode?: number | null;
   cwd?: string;
+  processMemory?: Record<string, number>;
+  processResources?: Record<string, number>;
   error?: string;
 }
 

@@ -69,6 +69,14 @@ export class VolumeAccessCoordinator {
     return this.acquire('write', paths);
   }
 
+  status(): { activeReaders: number; activeWriters: number; waiters: number } {
+    return {
+      activeReaders: this.active.filter((entry) => entry.mode === 'read').length,
+      activeWriters: this.active.filter((entry) => entry.mode === 'write').length,
+      waiters: this.waiters.length,
+    };
+  }
+
   private acquire(mode: LockWaiter['mode'], paths: string | string[]): Promise<() => void> {
     return new Promise((resolve) => {
       const requestedPaths = Array.isArray(paths) ? paths : [paths];

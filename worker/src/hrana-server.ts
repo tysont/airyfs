@@ -818,6 +818,7 @@ export class HranaServer {
   private writeLock?: () => Promise<() => void>;
   private onWrite?: () => void | Promise<void>;
   private transactionSync?: TransactionSync;
+  activeOperation: { kind: string; startedAt: number } | null = null;
   private baton: string | null = null;
   private storedSql = new Map<number, string>();
 
@@ -895,33 +896,39 @@ export class HranaServer {
         this.statementCount++;
         {
           const statement = this.resolveStmt(req.stmt);
-          const result = await executeStmt(this.sql, statement, this.writeLock, this.transactionSync);
-          if (!isReadOnlyStatement(statement.sql ?? '')) await this.onWrite?.();
-          return { type: 'execute', result };
+          return this.trackOperation('execute', async () => {
+            const result = await executeStmt(this.sql, statement, this.writeLock, this.transactionSync);
+            if (!isReadOnlyStatement(statement.sql ?? '')) await this.onWrite?.();
+            return { type: 'execute', result };
+          });
         }
 
       case 'batch':
         {
-          const { result, wrote } = await this.executeBatch(req.batch.steps);
-          if (wrote) await this.onWrite?.();
-          return { type: 'batch', result };
+          return this.trackOperation('batch', async () => {
+            const { result, wrote } = await this.executeBatch(req.batch.steps);
+            if (wrote) await this.onWrite?.();
+            return { type: 'batch', result };
+          });
         }
 
       case 'get_autocommit':
         return { type: 'get_autocommit', is_autocommit: true };
 
       case 'sequence': {
-        const seqSql = this.resolveSql(req.sql, req.sql_id);
-        for (const part of seqSql.split(';')) {
-          const t = part.trim();
-          if (!t || isBlockedStatement(t) || isPragma(t)) continue;
-          const release = this.writeLock && !isReadOnlyStatement(t)
-            ? await this.writeLock()
-            : () => undefined;
-          try { this.sql.exec(t); } finally { release(); }
-        }
-        await this.onWrite?.();
-        return { type: 'sequence' };
+        return this.trackOperation('sequence', async () => {
+          const seqSql = this.resolveSql(req.sql, req.sql_id);
+          for (const part of seqSql.split(';')) {
+            const t = part.trim();
+            if (!t || isBlockedStatement(t) || isPragma(t)) continue;
+            const release = this.writeLock && !isReadOnlyStatement(t)
+              ? await this.writeLock()
+              : () => undefined;
+            try { this.sql.exec(t); } finally { release(); }
+          }
+          await this.onWrite?.();
+          return { type: 'sequence' };
+        });
       }
 
       case 'store_sql':
@@ -938,6 +945,19 @@ export class HranaServer {
 
       default:
         throw new Error(`Unsupported stream request: ${(req as { type: string }).type}`);
+    }
+  }
+
+  private async trackOperation<T>(kind: string, operation: () => Promise<T>): Promise<T> {
+    const active = {
+      kind,
+      startedAt: Date.now(),
+    };
+    this.activeOperation = active;
+    try {
+      return await operation();
+    } finally {
+      if (this.activeOperation === active) this.activeOperation = null;
     }
   }
 

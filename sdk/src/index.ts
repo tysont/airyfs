@@ -2,7 +2,7 @@
 // ABOUTME: Re-exports the complete client, DTOs, errors, streams, paths, and workflows.
 
 export { AiryFSClient } from './client.js';
-export { AiryFSApiError, AiryFSTransportError, responseError } from './errors.js';
+export { AiryFSApiError, AiryFSCommandOutcomeUnknownError, AiryFSTransportError, responseError } from './errors.js';
 export { NdjsonDecoder, NdjsonError, decodeNdjsonStream } from './ndjson.js';
 export { encodeRemotePath, remoteBasename, remoteDirname, resolveRemotePath } from './paths.js';
 export { openPty } from './pty.js';

@@ -153,6 +153,7 @@ npm run build
 ```typescript
 import {
   AiryFSClient,
+  AiryFSCommandOutcomeUnknownError,
   waitForJob,
   watchChanges,
 } from 'airyfs-sdk';
@@ -165,6 +166,20 @@ const client = new AiryFSClient(
 
 await client.makeDirectory('/src');
 await client.writeFile('/src/main.ts', 'console.log("hello")\n');
+
+// exec is durable by default. Reuse the key with the same command to recover
+// the existing command and replay its persisted output after a client failure.
+try {
+  const result = await client.exec('node src/main.ts', {
+    idempotencyKey: 'build-main-v1',
+  });
+  console.log(result.commandId, result.stdout);
+} catch (error) {
+  if (error instanceof AiryFSCommandOutcomeUnknownError) {
+    console.error('Inspect durable command', error.commandId);
+  }
+  throw error;
+}
 
 const submitted = await client.submitJob('node src/main.ts', '/');
 const { job } = await waitForJob(client, submitted.id, {
@@ -215,8 +230,12 @@ airy cd /src
 airy cat main.py
 
 airy warm
-airy exec python3 main.py
+airy exec --idempotency-key build-main-v1 python3 main.py
+airy exec --no-wait python3 main.py  # explicit transient, fail-fast execution
 airy job submit --wait python3 main.py
+airy job list --status unknown
+airy job status "$COMMAND_ID"
+airy job logs --follow "$COMMAND_ID"
 airy snapshot create before-refactor --note "known good"
 airy sql 'SELECT body FROM app_notes WHERE id = ?' --arg 1
 airy watch /src
@@ -226,7 +245,7 @@ airy shell
 
 A session stores an endpoint, volume, and remote working directory under `~/.airyfs`. `AIRYFS_SESSION` and `--session` let separate terminals or scripts select different sessions. A separate registry Durable Object records volume names on first use, because Durable Object namespaces cannot enumerate the names used to derive object IDs.
 
-Before each arbitrary `exec`, the CLI submits a retry-safe no-op command (the shell builtin `:`) that starts or reconnects the Container. Transient transport failures and HTTP 502, 503, and 504 responses may retry that preflight. The actual user command is submitted at most once after an ambiguous failure. It retries only on `EXEC_BUSY`, which confirms the server did not admit it. HTML gateway failures are normalized into concise CLI errors instead of printed as markup.
+CLI `exec` is durable by default. It persists one command ID before execution, retries transient submission and polling failures without changing the idempotency key, replays paginated output from durable logs, and never automatically replays an admitted command whose outcome is ambiguous. `--idempotency-key` lets a caller recover the same command explicitly; reusing a key with a different command or working directory returns `409 IDEMPOTENCY_CONFLICT`. `--no-wait` selects the lower-level transient route and fails immediately on `EXEC_BUSY`. `--container` disables direct read-only fast paths, while `--no-stream` buffers the durable result locally. `--timeout` applies only to Container startup for `--pty`; it does not cancel an admitted durable command. `SIGINT` cancels a foreground durable `exec`; interrupting `job submit --wait` only stops the local wait and leaves the submitted job running. HTML gateway failures are normalized into concise CLI errors instead of printed as markup.
 
 See [`cli/README.md`](cli/README.md) for the full CLI usage guide, including commands, sessions, shell behavior, and machine-readable output.
 
@@ -304,7 +323,7 @@ The first `exec` performs four steps.
 
 Inside the Container, AgentFS uses `libsql::Builder::new_remote("http://localhost:8080", "")`. A filesystem operation becomes a Hrana HTTP request to the bridge. The bridge forwards a framed request over TCP to the Durable Object, which executes the SQL against `ctx.storage.sql` and returns the result along the same path. The second connection carries mutation-journal polling so direct-path changes can invalidate FUSE kernel caches without competing with ordinary filesystem SQL.
 
-The bridge rejects pending requests when a connection drops and applies a response timeout. On replacement, new requests switch to the new connection generation while already-dispatched work drains on the retired socket. Startup is single-flight, bounded, and generation-safe. A failed preflight or unavailable FUSE mount recycles only the disposable Container. Durable Object SQLite remains untouched.
+The bridge rejects pending requests when a connection drops and applies a response timeout. On replacement, new requests switch to the new connection generation while already-dispatched work drains on the retired socket. Startup is single-flight, bounded, and generation-safe. Buffered execution probes a dedicated Container control endpoint; three failed probes quarantine and recycle that runtime. Streaming execution requires heartbeat or output bytes every 15 seconds. Runtime generations prevent a stale failure from destroying a replacement, and three infrastructure failures within two minutes open a 30-second circuit followed by one bounded half-open recovery attempt. Container recycling never touches Durable Object SQLite.
 
 ### Persistence And Lifecycle
 
@@ -405,7 +424,7 @@ TCP does not preserve application message boundaries. `FrameBuffer` handles part
 
 Every bridge request has a 30-second response deadline and an 8 MiB frame limit. Queued work is removed when its HTTP client disconnects. An active canceled request is drained and discarded before later responses are resolved, preserving FIFO alignment. A write failure, timeout, oversized response, socket error, socket end, or socket close invalidates that connection generation, clears buffered bytes, and rejects every pending HTTP request. When the Durable Object reconnects, the retired generation remains isolated until its admitted requests drain or time out.
 
-The bridge returns `503` with `Retry-After` when the Durable Object TCP connection is absent or admission is full. Pipeline transport failures become `502` responses to the libSQL client. A volume permits one active `exec`; overlapping commands receive `503 EXEC_BUSY` so one command cannot replace another command's TCP session.
+The bridge returns `503` with `Retry-After` when the Durable Object TCP connection is absent or admission is full. Pipeline transport failures become `502` responses to the libSQL client. A volume permits one active Container command. Durable SDK and CLI commands wait in the job queue; transient HTTP execution and CLI `--no-wait` receive `503 EXEC_BUSY` when another command already holds the slot.
 
 See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transport invariants, cancellation behavior, and bounds.
 
@@ -461,7 +480,7 @@ See [`docs/TRANSPORT_HARDENING.md`](docs/TRANSPORT_HARDENING.md) for the transpo
 | `POST` | `/v1/volumes/V/sql` | Execute one statement against user-owned `app_*` tables or indexes |
 | S3 methods | `/s3/V[/key]` | Path-style S3 bucket and object operations with SigV4 |
 | `GET` | `/v1/volumes/V/jobs?status=running` | List durable jobs, optionally by status |
-| `POST` | `/v1/volumes/V/jobs` | Submit an idempotent durable job |
+| `POST` | `/v1/volumes/V/jobs` | Submit a durable job using `Idempotency-Key`; a changed command or cwd for an existing key returns `409` |
 | `GET` | `/v1/volumes/V/jobs/ID` | Return durable job state and terminal result |
 | `GET` | `/v1/volumes/V/jobs/ID/logs?after=N` | Page persisted binary-safe stdout/stderr |
 | `POST` | `/v1/volumes/V/jobs/ID/cancel` | Cancel queued or running work |
@@ -606,19 +625,21 @@ The compatibility file endpoints use the same binary-safe streaming, range, atom
 
 ## Execution Contract
 
-`exec` validates a non-empty command, starts and mounts the Container if necessary, and sends the command to the Container command server. Commands run with:
+The SDK and CLI run `exec` as a durable command by default. They persist the command with one idempotency key before scheduling, stream or reconstruct output from durable logs, and expose the job ID as the command ID. The lower-level HTTP `/exec` route remains available for transient immediate-admission execution and powers `--no-wait`. Commands run with:
 
 - `cwd=/volume`
 - `HOME=/root`
 - A standard system `PATH`
 - A 300-second process timeout, bounded by a 310-second Worker-side Container request deadline
-- A 10 MiB output buffer
+- A 10 MiB transient buffered-exec response limit; durable execution retains up to 50 MiB in paginated logs
 
-The response contains `exitCode`, `stdout`, and `stderr`. A dead FUSE daemon produces a structured `503` instead of running the command in an unmounted directory. Startup has a separate 60-second bound. The retry-safe `:` preflight also uses that shorter bound so an abandoned warmup cannot retain the execution lock for the full command timeout.
+The SDK response contains `commandId`, `exitCode`, `stdout`, `stderr`, and `outputTruncated` when the durable 50 MiB log limit was reached. Reusing an `idempotencyKey` with the same command and working directory returns the existing command instead of executing it twice; changing either field returns `409 IDEMPOTENCY_CONFLICT`. Submission and status/log polling retry transient transport failures plus HTTP 502, 503, and 504. Polling failure does not cancel a still-running command. A dead FUSE daemon produces a structured `503` instead of running the command in an unmounted directory. Startup has a separate 60-second bound.
 
-Streaming exec emits bounded NDJSON lines with a generated execution ID, base64 stdout/stderr chunks, and one terminal exit event. Cancellation sends `SIGTERM` to the process group and escalates to `SIGKILL`; disconnecting the streaming client also terminates the admitted process. Interactive and durable commands share one execution slot.
+Streaming exec emits a durable command ID, base64 stdout/stderr chunks, and one terminal exit event. The Container emits one-second heartbeats; the Worker quarantines and recycles a runtime after 15 seconds without heartbeat or output. Cancellation sends `SIGTERM` to the process group and escalates to `SIGKILL`. Interactive and durable commands share one execution slot.
 
-Durable jobs persist before scheduling and require an `Idempotency-Key` over HTTP. The queue claims one job at a time, persists binary stdout/stderr as ordered BLOB rows, caps retained output at 50 MiB, supports queued/running cancellation, and marks orphaned running jobs failed before recycling their Container. Retrying the same idempotency key returns and reschedules the existing queued job rather than duplicating execution.
+Durable jobs persist before scheduling and require an `Idempotency-Key` over HTTP. The queue claims one job at a time, persists binary stdout/stderr as ordered BLOB rows, caps retained output at 50 MiB, and supports queued/running cancellation. Clients drain log pages incrementally and perform one final log read after observing terminal state so output committed concurrently with completion is not missed. A command whose admitted outcome cannot be proven enters the terminal `unknown` state and is never automatically replayed. Retrying the same idempotency key returns the existing command rather than duplicating execution.
+
+The CLI recognizes exact, read-only `exec` argv for `cat`, `ls`, `pwd`, and `readlink` with safe relative paths and serves them directly from the Durable Object without starting a Container. `exec --container` disables this fast path. Shell syntax, absolute/traversing paths, unrecognized options, mutations, and arbitrary programs always use Container execution.
 
 The change feed uses SQLite triggers on AgentFS inode and dentry tables, so it observes both direct API mutations and writes originating through Container/FUSE. Per-volume sequence numbers order create, modify, remove, and rename events. The latest 10,000 sequence values are retained; clients receive `gap: true` when their cursor predates that window and should resynchronize before continuing.
 
@@ -634,7 +655,7 @@ The change feed uses SQLite triggers on AgentFS inode and dentry tables, so it o
 - Container working directory
 - Hrana pipeline and SQL statement counters
 
-`GET /db-info?volume=V` returns the row count for every AiryFS and AgentFS schema table. `GET /perf?volume=V` returns the current Hrana session counters alone. The Container's internal `/health` endpoint reports `bridgeStarted`, `fuseMounted`, `fuseExitCode`, and `cwd` to the Durable Object lifecycle manager.
+`GET /db-info?volume=V` returns the row count for every AiryFS and AgentFS schema table. `GET /perf?volume=V` returns Hrana session counters, active-operation and lock state, the runtime generation, and exec-circuit state. The Container's internal `/health` endpoint also reports bridge queue state and process resource usage to the Durable Object lifecycle manager.
 
 Usage reads update at most one `fs_usage_sample` row per five-minute bucket. `GET /v1/volumes/V/usage-history` returns newest-first samples of filesystem bytes, inode count, SQLite size, and configured quotas. AiryFS retains the latest 2,016 samples, equivalent to seven days at continuous five-minute observation; sparse observations can span longer. Sampling is demand-driven: it does not create perpetual Durable Object alarms, wake idle volumes, run on filesystem mutations, or make Prometheus scrapes write state. Requests with a `before` cursor only read stored samples.
 

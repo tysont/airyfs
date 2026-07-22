@@ -30,6 +30,13 @@ let transportCommandAttempts = 0;
 const cancelRequests: string[] = [];
 let hangingResponse: ServerResponse | null = null;
 let hangingId = '';
+let nextJobId = 1;
+const jobs = new Map<string, {
+  command: string;
+  status: 'running' | 'succeeded' | 'failed' | 'canceled';
+  exitCode: number | null;
+  logs: Array<{ seq: number; stream: 'stdout' | 'stderr'; data: string; timestamp: number }>;
+}>();
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', 'http://localhost');
@@ -210,8 +217,36 @@ describe('commands', () => {
 
     expect(result.code).toBe(7);
     expect(result.stdout).toContain('remote stdout');
-    const exec = requests.slice().reverse().find((request) => request.path === '/v1/volumes/vol/exec');
+    const exec = requests.slice().reverse().find((request) => request.path === '/v1/volumes/vol/jobs');
     expect(JSON.parse(exec?.body || '{}').command).toBe('cd -- /volume/src && git status');
+  });
+
+  it('does not optimize paths whose shell meaning differs', async () => {
+    const before = requests.length;
+    const result = await invoke(['exec', 'cat', '../cat.txt']);
+
+    expect(result).toMatchObject({ code: 7, stdout: 'remote stdout\n' });
+    expect(requests.slice(before).some((request) => request.path.endsWith('/jobs'))).toBe(true);
+  });
+
+  it('routes a safe relative read-only exec command directly', async () => {
+    await invoke(['cd', '/']);
+    const before = requests.length;
+    const result = await invoke(['exec', 'cat', 'cat.txt']);
+
+    expect(result).toMatchObject({ code: 0, stdout: 'cat-body' });
+    expect(requests.slice(before).some((request) => request.path.endsWith('/jobs'))).toBe(false);
+    expect(requests.slice(before)).toContainEqual({ method: 'GET', path: '/v1/volumes/vol/files/cat.txt', body: '' });
+    await invoke(['cd', 'src']);
+  });
+
+  it('can force a recognized command through durable Container execution', async () => {
+    const before = requests.length;
+    const result = await invoke(['exec', '--container', 'cat', 'cat.txt']);
+
+    expect(result.code).toBe(7);
+    const submission = requests.slice(before).find((request) => request.path.endsWith('/jobs'));
+    expect(JSON.parse(submission?.body || '{}').command).toBe('cd -- /volume/src && cat cat.txt');
   });
 
   it('warms the Container with a no-op command', async () => {
@@ -223,7 +258,7 @@ describe('commands', () => {
     expect(JSON.parse(warm?.body || '{}').command).toBe(':');
   });
 
-  it('retries transient gateway errors during a safe preflight', async () => {
+  it('retries durable submission with one command', async () => {
     transientWarmFailures = 1;
     warmExecAttempts = 0;
     retryCommandAttempts = 0;
@@ -236,24 +271,24 @@ describe('commands', () => {
     expect(retryCommandAttempts).toBe(1);
   });
 
-  it('does not retry a user command after an ambiguous gateway error', async () => {
+  it('bounds retries when durable submission keeps returning gateway errors', async () => {
     ambiguousCommandAttempts = 0;
 
     const result = await invoke(['exec', '--timeout', '2s', 'ambiguous-command']);
 
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('Bad Gateway');
-    expect(ambiguousCommandAttempts).toBe(1);
+    expect(ambiguousCommandAttempts).toBe(3);
   });
 
-  it('does not retry a user command after an ambiguous transport failure', async () => {
+  it('bounds retries when durable submission keeps losing transport', async () => {
     transportCommandAttempts = 0;
 
     const result = await invoke(['exec', '--timeout', '2s', 'transport-command']);
 
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('Could not reach');
-    expect(transportCommandAttempts).toBe(1);
+    expect(transportCommandAttempts).toBe(3);
   });
 
   it('retries a user command only when the server reports it was not admitted', async () => {
@@ -279,7 +314,7 @@ describe('commands', () => {
   it('passes command options through exec after the first positional argument', async () => {
     await invoke(['exec', '--no-stream', 'tool', '--json', '--timeout', 'remote-value']);
 
-    const exec = requests.slice().reverse().find((request) => request.path === '/v1/volumes/vol/exec');
+    const exec = requests.slice().reverse().find((request) => request.path === '/v1/volumes/vol/jobs');
     expect(JSON.parse(exec?.body || '{}').command).toBe(
       "cd -- /volume/src && tool --json --timeout remote-value",
     );
@@ -292,7 +327,7 @@ describe('commands', () => {
     expect(result.stdout).toContain('remote stream');
     expect(result.stderr).toContain('remote warn');
     const streamRequest = requests.slice().reverse()
-      .find((request) => request.path === '/v1/volumes/vol/exec?stream=true');
+      .find((request) => request.path === '/v1/volumes/vol/jobs');
     expect(JSON.parse(streamRequest?.body || '{}').command).toBe('cd -- /volume/src && stream-cmd');
   });
 
@@ -308,10 +343,10 @@ describe('commands', () => {
     const result = await invoke(['--json', 'exec', 'git', 'status']);
 
     expect(result.code).toBe(7);
-    expect(JSON.parse(result.stdout)).toEqual({ exitCode: 7, stdout: 'remote stdout\n', stderr: '' });
+    expect(JSON.parse(result.stdout)).toMatchObject({ exitCode: 7, stdout: 'remote stdout\n', stderr: '' });
     const streamRequest = requests.slice(before)
-      .find((request) => request.path === '/v1/volumes/vol/exec?stream=true');
-    expect(streamRequest).toBeUndefined();
+      .find((request) => request.path === '/v1/volumes/vol/jobs');
+    expect(streamRequest).toBeDefined();
   });
 
   it('cancels a streaming command once on interrupt and removes the SIGINT listener', async () => {
@@ -537,6 +572,71 @@ async function route(
     response.writeHead(204).end();
     return;
   }
+  if (request.method === 'POST' && url.pathname === '/v1/volumes/vol/jobs') {
+    const command = (JSON.parse(_body) as { command: string }).command;
+    if (command.includes('ambiguous-command')) {
+      ambiguousCommandAttempts++;
+      response.writeHead(502, { 'Content-Type': 'text/html' }).end('<html><head><title>502: Bad gateway</title></head></html>');
+      return;
+    }
+    if (command.includes('transport-command')) {
+      transportCommandAttempts++;
+      response.destroy();
+      return;
+    }
+    if (command.includes('busy-command')) {
+      busyCommandAttempts++;
+      if (busyCommandAttempts === 1) return json(response, 503, { error: { code: 'EXEC_BUSY', message: 'Another command is already running' } });
+    }
+    if (command.includes('retry-command')) {
+      warmExecAttempts++;
+      if (transientWarmFailures > 0) {
+        transientWarmFailures--;
+        response.writeHead(502, { 'Content-Type': 'text/html' }).end('<html><head><title>502: Bad gateway</title></head></html>');
+        return;
+      }
+      retryCommandAttempts++;
+    }
+
+    const id = command.includes('stream-hang') ? 'hang-1' : `job-${nextJobId++}`;
+    const output = command.includes('stream-binary')
+      ? Buffer.from([0, 255, 10, 13, 42, 128])
+      : Buffer.from(command.includes('stream-cmd') ? 'remote stream\n'
+        : command.includes('retry-command') ? 'recovered\n'
+          : command.includes('busy-command') ? 'admitted\n' : 'remote stdout\n');
+    const stderr = command.includes('stream-cmd') ? Buffer.from('remote warn\n') : Buffer.alloc(0);
+    const exitCode = command.includes('stream-cmd') ? 5
+      : command.includes('stream-binary') || command.includes('retry-command') || command.includes('busy-command') ? 0 : 7;
+    const running = command.includes('stream-hang');
+    const logs = running ? [] : [
+      { seq: 0, stream: 'stdout' as const, data: output.toString('base64'), timestamp: 1 },
+      ...(stderr.length > 0 ? [{ seq: 1, stream: 'stderr' as const, data: stderr.toString('base64'), timestamp: 1 }] : []),
+    ];
+    jobs.set(id, { command, status: running ? 'running' : exitCode === 0 ? 'succeeded' : 'failed', exitCode: running ? null : exitCode, logs });
+    if (running) {
+      hangingId = id;
+      hangingResponse = response;
+    }
+    return json(response, 200, jobDto(id, jobs.get(id)!));
+  }
+  const jobMatch = /^\/v1\/volumes\/vol\/jobs\/([^/]+)(?:\/(logs|cancel))?$/.exec(url.pathname);
+  if (jobMatch) {
+    const id = decodeURIComponent(jobMatch[1]);
+    const job = jobs.get(id);
+    if (!job) return json(response, 404, { error: { code: 'JOB_NOT_FOUND', message: `No job with id ${id}` } });
+    if (jobMatch[2] === 'logs' && request.method === 'GET') {
+      const after = Number(url.searchParams.get('after') ?? -1);
+      return json(response, 200, { entries: job.logs.filter((entry) => entry.seq > after), next: null });
+    }
+    if (jobMatch[2] === 'cancel' && request.method === 'POST') {
+      cancelRequests.push(id);
+      job.status = 'canceled';
+      job.exitCode = null;
+      hangingResponse = null;
+      return json(response, 200, jobDto(id, job));
+    }
+    if (!jobMatch[2] && request.method === 'GET') return json(response, 200, jobDto(id, job));
+  }
   if (request.method === 'POST' && url.pathname === '/v1/volumes/vol/exec/cancel') {
     cancelRequests.push((JSON.parse(_body) as { id: string }).id);
     if (hangingResponse && !hangingResponse.writableEnded) {
@@ -614,6 +714,15 @@ async function route(
 
 function entry(name: string, type: 'file' | 'directory', size = 0): Record<string, unknown> {
   return { name, type, size, ino: 2, mode: type === 'directory' ? 0o40755 : 0o100644, nlink: 1, uid: 0, gid: 0, atime: 0, mtime: 0, ctime: 0 };
+}
+
+function jobDto(id: string, job: { command: string; status: string; exitCode: number | null; logs: unknown[] }): Record<string, unknown> {
+  return {
+    id, idempotencyKey: `key-${id}`, command: job.command, cwd: '/', status: job.status,
+    execId: id, exitCode: job.exitCode, error: null, cancelRequested: job.status === 'canceled',
+    outputBytes: 0, outputTruncated: false, createdAt: 1, updatedAt: 2, startedAt: 1,
+    finishedAt: job.status === 'running' ? null : 2,
+  };
 }
 
 function json(response: ServerResponse, status: number, value: unknown): void {

@@ -319,7 +319,7 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   assert(!start.done && start.value.type === 'start', 'streaming exec start event');
   let busy = false;
   try {
-    await client.exec('printf overlap');
+    await client.execTransient('printf overlap');
   } catch (error) {
     busy = error instanceof AiryFSApiError && error.code === 'EXEC_BUSY';
   }

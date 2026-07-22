@@ -11,6 +11,18 @@ describe('AiryFSClient', () => {
       const url = input.toString();
       const method = init?.method ?? 'GET';
       requests.push({ url, method, headers: new Headers(init?.headers), body: init?.body });
+      if (url.includes('/jobs/command-id/logs')) return Response.json({ entries: [], next: null });
+      if (url.includes('/jobs/command-id')) return Response.json({
+        id: 'command-id', idempotencyKey: 'key', command: 'true', cwd: '/', status: 'succeeded',
+        execId: 'run', exitCode: 0, error: null, cancelRequested: false, outputBytes: 0,
+        outputTruncated: false, createdAt: 1, updatedAt: 2, startedAt: 1, finishedAt: 2,
+      });
+      if (url.endsWith('/jobs') && method === 'POST') return Response.json({
+        id: 'command-id', idempotencyKey: new Headers(init?.headers).get('Idempotency-Key') ?? 'key',
+        command: 'true', cwd: '/', status: 'succeeded', execId: 'run', exitCode: 0, error: null,
+        cancelRequested: false, outputBytes: 0, outputTruncated: false,
+        createdAt: 1, updatedAt: 2, startedAt: 1, finishedAt: 2,
+      });
       if (url.includes('/exec?stream=true')) {
         return new Response([
           '{"type":"start","id":"run"}',
@@ -157,5 +169,39 @@ describe('AiryFSClient', () => {
     await expect(offline.getVolume()).rejects.toMatchObject({
       name: 'AiryFSTransportError', origin: 'https://example.com',
     });
+  });
+
+  it('drains durable log pages, retries transient polling, and reports truncation', async () => {
+    let jobReads = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = input.toString();
+      if (url.endsWith('/jobs') && init?.method === 'POST') return Response.json({
+        id: 'command-id', idempotencyKey: 'key', command: 'true', cwd: '/', status: 'running',
+        execId: 'run', exitCode: null, error: null, cancelRequested: false, outputBytes: 0,
+        outputTruncated: false, createdAt: 1, updatedAt: 1, startedAt: 1, finishedAt: null,
+      });
+      if (url.endsWith('/logs')) return Response.json({
+        entries: [{ seq: 0, stream: 'stdout', data: 'YQ==', timestamp: 1 }], next: 0,
+      });
+      if (url.endsWith('/logs?after=0')) return Response.json({
+        entries: [{ seq: 1, stream: 'stderr', data: 'Yg==', timestamp: 2 }], next: null,
+      });
+      if (url.endsWith('/logs?after=1')) return Response.json({ entries: [], next: null });
+      if (url.endsWith('/jobs/command-id') && ++jobReads === 1) {
+        return Response.json({ error: { code: 'UNAVAILABLE', message: 'retry' } }, { status: 503 });
+      }
+      return Response.json({
+        id: 'command-id', idempotencyKey: 'key', command: 'true', cwd: '/', status: 'succeeded',
+        execId: 'run', exitCode: 0, error: null, cancelRequested: false, outputBytes: 2,
+        outputTruncated: true, createdAt: 1, updatedAt: 2, startedAt: 1, finishedAt: 2,
+      });
+    });
+    const client = new AiryFSClient('https://example.com', 'v', { fetch: fetchMock });
+
+    const result = await client.exec('true');
+
+    expect(result).toEqual({ commandId: 'command-id', exitCode: 0, stdout: 'a', stderr: 'b', outputTruncated: true });
+    expect(jobReads).toBe(2);
+    expect(fetchMock.mock.calls.some(([input]) => input.toString().includes('/cancel'))).toBe(false);
   });
 });

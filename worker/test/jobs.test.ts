@@ -125,13 +125,22 @@ describe('submitJob idempotency', () => {
     expect(first.job.command).toBe('echo a');
     expect(first.job.cwd).toBe('/');
 
-    const repeat = submit('echo different', '/other', 'key-1');
+    const repeat = submit('echo a', '/', 'key-1');
     expect(repeat.created).toBe(false);
     expect(repeat.job.id).toBe(first.job.id);
-    // The original command/cwd are preserved; the duplicate submission is ignored.
     expect(repeat.job.command).toBe('echo a');
 
     expect(listJobs(sql())).toHaveLength(1);
+  });
+
+  it('rejects reuse of an idempotency key for a different payload', () => {
+    submit('echo a', '/', 'key-1');
+    expect(() => submit('echo different', '/', 'key-1')).toThrowError(
+      expect.objectContaining({ status: 409, code: 'IDEMPOTENCY_CONFLICT' }),
+    );
+    expect(() => submit('echo a', '/other', 'key-1')).toThrowError(
+      expect.objectContaining({ status: 409, code: 'IDEMPOTENCY_CONFLICT' }),
+    );
   });
 
   it('creates distinct jobs for distinct keys', () => {
@@ -175,13 +184,13 @@ describe('claim ordering', () => {
 });
 
 describe('orphan recovery', () => {
-  it('marks running rows failed/interrupted without retrying', () => {
+  it('marks running rows unknown/interrupted without retrying', () => {
     const job = submit('long', '/', 'k1');
     claimNextJob(sql(), tx, now);
     const recovered = recoverOrphans(sql(), now);
     expect(recovered).toBe(1);
     const after = getJob(sql(), job.job.id);
-    expect(after.status).toBe('failed');
+    expect(after.status).toBe('unknown');
     expect(after.error).toBe('interrupted');
     // No new queued job is created — the command is never auto-retried.
     expect(listJobs(sql(), 'queued')).toHaveLength(0);
@@ -385,6 +394,19 @@ describe('runJob', () => {
     expect(after.status).toBe('failed');
     expect(after.exitCode).toBeNull();
     expect(after.error).toContain('CONTAINER_UNAVAILABLE');
+  });
+
+  it('preserves an explicitly ambiguous Container outcome', async () => {
+    const job = submit('boom', '/', 'k1');
+    claimNextJob(sql(), tx, now);
+    await runJob({
+      sql: sql(),
+      execStream: async () => { throw new HttpError(503, 'COMMAND_OUTCOME_UNKNOWN', 'outcome is unknown'); },
+      now,
+    }, job.job.id);
+    const after = getJob(sql(), job.job.id);
+    expect(after.status).toBe('unknown');
+    expect(after.error).toContain('outcome is unknown');
   });
 
   it('caps persisted output and flags truncation while draining', async () => {

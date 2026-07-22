@@ -16,7 +16,7 @@ import type {
   UploadCompleteResult,
 } from './types.js';
 
-const TERMINAL = new Set(['succeeded', 'failed', 'canceled']);
+const TERMINAL = new Set(['succeeded', 'failed', 'canceled', 'unknown']);
 export const RESUMABLE_CHUNK_BYTES = 1024 * 1024;
 
 /** Tail a volume's ordered change feed until the supplied signal aborts. */

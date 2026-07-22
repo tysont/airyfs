@@ -13,11 +13,11 @@ import type { SqlExec, TransactionSync } from './schema';
 export const JOB_TABLES = ['fs_job', 'fs_job_log'] as const;
 
 /** Terminal and non-terminal job states. */
-export const JOB_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'canceled'] as const;
+export const JOB_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'canceled', 'unknown'] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
 /** States from which no further transition happens. */
-export const TERMINAL_STATUSES: readonly JobStatus[] = ['succeeded', 'failed', 'canceled'];
+export const TERMINAL_STATUSES: readonly JobStatus[] = ['succeeded', 'failed', 'canceled', 'unknown'];
 
 export type JobStream = 'stdout' | 'stderr';
 
@@ -263,7 +263,12 @@ export function submitJob(
 
   return transaction(() => {
     const existing = selectByKey(sql, idempotencyKey);
-    if (existing) return { job: toJobDto(existing), created: false };
+    if (existing) {
+      if (existing.command !== command || existing.cwd !== cwd) {
+        throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'Idempotency-Key is already associated with a different command');
+      }
+      return { job: toJobDto(existing), created: false };
+    }
 
     const id = idFactory();
     const timestamp = now();
@@ -352,7 +357,7 @@ export function recoverOrphans(sql: SqlExec, now: () => number = defaultNow): nu
   for (const row of running) {
     sql.exec(
       `UPDATE fs_job
-         SET status = 'failed', error = 'interrupted', finished_at = ?, updated_at = ?
+       SET status = 'unknown', error = 'interrupted', finished_at = ?, updated_at = ?
        WHERE id = ? AND status = 'running'`,
       timestamp, timestamp, String(row.id),
     );
@@ -406,7 +411,7 @@ export function appendJobLog(
 }
 
 export interface FinalizeInput {
-  status: Extract<JobStatus, 'succeeded' | 'failed' | 'canceled'>;
+  status: Extract<JobStatus, 'succeeded' | 'failed' | 'canceled' | 'unknown'>;
   exitCode: number | null;
   error: string | null;
   outputBytes: number;
@@ -590,6 +595,11 @@ function conciseError(error: unknown): string {
   return message.length > 500 ? `${message.slice(0, 497)}...` : message;
 }
 
+function isUnknownOutcome(error: unknown): boolean {
+  return error instanceof HttpError && error.code === 'COMMAND_OUTCOME_UNKNOWN'
+    || conciseError(error).toLowerCase().includes('outcome is unknown');
+}
+
 /**
  * Drive a claimed (`running`) job to a terminal state through execStream.
  *
@@ -612,7 +622,7 @@ export async function runJob(deps: JobRunnerDeps, jobId: string): Promise<void> 
     stream = await deps.execStream(composeJobCommand(job.command, job.cwd));
   } catch (error) {
     finalizeJob(sql, jobId, {
-      status: 'failed',
+      status: isUnknownOutcome(error) ? 'unknown' : 'failed',
       exitCode: null,
       error: conciseError(error),
       outputBytes: 0,
@@ -663,7 +673,7 @@ export async function runJob(deps: JobRunnerDeps, jobId: string): Promise<void> 
     for (const event of decoder.flush()) await handle(event);
   } catch (error) {
     finalizeJob(sql, jobId, {
-      status: 'failed',
+      status: isUnknownOutcome(error) ? 'unknown' : 'failed',
       exitCode,
       error: conciseError(error),
       outputBytes,
@@ -694,9 +704,9 @@ export async function runJob(deps: JobRunnerDeps, jobId: string): Promise<void> 
     }, now);
   } else {
     finalizeJob(sql, jobId, {
-      status: 'failed',
+      status: exitCode === null ? 'unknown' : 'failed',
       exitCode,
-      error: exitCode === null ? 'Command stream ended without an exit event' : null,
+      error: exitCode === null ? 'Command outcome is unknown because the stream ended without an exit event' : null,
       outputBytes,
       outputTruncated: truncated,
     }, now);

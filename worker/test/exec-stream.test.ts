@@ -3,7 +3,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { HttpError, parseV1Route } from '../src/files-api';
-import { holdStreamUntilDone } from '../src/exec-stream';
+import { enforceStreamHeartbeat, holdStreamUntilDone } from '../src/exec-stream';
 
 describe('parseV1Route exec routes', () => {
   it('parses the exec resource without a suffix', () => {
@@ -83,5 +83,42 @@ describe('holdStreamUntilDone', () => {
 
     await expect(drain(held)).rejects.toThrow('boom');
     expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('enforceStreamHeartbeat', () => {
+  it('fails and invokes recovery when a stream stalls', async () => {
+    vi.useFakeTimers();
+    const recover = vi.fn(async () => undefined);
+    const source = new ReadableStream<Uint8Array>({ pull() { return new Promise(() => undefined); } });
+    const monitored = enforceStreamHeartbeat(source, { timeoutMs: 1_000, onFailure: recover });
+    const draining = drain(monitored);
+    const rejected = expect(draining).rejects.toThrow('heartbeats stopped');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejected;
+    expect(recover).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('resets its deadline for heartbeat bytes', async () => {
+    vi.useFakeTimers();
+    const recover = vi.fn(async () => undefined);
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const source = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+    const monitored = enforceStreamHeartbeat(source, { timeoutMs: 1_000, onFailure: recover });
+    const reader = monitored.getReader();
+
+    controller.enqueue(Uint8Array.of(10));
+    await expect(reader.read()).resolves.toMatchObject({ done: false });
+    await vi.advanceTimersByTimeAsync(900);
+    controller.enqueue(Uint8Array.of(10));
+    await expect(reader.read()).resolves.toMatchObject({ done: false });
+    await vi.advanceTimersByTimeAsync(900);
+    controller.close();
+    await expect(reader.read()).resolves.toMatchObject({ done: true });
+    expect(recover).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 });
