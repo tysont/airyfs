@@ -1953,6 +1953,24 @@ function registerVolumeCommands(program: Command, runtime: Runtime): void {
       context.output.value(await context.client().getVolume());
     }));
 
+  volume.command('delete')
+    .option('-f, --force', 'skip confirmation')
+    .description('Permanently delete the selected volume and all of its data')
+    .action(async (options, command) => perform(runtime, command, async (context) => {
+      if (context.shellMode && !options.force) {
+        throw new ConfigError('Interactive confirmation is unavailable inside `airyfs shell`; use `volume delete --force`');
+      }
+      if (!options.force && !await confirmAction(
+        context,
+        `Permanently delete volume ${context.volume} and ALL of its data? This cannot be undone.`,
+      )) {
+        context.output.value('Cancelled');
+        return;
+      }
+      await context.client().deleteVolume();
+      context.output.success(`Deleted volume ${context.volume} and all of its data`, { volume: context.volume, deleted: true });
+    }));
+
   volume.command('fork')
     .argument('<target-volume>')
     .description('Create an independent point-in-time copy in an empty target volume')

@@ -1314,6 +1314,32 @@ export class AiryFS extends Container<Env> {
     }
   }
 
+  /**
+   * Permanently delete this volume. Destroys the Container, removes the registry
+   * entry, and wipes all Durable Object storage (SQL and key-value). Idempotent:
+   * deleting an empty or already-deleted volume succeeds and leaves a fresh,
+   * create-on-first-use volume behind. This is the trusted RPC surface; HTTP
+   * routing enforces that only root or auth-disabled callers may invoke it.
+   */
+  async deleteVolume(volume: string): Promise<{ deleted: true }> {
+    await this.destroyContainer();
+    await this.env.VolumeRegistry.getByName('global').unregister(volume);
+    await this.ctx.blockConcurrencyWhile(async () => {
+      await this.ctx.storage.deleteAll();
+      // The deployment's compatibility date predates delete_all_deletes_alarm, so
+      // clear the alarm explicitly to stop webhook, cron, and job wakeups.
+      await this.ctx.storage.deleteAlarm();
+      // Recreate the empty schema so this in-memory instance stays consistent and
+      // the name behaves like an unused volume on the next request.
+      initSchema(this.ctx.storage.sql, (callback) => this.ctx.storage.transactionSync(callback));
+    });
+    this.fs = null;
+    this.registeredVolume = null;
+    this.metricsCache = null;
+    this.metricsPromise = null;
+    return { deleted: true };
+  }
+
   /** Destroy the Container. Volume data persists in DO SQLite. */
   async destroyContainer(): Promise<void> {
     if (this.destroyPromise) return this.destroyPromise;
@@ -2326,7 +2352,7 @@ export class AiryFS extends Container<Env> {
         ? { kind: 'disabled' } as Identity
         : await this.authorize(request, url, v1Route, routeVolume);
 
-      if (v1Route && !(v1Route.resource === 'volume' && request.method === 'PUT')) {
+      if (v1Route && !(v1Route.resource === 'volume' && (request.method === 'PUT' || request.method === 'DELETE'))) {
         await this.ensureVolumeRegistered(v1Route.volume);
       } else if (!v1Route && routeVolume && LEGACY_VOLUME_PATHS.has(url.pathname)) {
         await this.ensureVolumeRegistered(routeVolume);
@@ -2346,7 +2372,13 @@ export class AiryFS extends Container<Env> {
             await this.ensureVolumeRegistered(v1Route.volume, true);
             return Response.json(info, { status: 201 });
           }
-          throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, PUT' });
+          if (request.method === 'DELETE') {
+            if (identity.kind === 'capability') {
+              throw new HttpError(403, 'FORBIDDEN', 'Only root or auth-disabled callers may delete a volume');
+            }
+            return Response.json(await this.deleteVolume(v1Route.volume));
+          }
+          throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, PUT, DELETE' });
         }
 
         if (v1Route.resource === 'changes') {

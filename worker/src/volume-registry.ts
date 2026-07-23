@@ -6,6 +6,7 @@ import {
   initVolumeRegistry,
   listVolumes,
   registerVolume,
+  unregisterVolume,
   type VolumePage,
   type VolumeRecord,
 } from './volume-registry-storage';
@@ -18,6 +19,10 @@ export class VolumeRegistry extends DurableObject<Record<string, never>> {
 
   register(name: string, chunkSize: number): VolumeRecord {
     return registerVolume(this.ctx.storage.sql, name, chunkSize);
+  }
+
+  unregister(name: string): void {
+    unregisterVolume(this.ctx.storage.sql, name);
   }
 
   list(after: string, limit: number): VolumePage {

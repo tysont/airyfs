@@ -164,7 +164,7 @@ curl "$BASE/v1/volumes/$VOLUME/usage"
 
 File writes do not create missing parent directories — create the directory first or the write returns `ENOENT`. File responses carry `Content-Length`, `Accept-Ranges`, `ETag`, `Last-Modified`, and `X-AiryFS-Inode`; reads honor `If-None-Match`, `If-Modified-Since`, single byte `Range`, and `If-Range` with correct 304/206/200 semantics. Errors are structured JSON with stable POSIX-style codes mapped to HTTP statuses (`ENOENT` → 404, `EEXIST`/`ENOTEMPTY` → 409, `EINVAL` → 400, `EPERM` → 403, `ENOSPC` → 507).
 
-The full v1 surface covers files, directories, path operations (rename, copy, symlink, hard link, truncate, touch, chmod, append, checksum, du), tree archives, exec (buffered and streaming NDJSON), resumable checksummed uploads, browser uploads, content-addressed assets, snapshots and forks, scoped application SQL, durable jobs and logs, schedules, change feeds, webhooks, search, quotas, auth and capabilities, sites and shares, usage, usage history, and Prometheus metrics.
+The full v1 surface covers volume lifecycle (`PUT` to create, `DELETE` to permanently delete), files, directories, path operations (rename, copy, symlink, hard link, truncate, touch, chmod, append, checksum, du), tree archives, exec (buffered and streaming NDJSON), resumable checksummed uploads, browser uploads, content-addressed assets, snapshots and forks, scoped application SQL, durable jobs and logs, schedules, change feeds, webhooks, search, quotas, auth and capabilities, sites and shares, usage, usage history, and Prometheus metrics.
 
 ### Workers RPC
 
@@ -273,7 +273,7 @@ airy shell
 
 A session stores an endpoint, volume, bearer token, and remote working directory under `~/.airyfs`; `--session` and `AIRYFS_SESSION` let separate terminals or scripts pin different sessions. Portable session exports include the bearer token — treat them as credentials.
 
-The command surface spans navigation, inspection, mutation, resumable and transactional transfers, trash/undo/snapshot recovery, durable and interactive (`--pty`) execution, jobs, schedules, watches, webhooks, preview services, find/glob/grep/sql/kv, publishing (`site`, `share`, `asset`, `browser-upload`), volume operations, and auth. Global options: `--session`, `--json`, `--no-color`, `--quiet`.
+The command surface spans navigation, inspection, mutation, resumable and transactional transfers, trash/undo/snapshot recovery, durable and interactive (`--pty`) execution, jobs, schedules, watches, webhooks, preview services, find/glob/grep/sql/kv, publishing (`site`, `share`, `asset`, `browser-upload`), volume operations (`volume create`/`info`/`list`/`fork`/`quota`, and `volume delete` to permanently remove a volume), and auth. Global options: `--session`, `--json`, `--no-color`, `--quiet`.
 
 **Durable exec by default.** CLI `exec` persists one command ID before execution, retries transient submission and polling failures without changing the idempotency key, replays paginated output from durable logs, and never automatically replays an admitted command whose outcome is ambiguous. Reusing an idempotency key with a different command or working directory returns `409 IDEMPOTENCY_CONFLICT`. `--no-wait` selects the lower-level transient route and fails fast with `EXEC_BUSY` when the single execution slot is held. The CLI also recognizes exact read-only argv (`cat`, `ls`, `pwd`, `readlink` with safe relative paths) and serves them straight from the Durable Object without a Container; `--container` disables that fast path.
 
@@ -519,7 +519,7 @@ aws --endpoint-url https://airyfs.example.workers.dev/s3 --region auto s3 ls s3:
 - **Container minimum `standard-1`.** The checked-in `wrangler.jsonc` sets it on every environment; the smaller `lite` and `basic` tiers starve the shared runtime and surface commands as `unknown` (see [Bridge reliability](#bridge-reliability)). Raise the instance type through `standard-4` for heavier native workloads. The example config caps concurrent attached Containers at `max_instances: 50`; all volumes remain directly addressable regardless.
 - **One execution slot per volume.** Buffered, streaming, durable, and PTY commands share it; durable submissions queue, transient execution fails fast with `EXEC_BUSY`.
 - **Exec bounds.** Commands run with `cwd=/volume`, a 300-second process timeout inside a 310-second Worker-side deadline, a 10 MiB transient buffered response limit, and up to 50 MiB of paginated durable logs.
-- **No volume deletion API yet.** `destroy` removes only the disposable Container; retained volume storage remains billable until a full deletion mechanism is added.
+- **Deletion is permanent and irreversible.** `DELETE /v1/volumes/V` (SDK `deleteVolume`, CLI `volume delete`) destroys the Container and wipes all Durable Object storage; it requires root or an auth-disabled deployment and cannot be undone by trash or snapshots. `destroy` is different — it removes only the disposable Container and preserves volume data.
 - **Not for metadata-storm workloads over FUSE.** Every syscall crosses the Container-to-DO boundary — use the direct API for bulk creation and transfer, then `exec` for the computation.
 
 ## Development

@@ -4,7 +4,7 @@
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { createTestStorage } from './support/storage';
-import { initVolumeRegistry, listVolumes, registerVolume } from '../src/volume-registry-storage';
+import { initVolumeRegistry, listVolumes, registerVolume, unregisterVolume } from '../src/volume-registry-storage';
 
 describe('volume registry', () => {
   it('registers volumes idempotently and lists them by name', () => {
@@ -33,6 +33,21 @@ describe('volume registry', () => {
     expect(first.volumes.map((volume) => volume.name)).toEqual(['alpha', 'beta']);
     expect(first.nextCursor).toBe('beta');
     expect(listVolumes(sql, first.nextCursor!, 2).volumes.map((volume) => volume.name)).toEqual(['gamma']);
+  });
+
+  it('unregisters a volume and is idempotent for a missing name', () => {
+    const db = new Database(':memory:');
+    const sql = createTestStorage(db).sql;
+    initVolumeRegistry(sql);
+    registerVolume(sql, 'alpha', 262144);
+    registerVolume(sql, 'beta', 262144);
+
+    unregisterVolume(sql, 'alpha');
+    expect(listVolumes(sql, '', 10).volumes.map((volume) => volume.name)).toEqual(['beta']);
+
+    // Removing a name that is already gone is a safe no-op.
+    expect(() => unregisterVolume(sql, 'alpha')).not.toThrow();
+    expect(listVolumes(sql, '', 10).volumes.map((volume) => volume.name)).toEqual(['beta']);
   });
 
   it('rejects invalid registrations', () => {

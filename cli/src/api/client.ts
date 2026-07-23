@@ -107,6 +107,11 @@ export class AiryFSClient {
     });
   }
 
+  /** Permanently delete the volume and all of its data; requires root access. */
+  async deleteVolume(): Promise<{ deleted: boolean }> {
+    return this.json<{ deleted: boolean }>(this.volumeBase, { method: 'DELETE' });
+  }
+
   async listDirectory(path: string): Promise<DirectoryEntry[]> {
     return this.json<DirectoryEntry[]>(this.resourcePath('directories', path));
   }

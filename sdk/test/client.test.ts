@@ -155,6 +155,19 @@ describe('AiryFSClient', () => {
       && request.body === JSON.stringify({ path: '/file', data: 'AP8=' }))).toBe(true);
   });
 
+  it('issues a DELETE to permanently remove a volume', async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    const client = new AiryFSClient('https://example.com', 'my volume', {
+      fetch: async (input, init) => {
+        requests.push({ url: input.toString(), method: init?.method ?? 'GET' });
+        return Response.json({ deleted: true });
+      },
+    });
+
+    expect(await client.deleteVolume()).toEqual({ deleted: true });
+    expect(requests).toEqual([{ url: 'https://example.com/v1/volumes/my%20volume', method: 'DELETE' }]);
+  });
+
   it('normalizes structured API errors and transport failures', async () => {
     const rejected = new AiryFSClient('https://example.com', 'v', {
       fetch: async () => Response.json({ error: { code: 'ENOENT', message: 'missing', path: '/x' } }, { status: 404 }),

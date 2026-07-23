@@ -91,6 +91,15 @@ describe('AiryFSClient', () => {
     );
   });
 
+  it('deletes a volume with a DELETE to the volume base', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ deleted: true }));
+    const client = new AiryFSClient('https://example.com', 'my volume', fetchMock);
+
+    expect(await client.deleteVolume()).toEqual({ deleted: true });
+    expect(fetchMock.mock.calls[0][0].toString()).toBe('https://example.com/v1/volumes/my%20volume');
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'DELETE' });
+  });
+
   it('sends operation bodies as JSON', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
     const client = new AiryFSClient('https://example.com', 'vol', fetchMock);

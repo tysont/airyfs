@@ -340,6 +340,25 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   equal(completed.job.status, 'succeeded', 'durable job completion');
   equal(output.join(''), 'job-output', 'durable job persisted output');
 
+  // Volume deletion wipes all storage and deregisters the name.
+  const deletionVolume = `${volume}-delete`;
+  const deletion = new AiryFSClient(endpoint, deletionVolume, clientOptions);
+  await deletion.createVolume(256 * 1024);
+  await deletion.writeFile('/keep.txt', 'temporary');
+  equal(await deletion.readFileText('/keep.txt'), 'temporary', 'deletion volume seeded');
+  assert((await client.listVolumes()).some((entry) => entry.name === deletionVolume), 'deletion volume is registered');
+  const deletionResult = await deletion.deleteVolume();
+  assert(deletionResult.deleted === true, 'volume deletion reports success');
+  // Check the registry before reading a file, because a read re-registers the name.
+  assert(!(await client.listVolumes()).some((entry) => entry.name === deletionVolume), 'deleted volume leaves the registry');
+  let deletedFileGone = false;
+  try {
+    await deletion.readFileText('/keep.txt');
+  } catch (error) {
+    deletedFileGone = error instanceof AiryFSApiError && error.status === 404;
+  }
+  assert(deletedFileGone, 'deleted volume no longer serves its files');
+
   const beforeFuse = await client.getChanges();
   const fuseWrite = await exec('printf from-fuse > /volume/from-fuse.txt');
   equal(fuseWrite.exitCode, 0, 'FUSE write command');

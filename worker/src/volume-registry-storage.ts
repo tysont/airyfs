@@ -38,6 +38,11 @@ export function registerVolume(sql: SqlExec, name: string, chunkSize: number): V
   return toVolumeRecord(row);
 }
 
+/** Remove a volume from the catalog. Idempotent: a missing name is a no-op. */
+export function unregisterVolume(sql: SqlExec, name: string): void {
+  sql.exec('DELETE FROM volumes WHERE name = ?', name);
+}
+
 export function listVolumes(sql: SqlExec, after: string, limit: number): VolumePage {
   const rows = sql.exec(
     'SELECT name, chunk_size, created_at FROM volumes WHERE name > ? ORDER BY name LIMIT ?',

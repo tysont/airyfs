@@ -64,6 +64,14 @@ export class AiryFSClient {
     return this.json<VolumeInfo>(this.volumeBase);
   }
 
+  /**
+   * Permanently delete the volume and all of its data. Requires root (or an
+   * auth-disabled deployment). Idempotent: deleting a missing volume succeeds.
+   */
+  deleteVolume(): Promise<{ deleted: boolean }> {
+    return this.json<{ deleted: boolean }>(this.volumeBase, { method: 'DELETE' });
+  }
+
   async listVolumes(): Promise<VolumeRecord[]> {
     const volumes: VolumeRecord[] = [];
     let cursor: string | null = null;

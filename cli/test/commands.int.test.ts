@@ -249,6 +249,15 @@ describe('commands', () => {
     expect(JSON.parse(submission?.body || '{}').command).toBe('cd -- /volume/src && cat cat.txt');
   });
 
+  it('permanently deletes the volume with --force', async () => {
+    const before = requests.length;
+    const result = await invoke(['volume', 'delete', '--force']);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('Deleted volume vol');
+    expect(requests.slice(before)).toContainEqual({ method: 'DELETE', path: '/v1/volumes/vol', body: '' });
+  });
+
   it('warms the Container with a no-op command', async () => {
     const result = await invoke(['warm', '--timeout', '1s']);
 
@@ -571,6 +580,9 @@ async function route(
   if (request.method === 'DELETE' && url.pathname.startsWith('/v1/volumes/vol/directories/')) {
     response.writeHead(204).end();
     return;
+  }
+  if (request.method === 'DELETE' && url.pathname === '/v1/volumes/vol') {
+    return json(response, 200, { deleted: true });
   }
   if (request.method === 'POST' && url.pathname === '/v1/volumes/vol/jobs') {
     const command = (JSON.parse(_body) as { command: string }).command;
