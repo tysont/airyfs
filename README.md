@@ -864,6 +864,7 @@ Publishing exposes the selected subtree to anyone with the URL. Do not publish a
 - Node.js 22 or newer for the Worker, Container TypeScript build, and CLI
 - Docker for the Container image and AgentFS cross-compilation
 - A Cloudflare account with Containers enabled
+- A container `instance_type` of at least `standard-1` (1/2 vCPU, 4 GiB). This is the minimum AiryFS supports; the smaller `lite` and `basic` tiers are not sufficient (see [Container Sizing](#container-sizing)).
 
 ### Build AgentFS
 
@@ -921,9 +922,11 @@ Use the package scripts for cloud deployments. Invoking Wrangler directly bypass
 
 Wrangler builds and publishes the environment-specific Container image, then deploys the Worker and SQLite-backed Durable Object class. Integration and production can coexist in one account without sharing Worker, Durable Object, or Container identities.
 
-The example `wrangler.jsonc` sets `max_instances` to 50. All named volumes remain directly addressable through their Durable Objects, but no more than 50 attached Container instances can run concurrently unless this deployment limit is changed.
+#### Container Sizing
 
-Each container runs on the `standard-1` instance type (1/2 vCPU, 4 GiB, 8 GB disk). The default `lite` tier (1/16 vCPU, 256 MiB) cannot keep the multi-process container (command-server, bridge, FUSE daemon, and user process) responsive under sustained FUSE and exec load, so it intermittently trips the runtime watchdog. Raise `instance_type` further for heavier native workloads; the [instance types](https://developers.cloudflare.com/containers/platform-details/limits/) run through `standard-4` (4 vCPU, 12 GiB).
+`standard-1` (1/2 vCPU, 4 GiB, 8 GB disk) is the minimum supported container size, and the checked-in `wrangler.jsonc` sets it on every environment. Do not drop below it. Each container VM runs the Node command-server, the in-process bridge, the `agentfs` FUSE daemon, and the user process at once. On the smaller `lite` (1/16 vCPU, 256 MiB) and `basic` (1/4 vCPU, 1 GiB) tiers that shared CPU is starved under sustained FUSE and exec load, so the runtime intermittently misses the watchdog and container-proxy deadlines and commands surface as `unknown`. Raise `instance_type` above `standard-1` for heavier native workloads; the [instance types](https://developers.cloudflare.com/containers/platform-details/limits/) run through `standard-4` (4 vCPU, 12 GiB).
+
+The example `wrangler.jsonc` also sets `max_instances` to 50. All named volumes remain directly addressable through their Durable Objects, but no more than 50 attached Container instances can run concurrently unless this deployment limit is changed.
 
 ### Verify
 
