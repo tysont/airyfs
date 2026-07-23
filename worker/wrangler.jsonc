@@ -9,6 +9,7 @@
     {
       "class_name": "AiryFS",
       "image": "../container/Dockerfile",
+      "instance_type": "standard-1",
       "max_instances": 50
     }
   ],
@@ -43,6 +44,7 @@
           "name": "airyfs-int-airyfs",
           "class_name": "AiryFS",
           "image": "../container/Dockerfile",
+          "instance_type": "standard-1",
           "max_instances": 50
         }
       ],
@@ -67,6 +69,7 @@
           "name": "airyfs-prod-airyfs",
           "class_name": "AiryFS",
           "image": "../container/Dockerfile",
+          "instance_type": "standard-1",
           "max_instances": 50
         }
       ],

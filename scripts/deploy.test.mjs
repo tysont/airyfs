@@ -55,10 +55,15 @@ test('pins Worker, Container, binding, and migration identities', () => {
     { tag: 'v1', new_sqlite_classes: ['AiryFS'] },
     { tag: 'v2', new_sqlite_classes: ['VolumeRegistry'] },
   ]);
+  assert.equal(wrangler.containers[0].instance_type, 'standard-1');
   for (const env of ['int', 'prod']) {
     const config = wrangler.env[env];
     assert.equal(config.containers[0].name, `airyfs-${env}-airyfs`);
     assert.equal(config.containers[0].class_name, 'AiryFS');
+    // Pin the provisioned instance type: the default "lite" tier (1/16 vCPU,
+    // 256 MiB) starves the multi-process container and intermittently trips the
+    // runtime watchdog under sustained FUSE/exec load.
+    assert.equal(config.containers[0].instance_type, 'standard-1');
     assert.deepEqual(config.durable_objects.bindings, [
       { name: 'AiryFS', class_name: 'AiryFS' },
       { name: 'VolumeRegistry', class_name: 'VolumeRegistry' },
