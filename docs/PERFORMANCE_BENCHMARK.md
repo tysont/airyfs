@@ -72,7 +72,7 @@ The baseline points to this optimization order:
 
 ## Baseline
 
-Use a stable prefix. The harness reuses one volume per chunk size, permanently clears `/bench` before and after a run, and destroys the Container after measurement. It writes a persistent ownership marker before using `/bench` and refuses to delete an unmarked tree. It does not delete volumes because volume deletion is unavailable.
+Use a stable prefix. The harness reuses one volume per chunk size, permanently clears `/bench` before and after a run, and destroys the Container after measurement. It writes a persistent ownership marker before using `/bench` and refuses to delete an unmarked tree. It reuses volumes across runs rather than deleting them, so its results stay comparable; use `airy volume delete` (or `DELETE /v1/volumes/V`) to remove a benchmark volume when you are done with it.
 
 ```bash
 AIRYFS_URL=https://your-worker.workers.dev \
