@@ -364,6 +364,17 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   await client.rename('/mnt-data/forwarded.txt', '/mnt-data/renamed.txt');
   equal(await mountTarget.readFileText('/renamed.txt'), 'lives-in-target', 'same-volume rename under mount');
 
+  // A typo'd (non-existent) target is refused rather than silently mounting an
+  // auto-instantiated empty volume that would swallow writes.
+  let notFound = false;
+  try { await client.createMount('/typo', { target: `nope-${suffix}` }); }
+  catch (error) { notFound = error instanceof AiryFSApiError && error.code === 'MOUNT_TARGET_NOT_FOUND'; }
+  assert(notFound, 'mount to a non-existent target is rejected');
+
+  // Mount health is observable in usage so a degraded mount is discoverable.
+  const usageMounts = (await client.usage()).mounts ?? [];
+  assert(usageMounts.some((m) => m.mountpoint === '/mnt-data' && m.healthy === true), 'mount health reported in usage');
+
   // Cycle prevention: a mount cannot loop back to a mounted host, nor mount itself.
   let cycle = false;
   try { await mountTarget.createMount('/back', { target: volume }); }
@@ -391,6 +402,32 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   assert(mountLs.stdout.includes('AIRYFS-MOUNT-UNAVAILABLE'), 'unavailable-mount marker visible in exec');
   const blindWrite = await client.exec('echo blind > /volume/mnt-data/blind.txt');
   assert(blindWrite.exitCode !== 0, 'blind write under sealed stub fails (read-only)');
+
+  // A deleted target degrades to a structured error, not silent-empty. Uses a
+  // throwaway pair so the primary mount above is unaffected.
+  const degradedTarget = `features-degraded-${suffix}`;
+  const degraded = new AiryFSClient(endpoint, degradedTarget, clientOptions);
+  await client.createMount('/gone', { target: degradedTarget, create: true });
+  await client.writeFile('/gone/seed.txt', 'seed');
+  await degraded.deleteVolume();
+  let unavailable = false;
+  try { await client.readFileText('/gone/seed.txt'); }
+  catch (error) { unavailable = error instanceof AiryFSApiError && error.code === 'MOUNT_TARGET_UNAVAILABLE'; }
+  assert(unavailable, 'deleted mount target returns MOUNT_TARGET_UNAVAILABLE, not empty');
+  await client.deleteMount('/gone');
+
+  // Restore preserves the mount table and re-establishes stubs the snapshot predates.
+  const preMountSnap = await client.createSnapshot(`pre-mount-${suffix}`);
+  const restoreTarget = `features-restoremount-${suffix}`;
+  const restoreTargetClient = new AiryFSClient(endpoint, restoreTarget, clientOptions);
+  await client.createMount('/rst', { target: restoreTarget, create: true });
+  await client.writeFile('/rst/data.txt', 'in-target');
+  await client.restoreSnapshot(preMountSnap.id);
+  assert((await client.listMounts()).mounts.some((m) => m.mountpoint === '/rst'), 'restore preserves mount table');
+  assert((await client.listDirectory('/')).some((e) => e.name === 'rst'), 'restore re-establishes mount stub');
+  equal(await client.readFileText('/rst/data.txt'), 'in-target', 'mount still forwards after restore');
+  await client.deleteMount('/rst');
+  await restoreTargetClient.deleteVolume();
 
   // Removing the mount detaches it from the host namespace.
   await client.deleteMount('/mnt-data');

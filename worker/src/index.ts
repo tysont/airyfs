@@ -317,6 +317,24 @@ export class AiryFS extends Container<Env> {
     await this.scheduleWebhookDelivery();
   }
 
+  /**
+   * True once this volume has been legitimately established (explicitly created
+   * or accessed at least once), which sets `volume_name` in fs_config. A phantom
+   * DO instantiated only to answer a request — a typo'd or deleted mount target —
+   * has run initSchema (root + schema_version) but never this, so it reads false.
+   * This distinguishes "real but empty" from "does not exist" without an RPC.
+   */
+  private volumeEstablished(): boolean {
+    return this.ctx.storage.sql
+      .exec("SELECT 1 FROM fs_config WHERE key = 'volume_name'")
+      .toArray().length > 0;
+  }
+
+  /** Trusted RPC: whether this volume exists as a legitimate mount target. */
+  mountTargetEstablished(): boolean {
+    return this.volumeEstablished();
+  }
+
   /** Cached mount table for this volume; reloaded lazily after a mutation. */
   private mounts(): MountRecord[] {
     if (this.mountCache === null) this.mountCache = listMounts(this.ctx.storage.sql);
@@ -593,6 +611,9 @@ export class AiryFS extends Container<Env> {
   ): Promise<Response> {
     const headers = new Headers(request.headers);
     headers.set('X-AiryFS-Mount-Hops', String(hops + 1));
+    // Marks the request as a mount forward so the target can refuse to serve as
+    // a phantom (typo'd / deleted) volume instead of auto-instantiating empty.
+    headers.set('X-AiryFS-Mount-Forward', '1');
     if (mount.token) headers.set('Authorization', `Bearer ${mount.token}`);
     else headers.delete('Authorization');
     if (bodyOverride !== undefined) headers.delete('Content-Length');
@@ -604,7 +625,19 @@ export class AiryFS extends Container<Env> {
       init.body = request.body;
       init.duplex = 'half';
     }
-    return await this.targetStub(mount.targetVolume).fetch(new Request(targetUrl.toString(), init));
+    const response = await this.targetStub(mount.targetVolume).fetch(new Request(targetUrl.toString(), init));
+    // Normalize a transient failure from the target into the one structured
+    // mount-degraded error, so callers see the same shape for absence and
+    // transience rather than a raw 5xx from the RPC/storage layer.
+    if (response.status >= 500 && response.status !== 503) {
+      return errorResponse(new HttpError(
+        503,
+        'MOUNT_TARGET_UNAVAILABLE',
+        `Mount target "${mount.targetVolume}" is unavailable`,
+        { 'Retry-After': '1' },
+      ));
+    }
+    return response;
   }
 
   private async scheduleWebhookDelivery(): Promise<void> {
@@ -1292,8 +1325,12 @@ export class AiryFS extends Container<Env> {
       }
     );
     // A root replace rebuilds the whole tree; drop the cached AgentFS so the
-    // next access re-reads the fresh inode/dentry state.
-    if (options?.allowRoot && isRootTarget(path)) this.fs = null;
+    // next access re-reads the fresh inode/dentry state, then recreate mount
+    // stubs the imported tree may not contain (mount table is preserved).
+    if (options?.allowRoot && isRootTarget(path)) {
+      this.fs = null;
+      await this.reestablishMountStubs();
+    }
     return summary;
   }
 
@@ -1398,14 +1435,18 @@ export class AiryFS extends Container<Env> {
       throw new SnapshotNotFoundError(id);
     }
     await this.destroyContainer();
+    let info: SnapshotInfo;
     const release = await this.access.acquireWrite('*');
     try {
-      const info = restoreSnapshotRow(this.snapshotStorage(), id);
+      info = restoreSnapshotRow(this.snapshotStorage(), id);
       this.fs = null;
-      return info;
     } finally {
       release();
     }
+    // Restore replaced the filesystem but preserved the mount table; recreate any
+    // stub directory the restored snapshot predates so the two stay consistent.
+    await this.reestablishMountStubs();
+    return info;
   }
 
   /** Delete a snapshot and all its payload rows. */
@@ -1664,6 +1705,18 @@ export class AiryFS extends Container<Env> {
       }
     }
 
+    // Mount health makes a degraded mount discoverable rather than discovered:
+    // each target is probed for legitimate existence. Off the data hot path
+    // (usage/metrics only) and bounded by the mount count.
+    const mountRecords = this.mounts();
+    const mounts = mountRecords.length === 0 ? undefined : await Promise.all(
+      mountRecords.map(async (mount) => ({
+        mountpoint: mount.mountpoint,
+        targetVolume: mount.targetVolume,
+        healthy: await this.targetStub(mount.targetVolume).mountTargetEstablished().catch(() => false),
+      })),
+    );
+
     return {
       filesystem: {
         ...filesystem,
@@ -1678,6 +1731,7 @@ export class AiryFS extends Container<Env> {
         pipelineRequests: this.hranaServer?.pipelineCount ?? 0,
         sqlStatements: this.hranaServer?.statementCount ?? 0,
       },
+      ...(mounts ? { mounts } : {}),
     };
   }
 
@@ -2163,6 +2217,16 @@ export class AiryFS extends Container<Env> {
           typeof body.chunkSize === 'number' ? body.chunkSize : undefined,
           targetVolume,
         );
+      } else if (!(await this.targetStub(targetVolume).mountTargetEstablished())) {
+        // Refuse to mount a non-existent target. Without this, a typo'd target
+        // name silently mounts an auto-instantiated empty volume and writes land
+        // in the wrong place — silent-empty masquerading as valid data, on the
+        // write path. Pass create:true to create the target in one request.
+        throw new HttpError(
+          404,
+          'MOUNT_TARGET_NOT_FOUND',
+          `Target volume "${targetVolume}" does not exist; create it first or pass create:true`,
+        );
       }
 
       const secret = this.env.AIRYFS_AUTH_SECRET;
@@ -2230,6 +2294,17 @@ export class AiryFS extends Container<Env> {
         for (const edge of edges) next.push(edge.targetVolume);
       }
       frontier = next;
+    }
+  }
+
+  /**
+   * Re-establish every mount's stub directory. A root-replacing restore or import
+   * swaps the filesystem tables but preserves fs_mount, so a snapshot that
+   * predates a mount would otherwise leave the mount row without its stub. Idempotent.
+   */
+  private async reestablishMountStubs(): Promise<void> {
+    for (const mount of this.mounts()) {
+      await this.ensureStubDirectory(mount.mountpoint);
     }
   }
 
@@ -2915,6 +2990,20 @@ export class AiryFS extends Container<Env> {
       }
 
       const v1Route = parseV1Route(url.pathname);
+
+      // A forwarded mount request must not auto-instantiate a phantom target.
+      // If this volume was never legitimately established (typo'd or deleted
+      // target), refuse with the structured mount-degraded error instead of
+      // serving an empty filesystem. Runs before ensureVolumeRegistered, which
+      // would otherwise establish the phantom mid-request.
+      if (request.headers.get('X-AiryFS-Mount-Forward') === '1' && !this.volumeEstablished()) {
+        return errorResponse(new HttpError(
+          503,
+          'MOUNT_TARGET_UNAVAILABLE',
+          'Mount target volume does not exist or has been deleted',
+          { 'Retry-After': '1' },
+        ));
+      }
 
       if (v1Route?.resource === 'browser-uploads' && request.method === 'OPTIONS') {
         return withBrowserUploadCors(new Response(null, { status: 204 }));

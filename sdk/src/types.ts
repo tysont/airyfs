@@ -168,6 +168,8 @@ export interface UsageInfo {
   sqliteBytes: number;
   container: ContainerHealth;
   hrana: HranaCounters;
+  /** Health of each volume mounted into this volume; absent when there are none. */
+  mounts?: Array<{ mountpoint: string; targetVolume: string; healthy: boolean }>;
 }
 export interface UsageSample {
   sampledAt: number;

@@ -18,6 +18,8 @@ export interface MetricsSnapshot {
     [key: string]: unknown;
   };
   hrana: { pipelineRequests: number; sqlStatements: number };
+  /** Health of each mount grafted into this volume; absent when there are none. */
+  mounts?: Array<{ mountpoint: string; targetVolume: string; healthy: boolean }>;
 }
 
 export function renderPrometheusMetrics(snapshot: MetricsSnapshot, tableRows: Record<string, number>): string {
@@ -37,6 +39,16 @@ export function renderPrometheusMetrics(snapshot: MetricsSnapshot, tableRows: Re
   }
   gauge(lines, 'airyfs_hrana_pipeline_requests', 'Hrana pipeline requests in the current bridge session.', snapshot.hrana.pipelineRequests);
   gauge(lines, 'airyfs_hrana_sql_statements', 'SQL statements in the current Hrana bridge session.', snapshot.hrana.sqlStatements);
+
+  if (snapshot.mounts && snapshot.mounts.length > 0) {
+    lines.push('# HELP airyfs_mount_healthy Whether a mount target volume exists (1) or is absent/degraded (0).');
+    lines.push('# TYPE airyfs_mount_healthy gauge');
+    for (const mount of snapshot.mounts) {
+      lines.push(
+        `airyfs_mount_healthy{mountpoint="${escapeLabel(mount.mountpoint)}",target="${escapeLabel(mount.targetVolume)}"} ${mount.healthy ? 1 : 0}`,
+      );
+    }
+  }
 
   lines.push('# HELP airyfs_table_rows Rows in an AiryFS-owned SQLite table.');
   lines.push('# TYPE airyfs_table_rows gauge');
