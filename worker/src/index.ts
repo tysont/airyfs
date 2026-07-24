@@ -492,6 +492,22 @@ export class AiryFS extends Container<Env> {
     return true;
   }
 
+  /**
+   * Scrape the separate-process watchdog (port 4009) for /proc state. Reachable
+   * even when the command server (4000) is wedged, because the watchdog does not
+   * share its event loop — the only way to see where a wedge is parked.
+   */
+  private async scrapeWatchdog(): Promise<unknown> {
+    try {
+      const response = await this.ctx.container!.getTcpPort(4009).fetch(
+        new Request('http://localhost/procdump', { signal: AbortSignal.timeout(5_000) }),
+      );
+      return await response.json();
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   private async forwardGuestFrames(
     socket: WorkerSocket,
     stub: DurableObjectStub<AiryFS>,
@@ -1752,6 +1768,10 @@ export class AiryFS extends Container<Env> {
         sqlStatements: this.hranaServer?.statementCount ?? 0,
       },
       ...(mounts ? { mounts } : {}),
+      // Diagnostic only: while guest FUSE is under investigation, surface the
+      // watchdog's /proc snapshot so a wedge can be inspected from outside the
+      // wedged process. Off in production (flag is false), so no scrape cost.
+      ...(GUEST_FUSE_ENABLED ? { watchdog: await this.scrapeWatchdog() } : {}),
     };
   }
 

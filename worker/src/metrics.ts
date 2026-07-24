@@ -20,6 +20,8 @@ export interface MetricsSnapshot {
   hrana: { pipelineRequests: number; sqlStatements: number };
   /** Health of each mount grafted into this volume; absent when there are none. */
   mounts?: Array<{ mountpoint: string; targetVolume: string; healthy: boolean }>;
+  /** Diagnostic /proc snapshot from the separate-process watchdog (guest-FUSE debugging only). */
+  watchdog?: unknown;
 }
 
 export function renderPrometheusMetrics(snapshot: MetricsSnapshot, tableRows: Record<string, number>): string {

@@ -571,4 +571,12 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   server.listen(PORT, '0.0.0.0');
   createPtyServer(slot, () => MOUNT_POINT).listen(PTY_PORT, '0.0.0.0');
   createServiceServer().listen(SERVICE_CONTROL_PORT, '0.0.0.0');
+
+  // Diagnosis instrument: a separate OS process on its own port. Because it does
+  // not share this event loop, the DO can scrape /proc state from it even when
+  // the command server (port 4000) is wedged — the only way to see where a wedge
+  // is parked, since a wedged process cannot report on itself.
+  const watchdogPath = fileURLToPath(new URL('./watchdog.js', import.meta.url));
+  const watchdog = spawn('node', [watchdogPath], { detached: true, stdio: 'ignore' });
+  watchdog.unref();
 }
