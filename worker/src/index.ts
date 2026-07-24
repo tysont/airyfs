@@ -227,14 +227,31 @@ const GUEST_CONNECT_TIMEOUT_MS = 8_000;
  * writes the target volume through the nested FUSE mount, verified end to end
  * on int, container stable throughout.
  *
- * Still gated because enabling safely needs, in order: (1) admission gating so
- * exec/job/schedule wait for guest-mount readiness — the watchdog showed a
- * few-second window where the mount is not yet live and reads see the stub;
- * (2) the fs-wrapper invariant guard (no synchronous FUSE-path fs call from the
- * command server) landed as enforcement, so the next violation is a stack trace
- * not a stall; (3) multi-session B (per-session journal cursors + retention).
- * These are a known checklist, not a mystery. Direct-path mounts work
- * regardless of this flag.
+ * Reconciliation of the earlier "hygiene applied, still wedges" run: the build
+ * context excludes untracked files and the layer cache did not reliably bust, so
+ * that run cannot be proven to have exercised the fix; its "wedge" is equally
+ * explained by the test command touching /volume/data during the readiness
+ * window (uninterruptible I/O on a not-yet-serving mount) rather than a true
+ * container wedge. Rather than argue the record, it was re-run 5/5 green on a
+ * build-stamped fresh image (see /health buildInfo and e2e/guest-fuse.mjs), with
+ * container health verified by a non-touching command each run.
+ *
+ * Still gated because enabling in production safely needs, in order:
+ *   (1) fs-wrapper invariant guard as ENFORCEMENT (no synchronous FUSE-path fs
+ *       call from the command server) — lands BEFORE the flag flips, so the next
+ *       violation is a stack trace, not a stall.
+ *   (2) admission gating: exec/job/schedule wait for all guest mounts ready, and
+ *       on the readiness bound expiring the command fails with the existing
+ *       MOUNT_TARGET_UNAVAILABLE shape rather than running against the stub.
+ *   (3) multi-session B at N=2, not a general fan-in system: only A's container
+ *       mounts guests, so a target sees at most A's guest session plus its own
+ *       container — per-session journal cursors, retention sized to the slowest
+ *       of two, per-session counters. The volume-wide write lock in B's DO
+ *       already covers both by construction.
+ *   (4) teardown ordering (children unmount before parent) with a restart-
+ *       persistence test (Container recycle -> next exec re-establishes guests).
+ * Also: state the guest-FUSE per-op cost (container -> A's DO -> B) in the README
+ * next to the ~60ms direct hop. Direct-path mounts work regardless of this flag.
  *
  * NOTE for re-enablement: exec/job/schedule admission must gate on guest-mount
  * readiness (or explicitly mark the run mount-degraded). Backgrounding the guest

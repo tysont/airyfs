@@ -20,9 +20,9 @@ RUN npm ci
 
 # Bump BUILD_REV to force the src copy + compile layers to rebuild when the
 # build context cache would otherwise mask a source change.
-ARG BUILD_REV=2
+ARG BUILD_REV=3
 COPY src/ src/
-RUN npx tsc
+RUN npx tsc && echo "rev=${BUILD_REV} built=$(date -u +%FT%TZ)" > /app/BUILD_INFO
 
 COPY bin/agentfs /usr/local/bin/agentfs
 RUN chmod +x /usr/local/bin/agentfs

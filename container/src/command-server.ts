@@ -3,7 +3,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
 import { exec, spawn, type ChildProcess } from 'child_process';
-import { mkdirSync, appendFileSync } from 'fs';
+import { mkdirSync, appendFileSync, readFileSync } from 'fs';
 import { mkdir as fsMkdir } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import type { Bridge } from './bridge.js';
@@ -55,6 +55,15 @@ function instrumentProcess(): void {
   });
   process.on('exit', (code) => process.stderr.write(`[fatal] process exit code=${code}\n`));
 }
+
+/** Build stamp baked into the image (see Dockerfile); lets an experiment confirm which artifact it hit. */
+const buildInfo: string = (() => {
+  try {
+    return readFileSync('/app/BUILD_INFO', 'utf8').trim();
+  } catch {
+    return 'unknown';
+  }
+})();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -441,6 +450,9 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
         fuseMounted: mounted,
         fuseExitCode,
         cwd,
+        // Verify the artifact, not the intent: the image's build stamp is baked
+        // at build time so an experiment can confirm which image it is exercising.
+        buildInfo,
         processMemory: process.memoryUsage(),
         processResources: process.resourceUsage(),
       });
