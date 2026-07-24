@@ -192,6 +192,38 @@ describe('AiryFSClient', () => {
     expect(JSON.parse(bodies[1])).toEqual({ command: 'cat', stdin: btoa('\u0001\u0002\u0003') });
   });
 
+  it('manages mounts: list, create-and-mount, and delete', async () => {
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
+    const client = new AiryFSClient('https://example.com', 'host vol', {
+      fetch: async (input, init) => {
+        requests.push({ url: input.toString(), method: init?.method ?? 'GET', body: init?.body });
+        const url = input.toString();
+        if (url.endsWith('/mounts') && (init?.method ?? 'GET') === 'GET') {
+          return Response.json({ volume: 'host vol', mounts: [] });
+        }
+        return Response.json({
+          mountpoint: '/data', targetVolume: 'big', targetSubpath: '/', credentialId: null, options: {}, createdAt: 1,
+          removed: init?.method === 'DELETE' ? true : undefined,
+        });
+      },
+    });
+
+    await client.listMounts();
+    await client.createMount('/data', { target: 'big', create: true });
+    await client.deleteMount('/data');
+
+    expect(requests[0]).toMatchObject({ url: 'https://example.com/v1/volumes/host%20vol/mounts', method: 'GET' });
+    expect(requests[1]).toMatchObject({
+      url: 'https://example.com/v1/volumes/host%20vol/mounts/data',
+      method: 'PUT',
+      body: JSON.stringify({ target: 'big', create: true }),
+    });
+    expect(requests[2]).toMatchObject({
+      url: 'https://example.com/v1/volumes/host%20vol/mounts/data',
+      method: 'DELETE',
+    });
+  });
+
   it('issues a DELETE to permanently remove a volume', async () => {
     const requests: Array<{ url: string; method: string }> = [];
     const client = new AiryFSClient('https://example.com', 'my volume', {

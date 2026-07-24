@@ -43,10 +43,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function isMounted(): Promise<boolean> {
+function isMountedAt(point: string): Promise<boolean> {
   return new Promise((resolve) => {
-    exec(`mountpoint -q ${MOUNT_POINT}`, (err) => resolve(!err));
+    exec(`mountpoint -q ${point}`, (err) => resolve(!err));
   });
+}
+
+function isMounted(): Promise<boolean> {
+  return isMountedAt(MOUNT_POINT);
 }
 
 /** Environment for user commands; identical for buffered and streaming execution. */
@@ -110,6 +114,7 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
   let bridge: Bridge | null = null;
   let fuseProcess: ChildProcess | null = null;
   let fuseExitCode: number | null = null;
+  const guestProcesses: ChildProcess[] = [];
   // Exactly one command runs at a time across buffered and streaming endpoints.
 
   /** Check whether the FUSE daemon is alive. Returns error message if dead. */
@@ -380,9 +385,12 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
       }
       try {
         const { startBridge } = await import('./bridge.js');
-        bridge = await startBridge();
+        const raw = await readBody(req);
+        const parsed = raw ? JSON.parse(raw) as { guestChannels?: unknown } : {};
+        const guestChannels = Array.isArray(parsed.guestChannels) ? parsed.guestChannels : [];
+        bridge = await startBridge(guestChannels);
         bridgeStarted = true;
-        jsonResponse(res, 200, { ok: true });
+        jsonResponse(res, 200, { ok: true, guests: bridge.guests.length });
       } catch (err) {
         jsonResponse(res, 500, { ok: false, error: `Bridge startup failed: ${err instanceof Error ? err.message : err}` });
       }
@@ -399,11 +407,15 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
 
       try { mkdirSync(MOUNT_POINT, { recursive: true }); } catch { /* exists */ }
 
-      fuseExitCode = null;
-      const child = exec(
-        `agentfs mount --remote-url http://localhost:8080 --invalidation-url http://localhost:8081 --auth-token "" --cache-ttl-ms 1000 --foreground volume ${MOUNT_POINT}`,
-        { env: process.env }
+      const { buildPrimaryMountCommand, buildGuestMountCommand, orderMountsByDepth } = await import('./mounts.js');
+      const rawMount = await readBody(req);
+      const mountBody = rawMount ? JSON.parse(rawMount) as { mounts?: unknown } : {};
+      const guestMounts = orderMountsByDepth(
+        Array.isArray(mountBody.mounts) ? mountBody.mounts as Array<{ mountpoint: string; targetVolume: string; dataHttpPort: number; invalidationHttpPort: number; authToken: string }> : [],
       );
+
+      fuseExitCode = null;
+      const child = exec(buildPrimaryMountCommand(), { env: process.env });
       fuseProcess = child;
 
       child.stdout?.on('data', (d: string) => process.stdout.write(`[fuse] ${d}`));
@@ -433,8 +445,28 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
         return;
       }
 
+      // Graft each guest volume over its stub directory, parent-first. Guest
+      // mounts are best-effort: a failed guest degrades that subtree to EIO but
+      // never fails the primary mount.
+      const guestResults: Array<{ mountpoint: string; mounted: boolean }> = [];
+      for (const guest of guestMounts) {
+        const guestPoint = `${MOUNT_POINT}${guest.mountpoint}`;
+        try { mkdirSync(guestPoint, { recursive: true }); } catch { /* exists via primary FS */ }
+        const guestChild = exec(buildGuestMountCommand(guest), { env: process.env });
+        guestProcesses.push(guestChild);
+        guestChild.stdout?.on('data', (d: string) => process.stdout.write(`[fuse:${guest.mountpoint}] ${d}`));
+        guestChild.stderr?.on('data', (d: string) => process.stderr.write(`[fuse:${guest.mountpoint}] ${d}`));
+        let guestMounted = false;
+        for (let i = 0; i < MOUNT_POLL_MAX_ATTEMPTS; i++) {
+          await sleep(MOUNT_POLL_INTERVAL_MS);
+          guestMounted = await isMountedAt(guestPoint);
+          if (guestMounted) break;
+        }
+        guestResults.push({ mountpoint: guest.mountpoint, mounted: guestMounted });
+      }
+
       cwd = MOUNT_POINT;
-      jsonResponse(res, 200, { ok: true, mounted: true });
+      jsonResponse(res, 200, { ok: true, mounted: true, guests: guestResults });
       return;
     }
 

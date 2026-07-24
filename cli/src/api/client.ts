@@ -25,6 +25,9 @@ import type {
   JobStatus,
   MintCapabilityInput,
   MintedCapability,
+  MountInfo,
+  MountList,
+  CreateMountInput,
   PasswordStatus,
   PublishSiteInput,
   QuotaInfo,
@@ -763,6 +766,22 @@ export class AiryFSClient {
     });
   }
 
+  async listMounts(): Promise<MountList> {
+    return this.json<MountList>(`${this.volumeBase}/mounts`);
+  }
+
+  async createMount(mountpoint: string, input: CreateMountInput): Promise<MountInfo> {
+    return this.json<MountInfo>(this.resourcePath('mounts', mountpoint), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async deleteMount(mountpoint: string): Promise<MountInfo & { removed: boolean }> {
+    return this.json<MountInfo & { removed: boolean }>(this.resourcePath('mounts', mountpoint), { method: 'DELETE' });
+  }
+
   /** Capture a full-volume snapshot; an omitted name generates a server default. */
   async createSnapshot(name?: string, note?: string): Promise<SnapshotInfo> {
     const body: Record<string, string> = {};
@@ -832,7 +851,7 @@ export class AiryFSClient {
     return response.json() as Promise<T>;
   }
 
-  private resourcePath(resource: 'files' | 'directories' | 'trees' | 'tree' | 'uploads' | 'changes', path: string): string {
+  private resourcePath(resource: 'files' | 'directories' | 'trees' | 'tree' | 'uploads' | 'changes' | 'mounts', path: string): string {
     const encoded = encodeRemotePath(path);
     return `${this.volumeBase}/${resource}${encoded ? `/${encoded}` : ''}`;
   }

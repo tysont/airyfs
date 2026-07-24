@@ -21,6 +21,9 @@ import type {
   JobStatus,
   MintCapabilityInput,
   MintedCapability,
+  MountInfo,
+  MountList,
+  CreateMountInput,
   PerfInfo,
   QuotaInfo,
   TrashEntry,
@@ -623,6 +626,28 @@ export class AiryFSClient {
 
   async revokeCapability(id: string): Promise<void> {
     await this.request(`${this.volumeBase}/capabilities/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /** List the volumes grafted into this volume's namespace as mounts. */
+  listMounts(): Promise<MountList> {
+    return this.json<MountList>(`${this.volumeBase}/mounts`);
+  }
+
+  /**
+   * Graft another volume's subtree at `mountpoint`. Set `create: true` to create
+   * the target volume in the same request (create-and-mount).
+   */
+  createMount(mountpoint: string, input: CreateMountInput): Promise<MountInfo> {
+    return this.json<MountInfo>(this.resourcePath('mounts', mountpoint), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Remove a mount and revoke its target credential. */
+  deleteMount(mountpoint: string): Promise<MountInfo & { removed: boolean }> {
+    return this.json<MountInfo & { removed: boolean }>(this.resourcePath('mounts', mountpoint), { method: 'DELETE' });
   }
 
   usage(): Promise<UsageInfo> {

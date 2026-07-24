@@ -227,6 +227,29 @@ describe('commands', () => {
     expect(JSON.parse(exec?.body || '{}').stdin).toBe(Buffer.from('piped stdin').toString('base64'));
   });
 
+  it('creates and mounts a volume in one command', async () => {
+    const result = await invoke(['mount', 'create', '/data', '--target', 'big', '--create']);
+    expect(result.code).toBe(0);
+    expect(requests).toContainEqual({
+      method: 'PUT',
+      path: '/v1/volumes/vol/mounts/data',
+      body: JSON.stringify({ target: 'big', subpath: '/', create: true }),
+    });
+  });
+
+  it('lists mounts as a table', async () => {
+    const result = await invoke(['mount', 'list']);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('/data');
+    expect(result.stdout).toContain('big');
+  });
+
+  it('unmounts a volume with mount rm', async () => {
+    const result = await invoke(['mount', 'rm', '/data']);
+    expect(result.code).toBe(0);
+    expect(requests).toContainEqual({ method: 'DELETE', path: '/v1/volumes/vol/mounts/data', body: '' });
+  });
+
   it('executes in the session cwd and propagates the remote exit code', async () => {
     const result = await invoke(['exec', '--no-stream', 'git', 'status']);
 
@@ -551,6 +574,15 @@ async function route(
   }
   if (request.method === 'PUT' && url.pathname.startsWith('/v1/volumes/vol/trees/')) {
     return json(response, 201, { files: 1, directories: 0, symlinks: 0, bytes: 9 });
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/volumes/vol/mounts') {
+    return json(response, 200, { volume: 'vol', mounts: [{ mountpoint: '/data', targetVolume: 'big', targetSubpath: '/', credentialId: null, options: {}, createdAt: 1 }] });
+  }
+  if (request.method === 'PUT' && url.pathname.startsWith('/v1/volumes/vol/mounts/')) {
+    return json(response, 201, { mountpoint: '/data', targetVolume: 'big', targetSubpath: '/', credentialId: null, options: {}, createdAt: 1 });
+  }
+  if (request.method === 'DELETE' && url.pathname.startsWith('/v1/volumes/vol/mounts/')) {
+    return json(response, 200, { mountpoint: '/data', targetVolume: 'big', targetSubpath: '/', credentialId: null, options: {}, createdAt: 1, removed: true });
   }
   if (request.method === 'GET' && url.pathname === '/v1/volumes/vol/files/dl/file.txt') {
     response.writeHead(200, { 'Content-Type': 'application/octet-stream' }).end('file-body');

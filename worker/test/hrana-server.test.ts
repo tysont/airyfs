@@ -289,6 +289,37 @@ describe('HranaServer pipeline', () => {
     await client.close();
   });
 
+  it('processes pipelines without a socket via handlePipelineRequest (guest-mount seam)', async () => {
+    // The guest-mount forwarder runs pipelines against a target volume through
+    // handlePipelineRequest, with no readable/writable streams attached.
+    const server = new HranaServer({ sql });
+    const create = await server.handlePipelineRequest({
+      baton: null,
+      requests: [{ type: 'execute', stmt: { sql: 'CREATE TABLE guest (id INTEGER)' } }],
+    });
+    expect(create.results[0].type).toBe('ok');
+
+    const insert = await server.handlePipelineRequest({
+      baton: create.baton,
+      requests: [{ type: 'execute', stmt: { sql: 'INSERT INTO guest (id) VALUES (7)' } }],
+    });
+    expect(insert.results[0].type).toBe('ok');
+
+    const read = await server.handlePipelineRequest({
+      baton: insert.baton,
+      requests: [{ type: 'execute', stmt: { sql: 'SELECT id FROM guest' } }],
+    });
+    expect(read.results[0].type).toBe('ok');
+    if (read.results[0].type === 'ok' && read.results[0].response.type === 'execute') {
+      expect(read.results[0].response.result.rows[0].values[0]).toEqual({ type: 'integer', value: '7' });
+    }
+  });
+
+  it('rejects serve() when constructed without streams', async () => {
+    const server = new HranaServer({ sql });
+    await expect(server.serve()).rejects.toThrow(/readable and writable/);
+  });
+
   it('takes the write lock for mutations but not reads', async () => {
     let lockRequests = 0;
     let allowWrite!: () => void;

@@ -813,8 +813,8 @@ class TransactionalBatchFailure extends Error {
 export class HranaServer {
   readonly sessionId = crypto.randomUUID();
   private sql: SqlBackend;
-  private readable: ReadableStream<Uint8Array>;
-  private writable: WritableStream<Uint8Array>;
+  private readable?: ReadableStream<Uint8Array>;
+  private writable?: WritableStream<Uint8Array>;
   private writeLock?: () => Promise<() => void>;
   private onWrite?: () => void | Promise<void>;
   private transactionSync?: TransactionSync;
@@ -828,8 +828,8 @@ export class HranaServer {
   statementCount = 0;
 
   constructor(opts: {
-    readable: ReadableStream<Uint8Array>;
-    writable: WritableStream<Uint8Array>;
+    readable?: ReadableStream<Uint8Array>;
+    writable?: WritableStream<Uint8Array>;
     sql: SqlBackend;
     writeLock?: () => Promise<() => void>;
     onWrite?: () => void | Promise<void>;
@@ -843,7 +843,19 @@ export class HranaServer {
     this.transactionSync = opts.transactionSync;
   }
 
+  /**
+   * Process one already-parsed pipeline request and return its response. Used by
+   * the guest-mount forwarder, which reads frames off a socket in one DO and
+   * runs them against another volume's SQLite through this server instance.
+   */
+  handlePipelineRequest(req: PipelineRequest): Promise<PipelineResponse> {
+    return this.handlePipeline(req);
+  }
+
   async serve(): Promise<void> {
+    if (!this.readable || !this.writable) {
+      throw new Error('HranaServer.serve requires readable and writable streams');
+    }
     const reader = this.readable.getReader();
     const writer = this.writable.getWriter();
     const buffer = new FrameBuffer();

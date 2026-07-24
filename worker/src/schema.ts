@@ -11,6 +11,7 @@ import { initTrashSchema, TRASH_TABLES } from './trash';
 import { initPtyTicketSchema, PTY_TICKET_TABLES } from './pty-tickets';
 import { initServiceSchema, SERVICE_TABLES } from './services';
 import { initUsageHistorySchema, USAGE_HISTORY_TABLES } from './usage-history';
+import { initMountSchema, MOUNT_TABLES } from './mounts';
 
 // Minimal interface matching the subset of SqlStorage that initSchema needs.
 // DO SqlStorage satisfies this; tests can provide a lightweight adapter.
@@ -266,6 +267,7 @@ export const SCHEMA_TABLES = [
   ...PTY_TICKET_TABLES,
   ...SERVICE_TABLES,
   ...USAGE_HISTORY_TABLES,
+  ...MOUNT_TABLES,
 ] as const;
 
 /**
@@ -312,6 +314,7 @@ export function initSchema(sql: SqlExec, transactionSync?: TransactionSync): voi
     initPtyTicketSchema(sql);
     initServiceSchema(sql);
     initUsageHistorySchema(sql);
+    initMountSchema(sql);
 
     for (const stmt of SEED_STATEMENTS) {
       sql.exec(stmt);

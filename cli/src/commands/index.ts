@@ -58,6 +58,7 @@ export function registerCommands(program: Command, runtime: Runtime): void {
   registerJobCommands(program, runtime);
   registerScheduleCommands(program, runtime);
   registerServiceCommands(program, runtime);
+  registerMountCommands(program, runtime);
   registerWatchCommand(program, runtime);
   registerWebhookCommands(program, runtime);
   registerVolumeCommands(program, runtime);
@@ -169,6 +170,49 @@ function registerServiceCommands(program: Command, runtime: Runtime): void {
         return;
       }
       await printServiceLogs(context, name, after, Boolean(options.follow), runtime);
+    }));
+}
+
+function registerMountCommands(program: Command, runtime: Runtime): void {
+  const mount = program.command('mount').description('Mount other volumes into this volume to expand storage');
+
+  mount.command('create')
+    .argument('<mountpoint>', 'path in this volume where the target is grafted')
+    .requiredOption('--target <volume>', 'volume to mount at the mountpoint')
+    .option('--subpath <path>', 'subdirectory of the target volume to expose', '/')
+    .option('--create', 'create the target volume in the same command')
+    .option('--chunk-size <bytes>', 'chunk size when creating the target volume', parseByteOffset)
+    .description('Mount a volume (optionally creating it) at a subdirectory')
+    .action(async (mountpoint, options, command) => perform(runtime, command, async (context) => {
+      const record = await context.client().createMount(context.path(mountpoint), {
+        target: options.target,
+        subpath: options.subpath,
+        create: Boolean(options.create),
+        ...(options.chunkSize === undefined ? {} : { chunkSize: options.chunkSize }),
+      });
+      context.output.success(
+        `Mounted ${record.targetVolume}:${record.targetSubpath} at ${record.mountpoint}`,
+        record,
+      );
+    }));
+
+  mount.command('list', { isDefault: true })
+    .description('List mounted volumes')
+    .action(async (_options, command) => perform(runtime, command, async (context) => {
+      const { mounts } = await context.client().listMounts();
+      if (context.output.json) context.output.value(mounts);
+      else context.output.table(
+        ['Mountpoint', 'Target Volume', 'Subpath'],
+        mounts.map((record) => [record.mountpoint, record.targetVolume, record.targetSubpath]),
+      );
+    }));
+
+  mount.command('delete').alias('rm')
+    .argument('<mountpoint>')
+    .description('Unmount a volume and revoke its credential')
+    .action(async (mountpoint, _options, command) => perform(runtime, command, async (context) => {
+      const record = await context.client().deleteMount(context.path(mountpoint));
+      context.output.success(`Unmounted ${record.mountpoint}`, record);
     }));
 }
 

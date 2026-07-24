@@ -13,6 +13,7 @@ import {
   SCHEMA_TABLES,
 } from './schema';
 import { HranaServer, wrapSqlStorage } from './hrana-server';
+import { FrameBuffer, serializeFrame, type PipelineRequest, type PipelineResponse } from './hrana-protocol';
 import { MutationJournal } from './mutation-journal';
 import {
   errorResponse,
@@ -156,6 +157,16 @@ import { VolumeRegistry } from './volume-registry';
 import { handleVolumeRegistryRequest } from './volume-registry-api';
 import { renderPrometheusMetrics, type MetricsSnapshot } from './metrics';
 import { listUsageHistory, MAX_USAGE_HISTORY_LIMIT, recordUsageSample } from './usage-history';
+import {
+  createMountRow,
+  deleteMountRow,
+  listMounts,
+  MAX_MOUNT_HOPS,
+  MOUNT_CAPABILITY_TTL_SECONDS,
+  publicMount,
+  resolveMount,
+  type MountRecord,
+} from './mounts';
 
 export { VolumeRegistry };
 
@@ -248,6 +259,12 @@ export class AiryFS extends Container<Env> {
   private readonly mutations: MutationJournal;
   private readonly directFilesystem: FilesystemPrimitives;
   private registeredVolume: string | null = null;
+  /** Cached mount table; invalidated on every mount create/delete. */
+  private mountCache: MountRecord[] | null = null;
+  /** Per-guest-session Hrana servers when this volume is a mount *target* (B side). */
+  private readonly guestSessions = new Map<string, HranaServer>();
+  /** Live guest-mount forwarder sockets when this volume is a mount *host* (A side). */
+  private guestSockets: WorkerSocket[] = [];
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx as never, env);
@@ -266,6 +283,289 @@ export class AiryFS extends Container<Env> {
   private async recordMutations(fs: AgentFS, paths: string[]): Promise<void> {
     await this.mutations.record(fs, paths);
     await this.scheduleWebhookDelivery();
+  }
+
+  /** Cached mount table for this volume; reloaded lazily after a mutation. */
+  private mounts(): MountRecord[] {
+    if (this.mountCache === null) this.mountCache = listMounts(this.ctx.storage.sql);
+    return this.mountCache;
+  }
+
+  private invalidateMounts(): void {
+    this.mountCache = null;
+  }
+
+  /**
+   * Trusted RPC surface for cycle detection: the target-side view of a volume's
+   * mount edges. Callers walk these edges to prove a new mount cannot loop back.
+   */
+  listMountRecords(): Array<{ targetVolume: string; mountpoint: string; targetSubpath: string }> {
+    return this.mounts().map((mount) => ({
+      targetVolume: mount.targetVolume,
+      mountpoint: mount.mountpoint,
+      targetSubpath: mount.targetSubpath,
+    }));
+  }
+
+  /**
+   * Trusted RPC (mount target / B side): run a guest FUSE session's pipeline
+   * against this volume's SQLite. Each session keeps its own {@link HranaServer}
+   * so baton/prepared-statement state persists and the mutating data channel
+   * serializes through this volume's own whole-volume write lock, independent of
+   * the host volume. The read-only invalidation channel takes no write lock.
+   */
+  async executeGuestPipeline(
+    sessionId: string,
+    request: PipelineRequest,
+    mutating: boolean,
+  ): Promise<PipelineResponse> {
+    let server = this.guestSessions.get(sessionId);
+    if (!server) {
+      server = new HranaServer({
+        sql: wrapSqlStorage(this.ctx.storage.sql),
+        writeLock: mutating ? () => this.access.acquireWrite('*') : undefined,
+        onWrite: mutating ? () => this.scheduleWebhookDelivery() : undefined,
+        transactionSync: (callback) => this.ctx.storage.transactionSync(callback),
+      });
+      this.guestSessions.set(sessionId, server);
+    }
+    const response = await server.handlePipelineRequest(request);
+    if (request.requests.some((entry) => entry.type === 'close')) {
+      this.guestSessions.delete(sessionId);
+    }
+    return response;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mount routing (direct/path plane)
+  // ---------------------------------------------------------------------------
+
+  /** The path-valued operand keys of a filesystem `operations` body. */
+  private operationOperandKeys(operation: string): string[] {
+    switch (operation) {
+      case 'rename':
+      case 'copy':
+        return ['from', 'to'];
+      case 'link':
+        return ['existing', 'path'];
+      // symlink resolves only its link location; the target string is stored verbatim.
+      default:
+        return ['path'];
+    }
+  }
+
+  /** Build a `/v1/volumes/:volume/:resource[/path]` pathname with encoded segments. */
+  private buildV1Path(volume: string, resource: string, path: string): string {
+    const segments = path === '/' ? [] : path.split('/').filter(Boolean).map(encodeURIComponent);
+    const suffix = segments.length ? `/${segments.join('/')}` : '';
+    return `/v1/volumes/${encodeURIComponent(volume)}/${resource}${suffix}`;
+  }
+
+  /** Obtain the DO stub for another volume. */
+  private targetStub(volume: string): DurableObjectStub<AiryFS> {
+    return getContainer<AiryFS>(this.env.AiryFS, volume);
+  }
+
+  /**
+   * Container-facing runtime view of the mount table: one deterministic bridge
+   * port quad per guest mount. Ports mirror container/src/mounts.ts.
+   */
+  private guestMountRuntime(): Array<{
+    mountpoint: string;
+    targetVolume: string;
+    authToken: string;
+    dataTcpPort: number;
+    dataHttpPort: number;
+    invalidationTcpPort: number;
+    invalidationHttpPort: number;
+  }> {
+    return this.mounts().map((mount, index) => ({
+      mountpoint: mount.mountpoint,
+      targetVolume: mount.targetVolume,
+      authToken: mount.token ?? '',
+      dataTcpPort: 9100 + index,
+      dataHttpPort: 8100 + index,
+      invalidationTcpPort: 9200 + index,
+      invalidationHttpPort: 8200 + index,
+    }));
+  }
+
+  /**
+   * Connect a guest mount's framed channel and forward each pipeline to the
+   * target volume's DO (Option A: Hrana never leaves the deployment). The data
+   * channel is mutating; the invalidation channel is read-only.
+   */
+  private async connectGuestChannel(
+    tcpPort: number,
+    targetVolume: string,
+    mutating: boolean,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const socket = this.ctx.container!.getTcpPort(tcpPort).connect(`0.0.0.0:${tcpPort}`);
+    this.guestSockets.push(socket);
+    try {
+      await abortable(socket.opened, signal);
+    } catch (error) {
+      await socket.close().catch(() => undefined);
+      throw error;
+    }
+    const sessionId = crypto.randomUUID();
+    const stub = this.targetStub(targetVolume);
+    const forward = this.forwardGuestFrames(socket, stub, sessionId, mutating);
+    this.ctx.waitUntil(forward);
+  }
+
+  private async forwardGuestFrames(
+    socket: WorkerSocket,
+    stub: DurableObjectStub<AiryFS>,
+    sessionId: string,
+    mutating: boolean,
+  ): Promise<void> {
+    const reader = socket.readable.getReader();
+    const writer = socket.writable.getWriter();
+    const buffer = new FrameBuffer();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer.push(value);
+        for (const msg of buffer.drain()) {
+          const response = await stub.executeGuestPipeline(sessionId, msg as PipelineRequest, mutating);
+          await writer.write(serializeFrame(response));
+        }
+      }
+    } finally {
+      try { reader.releaseLock(); } catch { /* already released */ }
+      try { await writer.close(); } catch { /* already closed */ }
+    }
+  }
+
+  /** Resolve a single path for an RPC wrapper; null when the path is local. */
+  private mountHit(path: string): { volume: string; targetPath: string } | null {
+    const mounts = this.mounts();
+    if (mounts.length === 0) return null;
+    const hit = resolveMount(mounts, path);
+    return hit ? { volume: hit.mount.targetVolume, targetPath: hit.targetPath } : null;
+  }
+
+  private checkHops(hops: number): void {
+    if (hops >= MAX_MOUNT_HOPS) {
+      throw new HttpError(508, 'ELOOP', 'Mount forwarding exceeded the maximum hop count');
+    }
+  }
+
+  /**
+   * Resolve a two-path RPC wrapper (rename/copy/link). Returns the shared target
+   * stub + translated paths when both operands live under the same mount, `null`
+   * when both are local, or throws EXDEV when they straddle a volume boundary.
+   */
+  private twoPathHit(a: string, b: string): { volume: string; a: string; b: string } | null {
+    const hitA = this.mountHit(a);
+    const hitB = this.mountHit(b);
+    if (!hitA && !hitB) return null;
+    if (!hitA || !hitB || hitA.volume !== hitB.volume) {
+      throw new HttpError(400, 'EXDEV', 'Cross-volume operation is not permitted across a mount boundary');
+    }
+    return { volume: hitA.volume, a: hitA.targetPath, b: hitB.targetPath };
+  }
+
+  /**
+   * Forward a path-scoped request to the target volume's DO when its path falls
+   * under a mount. Returns null when the request is entirely local. Streams,
+   * ranges, methods, and headers forward unchanged; the mount capability replaces
+   * the caller's Authorization so the target authorizes the translated path.
+   */
+  private async forwardMountedRequest(
+    request: Request,
+    url: URL,
+    route: V1Route,
+  ): Promise<Response | null> {
+    const mounts = this.mounts();
+    if (mounts.length === 0) return null;
+    if (route.resource !== 'files' && route.resource !== 'directories'
+      && route.resource !== 'trees' && route.resource !== 'operations') {
+      return null;
+    }
+
+    const hops = Number(request.headers.get('X-AiryFS-Mount-Hops') ?? '0');
+    if (hops >= MAX_MOUNT_HOPS) {
+      throw new HttpError(508, 'ELOOP', 'Mount forwarding exceeded the maximum hop count');
+    }
+
+    if (route.resource === 'operations' && request.method === 'POST') {
+      return await this.forwardMountedOperation(request, route, mounts, hops);
+    }
+    if (route.resource === 'operations') return null;
+
+    const hit = resolveMount(mounts, route.path);
+    if (!hit) return null;
+    const targetUrl = new URL(url);
+    targetUrl.pathname = this.buildV1Path(hit.mount.targetVolume, route.resource, hit.targetPath);
+    return await this.forwardRequest(request, targetUrl, hit.mount, hops);
+  }
+
+  /**
+   * Forward a filesystem `operations` POST under a mount. Two-path operations
+   * (rename/copy/link) that straddle a volume boundary return EXDEV, matching
+   * Linux; a client `mv` falls back to copy+delete across the boundary.
+   */
+  private async forwardMountedOperation(
+    request: Request,
+    route: V1Route,
+    mounts: MountRecord[],
+    hops: number,
+  ): Promise<Response | null> {
+    const operation = route.path.slice(1);
+    const body = (await request.clone().json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return null;
+
+    const keys = this.operationOperandKeys(operation);
+    const operands = keys
+      .filter((key) => typeof body[key] === 'string')
+      .map((key) => ({ key, value: body[key] as string, hit: resolveMount(mounts, body[key] as string) }));
+    const hits = operands.filter((operand) => operand.hit);
+    if (hits.length === 0) return null;
+
+    const targetVolumes = new Set(hits.map((operand) => operand.hit!.mount.targetVolume));
+    if (targetVolumes.size > 1 || hits.length !== operands.length) {
+      throw new HttpError(
+        400,
+        'EXDEV',
+        `Cross-volume ${operation} is not permitted; copy and delete across the mount boundary instead`,
+      );
+    }
+
+    const mount = hits[0].hit!.mount;
+    const rewritten: Record<string, unknown> = { ...body };
+    for (const operand of operands) rewritten[operand.key] = operand.hit!.targetPath;
+
+    const targetUrl = new URL(request.url);
+    targetUrl.pathname = this.buildV1Path(mount.targetVolume, 'operations', route.path);
+    return await this.forwardRequest(request, targetUrl, mount, hops, JSON.stringify(rewritten));
+  }
+
+  /** Issue the forwarded subrequest to the target volume's DO. */
+  private async forwardRequest(
+    request: Request,
+    targetUrl: URL,
+    mount: MountRecord,
+    hops: number,
+    bodyOverride?: string,
+  ): Promise<Response> {
+    const headers = new Headers(request.headers);
+    headers.set('X-AiryFS-Mount-Hops', String(hops + 1));
+    if (mount.token) headers.set('Authorization', `Bearer ${mount.token}`);
+    else headers.delete('Authorization');
+    if (bodyOverride !== undefined) headers.delete('Content-Length');
+
+    const init: RequestInit & { duplex?: 'half' } = { method: request.method, headers };
+    if (bodyOverride !== undefined) {
+      init.body = bodyOverride;
+    } else if (request.method !== 'GET' && request.method !== 'HEAD') {
+      init.body = request.body;
+      init.duplex = 'half';
+    }
+    return await this.targetStub(mount.targetVolume).fetch(new Request(targetUrl.toString(), init));
   }
 
   private async scheduleWebhookDelivery(): Promise<void> {
@@ -669,7 +969,9 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Read a file from the volume (direct DO access, no Container needed). */
-  async readFile(path: string): Promise<string> {
+  async readFile(path: string, hops = 0): Promise<string> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).readFile(hit.targetPath, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireRead(path);
     try {
@@ -680,7 +982,9 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Write a file to the volume (direct DO access, no Container needed). */
-  async writeFile(path: string, content: string): Promise<void> {
+  async writeFile(path: string, content: string, hops = 0): Promise<void> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).writeFile(hit.targetPath, content, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite(path);
     try {
@@ -692,7 +996,9 @@ export class AiryFS extends Container<Env> {
   }
 
   /** List a directory on the volume (direct DO access, no Container needed). */
-  async listDir(path: string): Promise<string[]> {
+  async listDir(path: string, hops = 0): Promise<string[]> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).listDir(hit.targetPath, hops + 1); }
     const release = await this.access.acquireRead(path);
     try {
       return await this.filesystem().readdir(path);
@@ -702,7 +1008,9 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Get serializable metadata for a file, directory, or symlink target. */
-  async statPath(path: string): Promise<StatsDto> {
+  async statPath(path: string, hops = 0): Promise<StatsDto> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).statPath(hit.targetPath, hops + 1); }
     const release = await this.access.acquireRead(path);
     try {
       return toStatsDto(await this.filesystem().stat(path));
@@ -712,8 +1020,10 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Get metadata for a path without following its final symbolic link. */
-  async lstatPath(path: string): Promise<StatsDto> {
+  async lstatPath(path: string, hops = 0): Promise<StatsDto> {
     path = normalizePath(path);
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).lstatPath(hit.targetPath, hops + 1); }
     const release = await this.access.acquireRead(path);
     try {
       return toStatsDto(await this.filesystem().lstat(path));
@@ -723,8 +1033,10 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Create a file if missing or update its access and modification timestamps. */
-  async touchPath(path: string, atime?: number, mtime?: number): Promise<void> {
+  async touchPath(path: string, atime?: number, mtime?: number, hops = 0): Promise<void> {
     path = normalizePath(path);
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).touchPath(hit.targetPath, atime, mtime, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite(path);
     try {
@@ -736,8 +1048,10 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Replace a path's permission bits without changing its file type. */
-  async chmodPath(path: string, mode: number): Promise<void> {
+  async chmodPath(path: string, mode: number, hops = 0): Promise<void> {
     path = normalizePath(path);
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).chmodPath(hit.targetPath, mode, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite(path);
     try {
@@ -749,9 +1063,11 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Create a second directory entry for an existing non-directory inode. */
-  async linkPath(existing: string, path: string): Promise<void> {
+  async linkPath(existing: string, path: string, hops = 0): Promise<void> {
     existing = normalizePath(existing);
     path = normalizePath(path);
+    const hit = this.twoPathHit(existing, path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).linkPath(hit.a, hit.b, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite([existing, path]);
     try {
@@ -763,16 +1079,20 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Append one bounded byte buffer atomically with respect to other direct writes. */
-  async appendFile(path: string, data: Uint8Array): Promise<void> {
+  async appendFile(path: string, data: Uint8Array, hops = 0): Promise<void> {
     path = normalizePath(path);
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).appendFile(hit.targetPath, data, hops + 1); }
     const fs = this.filesystem();
     const changed = await appendFileData(fs, path, data, this.access, () => this.directFilesystem.updateCtime(path));
     if (changed) await this.recordMutations(fs, [path]);
   }
 
   /** Return logical quota bytes and distinct inodes reachable under a path. */
-  async diskUsage(path: string): Promise<DiskUsage> {
+  async diskUsage(path: string, hops = 0): Promise<DiskUsage> {
     path = normalizePath(path);
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).diskUsage(hit.targetPath, hops + 1); }
     const release = await this.access.acquireRead(path);
     try {
       return this.directFilesystem.diskUsage(path);
@@ -782,7 +1102,9 @@ export class AiryFS extends Container<Env> {
   }
 
   /** List a directory with metadata in one AgentFS query. */
-  async listDirDetailed(path: string): Promise<Array<{ name: string } & StatsDto>> {
+  async listDirDetailed(path: string, hops = 0): Promise<Array<{ name: string } & StatsDto>> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).listDirDetailed(hit.targetPath, hops + 1); }
     const release = await this.access.acquireRead(path);
     try {
       return (await this.filesystem().readdirPlus(path)).map((entry) => ({
@@ -794,7 +1116,9 @@ export class AiryFS extends Container<Env> {
     }
   }
 
-  async makeDir(path: string): Promise<void> {
+  async makeDir(path: string, hops = 0): Promise<void> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).makeDir(hit.targetPath, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite(path);
     try {
@@ -803,7 +1127,9 @@ export class AiryFS extends Container<Env> {
     } finally { release(); }
   }
 
-  async removePath(path: string, recursive = false): Promise<void> {
+  async removePath(path: string, recursive = false, hops = 0): Promise<void> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).removePath(hit.targetPath, recursive, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite(path);
     try {
@@ -812,7 +1138,9 @@ export class AiryFS extends Container<Env> {
     } finally { release(); }
   }
 
-  async renamePath(from: string, to: string): Promise<void> {
+  async renamePath(from: string, to: string, hops = 0): Promise<void> {
+    const hit = this.twoPathHit(from, to);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).renamePath(hit.a, hit.b, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite([from, to]);
     try {
@@ -821,7 +1149,9 @@ export class AiryFS extends Container<Env> {
     } finally { release(); }
   }
 
-  async copyPath(from: string, to: string): Promise<void> {
+  async copyPath(from: string, to: string, hops = 0): Promise<void> {
+    const hit = this.twoPathHit(from, to);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).copyPath(hit.a, hit.b, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite([from, to]);
     try {
@@ -830,7 +1160,9 @@ export class AiryFS extends Container<Env> {
     } finally { release(); }
   }
 
-  async createSymlink(target: string, path: string): Promise<void> {
+  async createSymlink(target: string, path: string, hops = 0): Promise<void> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).createSymlink(target, hit.targetPath, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite(path);
     try {
@@ -839,7 +1171,9 @@ export class AiryFS extends Container<Env> {
     } finally { release(); }
   }
 
-  async readSymlink(path: string): Promise<string> {
+  async readSymlink(path: string, hops = 0): Promise<string> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).readSymlink(hit.targetPath, hops + 1); }
     const release = await this.access.acquireRead(path);
     try {
       return await this.filesystem().readlink(path);
@@ -849,7 +1183,9 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Stream a binary file over Workers RPC. */
-  async readFileStream(path: string): Promise<ReadableStream<Uint8Array>> {
+  async readFileStream(path: string, hops = 0): Promise<ReadableStream<Uint8Array>> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).readFileStream(hit.targetPath, hops + 1); }
     const response = await fileResponse(
       this.filesystem(),
       path,
@@ -866,7 +1202,9 @@ export class AiryFS extends Container<Env> {
   }
 
   /** Atomically replace a file from a byte stream over Workers RPC. */
-  async writeFileStream(path: string, stream: ReadableStream<Uint8Array>): Promise<void> {
+  async writeFileStream(path: string, stream: ReadableStream<Uint8Array>, hops = 0): Promise<void> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).writeFileStream(hit.targetPath, stream, hops + 1); }
     const fs = this.filesystem();
     await writeFileStream(fs, path, stream, this.access);
     await this.recordMutations(fs, [path]);
@@ -925,7 +1263,9 @@ export class AiryFS extends Container<Env> {
   // ---------------------------------------------------------------------------
 
   /** Compute the streaming SHA-256 of a regular file without buffering it. */
-  async checksum(path: string): Promise<ChecksumResult> {
+  async checksum(path: string, hops = 0): Promise<ChecksumResult> {
+    const hit = this.mountHit(path);
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).checksum(hit.targetPath, hops + 1); }
     return sha256Path(this.filesystem(), path, this.access);
   }
 
@@ -1424,6 +1764,12 @@ export class AiryFS extends Container<Env> {
     await this.setupBridge(signal);
     if (!this.activeServePromise) await this.connectData(signal);
     await this.connectInvalidation(signal);
+    if (this.guestSockets.length === 0) {
+      for (const guest of this.guestMountRuntime()) {
+        await this.connectGuestChannel(guest.dataTcpPort, guest.targetVolume, true, signal);
+        await this.connectGuestChannel(guest.invalidationTcpPort, guest.targetVolume, false, signal);
+      }
+    }
     try {
       const response = await this.containerFetch(
         new Request('http://localhost/health', { signal }),
@@ -1466,10 +1812,30 @@ export class AiryFS extends Container<Env> {
     const { socket, servePromise } = await this.connectData(signal);
     await this.connectInvalidation(signal);
 
+    // 3b. Connect each guest mount's forwarding channels (host / A side).
+    const guests = this.guestMountRuntime();
+    for (const guest of guests) {
+      await this.connectGuestChannel(guest.dataTcpPort, guest.targetVolume, true, signal);
+      await this.connectGuestChannel(guest.invalidationTcpPort, guest.targetVolume, false, signal);
+    }
+
     // 4. Mount FUSE — fire-and-forget, then poll for readiness.
     // Can't await because the mount blocks while FUSE queries flow through serve().
     this.containerFetch(
-      new Request('http://localhost/mount', { method: 'POST', signal }),
+      new Request('http://localhost/mount', {
+        method: 'POST',
+        signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mounts: guests.map((guest) => ({
+            mountpoint: guest.mountpoint,
+            targetVolume: guest.targetVolume,
+            dataHttpPort: guest.dataHttpPort,
+            invalidationHttpPort: guest.invalidationHttpPort,
+            authToken: guest.authToken,
+          })),
+        }),
+      }),
       4000
     ).catch(() => {
       // Mount request itself failing is not fatal — the health poll below
@@ -1514,8 +1880,20 @@ export class AiryFS extends Container<Env> {
   }
 
   private async setupBridge(signal: AbortSignal): Promise<void> {
+    const guestChannels = this.guestMountRuntime().map((guest) => ({
+      mountpoint: guest.mountpoint,
+      dataTcpPort: guest.dataTcpPort,
+      dataHttpPort: guest.dataHttpPort,
+      invalidationTcpPort: guest.invalidationTcpPort,
+      invalidationHttpPort: guest.invalidationHttpPort,
+    }));
     const setupResp = await this.containerFetch(
-      new Request('http://localhost/setup', { method: 'POST', signal }),
+      new Request('http://localhost/setup', {
+        method: 'POST',
+        signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ guestChannels }),
+      }),
       4000
     );
     if (!setupResp.ok) {
@@ -1595,9 +1973,10 @@ export class AiryFS extends Container<Env> {
   }
 
   private closeRuntimeSockets(): void {
-    const sockets = [this.dataSocket, this.invalidationSocket];
+    const sockets = [this.dataSocket, this.invalidationSocket, ...this.guestSockets];
     this.dataSocket = null;
     this.invalidationSocket = null;
+    this.guestSockets = [];
     for (const socket of sockets) void socket?.close().catch(() => undefined);
   }
 
@@ -1702,6 +2081,142 @@ export class AiryFS extends Container<Env> {
     throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', {
       Allow: 'GET, POST, DELETE',
     });
+  }
+
+  /**
+   * Manage the mount table. `GET /` lists mounts, `PUT /<mountpoint>` grafts a
+   * target volume subtree (optionally creating the target in the same request),
+   * and `DELETE /<mountpoint>` removes a mount and revokes its target credential.
+   */
+  private async handleMounts(request: Request, route: V1Route, _identity: Identity): Promise<Response> {
+    const sql = this.ctx.storage.sql;
+    const method = request.method;
+
+    if (method === 'GET' && route.path === '/') {
+      return Response.json({ volume: route.volume, mounts: listMounts(sql).map(publicMount) });
+    }
+
+    if (method === 'PUT' && route.path !== '/') {
+      const body = await readJsonObject(request);
+      const targetVolume = typeof body.target === 'string' ? body.target.trim() : '';
+      if (!targetVolume) throw new HttpError(400, 'INVALID_MOUNT', 'A "target" volume is required');
+      const targetSubpath = typeof body.subpath === 'string' ? body.subpath : '/';
+      const options = typeof body.options === 'object' && body.options !== null && !Array.isArray(body.options)
+        ? (body.options as Record<string, unknown>)
+        : {};
+
+      if (targetVolume === route.volume) {
+        throw new HttpError(409, 'MOUNT_SELF', 'A volume cannot mount itself');
+      }
+      await this.assertNoMountCycle(route.volume, targetVolume);
+
+      if (body.create === true) {
+        await this.targetStub(targetVolume).ensureVolumeCreated(
+          typeof body.chunkSize === 'number' ? body.chunkSize : undefined,
+          targetVolume,
+        );
+      }
+
+      const secret = this.env.AIRYFS_AUTH_SECRET;
+      let token: string | null = null;
+      let credentialId: string | null = null;
+      if (secret) {
+        const capability = buildCapability(
+          targetVolume,
+          ['read', 'write'],
+          [normalizePath(targetSubpath)],
+          MOUNT_CAPABILITY_TTL_SECONDS,
+        );
+        token = await signCapability(secret, capability);
+        credentialId = capability.id;
+      }
+
+      const record = createMountRow(sql, {
+        mountpoint: route.path,
+        targetVolume,
+        targetSubpath,
+        hostVolume: route.volume,
+        credentialId,
+        token,
+        options,
+      });
+      this.invalidateMounts();
+      await this.ensureStubDirectory(record.mountpoint);
+      return Response.json(publicMount(record), { status: 201 });
+    }
+
+    if (method === 'DELETE' && route.path !== '/') {
+      const record = deleteMountRow(sql, route.path);
+      this.invalidateMounts();
+      if (record.credentialId && this.env.AIRYFS_AUTH_SECRET) {
+        await this.targetStub(record.targetVolume)
+          .revokeMountCredential(record.credentialId)
+          .catch(() => undefined);
+      }
+      return Response.json({ ...publicMount(record), removed: true });
+    }
+
+    throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, PUT, DELETE' });
+  }
+
+  /**
+   * Walk the transitive mount graph rooted at `targetVolume`, rejecting any
+   * chain that leads back to `hostVolume`. Bounded by {@link MAX_MOUNT_HOPS}.
+   */
+  private async assertNoMountCycle(hostVolume: string, targetVolume: string): Promise<void> {
+    const seen = new Set<string>();
+    let frontier = [targetVolume];
+    for (let depth = 0; depth < MAX_MOUNT_HOPS && frontier.length > 0; depth++) {
+      const next: string[] = [];
+      for (const volume of frontier) {
+        if (volume === hostVolume) {
+          throw new HttpError(
+            409,
+            'MOUNT_CYCLE',
+            `Mounting ${targetVolume} would create a cycle back to ${hostVolume}`,
+          );
+        }
+        if (seen.has(volume)) continue;
+        seen.add(volume);
+        const edges = await this.targetStub(volume).listMountRecords();
+        for (const edge of edges) next.push(edge.targetVolume);
+      }
+      frontier = next;
+    }
+  }
+
+  /** Create the load-bearing stub directory (and any missing parents) at a mountpoint. */
+  private async ensureStubDirectory(path: string): Promise<void> {
+    const fs = this.filesystem();
+    const segments = path.split('/').filter(Boolean);
+    const created: string[] = [];
+    const release = await this.access.acquireWrite('/');
+    try {
+      let current = '';
+      for (const segment of segments) {
+        current += `/${segment}`;
+        try {
+          await fs.mkdir(current);
+          created.push(current);
+        } catch (error) {
+          if ((error as { code?: string }).code !== 'EEXIST') throw error;
+        }
+      }
+    } finally {
+      release();
+    }
+    if (created.length > 0) await this.recordMutations(fs, created);
+  }
+
+  /** Trusted RPC: create/initialize a volume so create-and-mount is one request. */
+  async ensureVolumeCreated(chunkSize: number | undefined, volume: string): Promise<void> {
+    this.createVolume(chunkSize);
+    await this.ensureVolumeRegistered(volume);
+  }
+
+  /** Trusted RPC: revoke a mount capability minted on this (target) volume. */
+  async revokeMountCredential(id: string): Promise<void> {
+    revokeCapability(this.ctx.storage.sql, id);
   }
 
   /**
@@ -2409,6 +2924,16 @@ export class AiryFS extends Container<Env> {
           );
         }
 
+        if (v1Route.resource === 'mounts') {
+          return await this.handleMounts(request, v1Route, identity);
+        }
+
+        // Forward path-scoped operations that fall under a mount to the target
+        // volume's DO. Runs before trash/local handling so a mounted subtree is
+        // served entirely by its target volume.
+        const forwarded = await this.forwardMountedRequest(request, url, v1Route);
+        if (forwarded) return forwarded;
+
         if (
           request.method === 'DELETE'
           && (v1Route.resource === 'files' || v1Route.resource === 'directories')
@@ -2858,6 +3383,11 @@ async function requiredAccess(
       case 'sites':
       case 'shares':
         // Publishing exposes volume content publicly: reads status, admin mutates.
+        return method === 'GET'
+          ? { operation: 'read', paths: ['/'] }
+          : { operation: 'admin', paths: ['/'] };
+      case 'mounts':
+        // Mounts graft another volume into this namespace: reads list, admin mutates.
         return method === 'GET'
           ? { operation: 'read', paths: ['/'] }
           : { operation: 'admin', paths: ['/'] };

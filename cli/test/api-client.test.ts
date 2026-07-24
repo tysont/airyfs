@@ -134,6 +134,30 @@ describe('AiryFSClient', () => {
     expect(JSON.parse(String(init?.body))).toEqual({ command: 'cat', stdin: btoa('hi') });
   });
 
+  it('creates, lists, and deletes mounts on the mounts resource', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+      if ((init?.method ?? 'GET') === 'GET') return Response.json({ volume: 'vol', mounts: [] });
+      return Response.json({
+        mountpoint: '/data', targetVolume: 'big', targetSubpath: '/', credentialId: null, options: {}, createdAt: 1,
+        removed: init?.method === 'DELETE' ? true : undefined,
+      });
+    });
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.listMounts();
+    await client.createMount('/data', { target: 'big', subpath: '/', create: true });
+    await client.deleteMount('/data');
+
+    expect(fetchMock.mock.calls[0][0].toString()).toBe('https://example.com/v1/volumes/vol/mounts');
+    const [createUrl, createInit] = fetchMock.mock.calls[1];
+    expect(createUrl.toString()).toBe('https://example.com/v1/volumes/vol/mounts/data');
+    expect(createInit).toMatchObject({
+      method: 'PUT',
+      body: JSON.stringify({ target: 'big', subpath: '/', create: true }),
+    });
+    expect(fetchMock.mock.calls[2][1]).toMatchObject({ method: 'DELETE' });
+  });
+
   it('sends direct filesystem primitive operations without exec', async () => {
     const fetchMock = vi.fn<typeof fetch>(async (url) => {
       if (url.toString().endsWith('/lstat')) return Response.json({ type: 'file' });

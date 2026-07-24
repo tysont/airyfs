@@ -49,10 +49,27 @@ export interface BridgeServers {
   close(): Promise<void>;
 }
 
+/** A guest volume's data + invalidation channels, keyed by its mountpoint. */
+export interface GuestBridgeServers {
+  mountpoint: string;
+  data: BridgeServers;
+  invalidation: BridgeServers;
+}
+
 export interface Bridge {
   data: BridgeServers;
   invalidation: BridgeServers;
+  guests: GuestBridgeServers[];
   close(): Promise<void>;
+}
+
+/** A guest channel pair to bring up alongside the primary volume's bridge. */
+export interface GuestChannelSpec {
+  mountpoint: string;
+  dataTcpPort: number;
+  dataHttpPort: number;
+  invalidationTcpPort: number;
+  invalidationHttpPort: number;
 }
 
 function settleReject(request: PendingRequest, error: Error): void {
@@ -466,14 +483,28 @@ export async function startChannel(tcpPort: number, httpPort: number): Promise<B
   };
 }
 
-export async function startBridge(): Promise<Bridge> {
+export async function startBridge(guestChannels: GuestChannelSpec[] = []): Promise<Bridge> {
   const [data, invalidation] = await Promise.all([
     startChannel(9000, 8080),
     startChannel(9001, 8081),
   ]);
+  const guests: GuestBridgeServers[] = await Promise.all(
+    guestChannels.map(async (spec) => {
+      const [guestData, guestInvalidation] = await Promise.all([
+        startChannel(spec.dataTcpPort, spec.dataHttpPort),
+        startChannel(spec.invalidationTcpPort, spec.invalidationHttpPort),
+      ]);
+      return { mountpoint: spec.mountpoint, data: guestData, invalidation: guestInvalidation };
+    }),
+  );
   return {
     data,
     invalidation,
-    close: async () => Promise.all([data.close(), invalidation.close()]).then(() => undefined),
+    guests,
+    close: async () => {
+      const closers = [data.close(), invalidation.close()];
+      for (const guest of guests) closers.push(guest.data.close(), guest.invalidation.close());
+      await Promise.all(closers);
+    },
   };
 }

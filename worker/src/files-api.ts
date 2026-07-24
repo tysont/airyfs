@@ -30,7 +30,7 @@ export type { DiskUsage };
 
 export interface V1Route {
   volume: string;
-  resource: 'volume' | 'forks' | 'sql' | 'files' | 'directories' | 'trees' | 'tree' | 'operations' | 'exec' | 'usage' | 'usage-history' | 'metrics' | 'quota' | 'trash' | 'services' | 'capabilities' | 'snapshots' | 'uploads' | 'browser-uploads' | 'assets' | 'jobs' | 'schedules' | 'search' | 'changes' | 'webhooks' | 'auth' | 'sites' | 'shares';
+  resource: 'volume' | 'forks' | 'sql' | 'files' | 'directories' | 'trees' | 'tree' | 'operations' | 'exec' | 'usage' | 'usage-history' | 'metrics' | 'quota' | 'trash' | 'services' | 'capabilities' | 'snapshots' | 'uploads' | 'browser-uploads' | 'assets' | 'jobs' | 'schedules' | 'search' | 'changes' | 'webhooks' | 'auth' | 'sites' | 'shares' | 'mounts';
   path: string;
 }
 
@@ -150,7 +150,7 @@ export function parseV1Route(pathname: string): V1Route | null {
   }
 
   const resource = parts[4];
-  if (!['forks', 'sql', 'files', 'directories', 'trees', 'tree', 'operations', 'exec', 'usage', 'usage-history', 'metrics', 'quota', 'trash', 'services', 'capabilities', 'snapshots', 'uploads', 'browser-uploads', 'assets', 'jobs', 'schedules', 'search', 'changes', 'webhooks', 'auth', 'sites', 'shares'].includes(resource)) {
+  if (!['forks', 'sql', 'files', 'directories', 'trees', 'tree', 'operations', 'exec', 'usage', 'usage-history', 'metrics', 'quota', 'trash', 'services', 'capabilities', 'snapshots', 'uploads', 'browser-uploads', 'assets', 'jobs', 'schedules', 'search', 'changes', 'webhooks', 'auth', 'sites', 'shares', 'mounts'].includes(resource)) {
     throw new HttpError(404, 'INVALID_ROUTE', `Unknown volume resource: ${resource}`);
   }
 

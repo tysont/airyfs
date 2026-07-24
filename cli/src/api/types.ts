@@ -418,3 +418,25 @@ export interface MintCapabilityInput {
 export interface MintedCapability extends CapabilityInfo {
   token: string;
 }
+
+export interface MountInfo {
+  mountpoint: string;
+  targetVolume: string;
+  targetSubpath: string;
+  credentialId: string | null;
+  options: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface MountList {
+  volume: string;
+  mounts: MountInfo[];
+}
+
+export interface CreateMountInput {
+  target: string;
+  subpath?: string;
+  create?: boolean;
+  chunkSize?: number;
+  options?: Record<string, unknown>;
+}
