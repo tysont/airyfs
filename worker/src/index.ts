@@ -198,21 +198,31 @@ const GUEST_CONNECT_TIMEOUT_MS = 8_000;
 /**
  * In-container FUSE visibility of mounted subtrees (Phase 2). Disabled.
  *
- * Root cause established by isolation on int (not assumed):
- *   - NOT a platform port/listener cap — binding extra bridge channels
- *     in-process leaves a plain exec stable.
- *   - NOT the DO opening extra getTcpPort connections — two idle connections
+ * Root cause localized on int by discriminator experiments (observed, not
+ * assumed). The trigger is running a second agentfs FUSE daemon in the
+ * container at all; it wedges the whole command-server process (which also
+ * hosts the bridge, so both FUSE data planes stall). Ruled out:
+ *   - NOT a platform port/listener cap — extra in-process bridge channels
  *     leave a plain exec stable.
- *   - NOT the DO guest wiring — with guest channels + frame forwarders active
- *     but the guest agentfs daemon not spawned, a mounted exec succeeds.
- *   - NOT FUSE nesting — spawning the guest daemon at a non-nested /mnt path
- *     hangs the container just the same.
- * The trigger is the guest agentfs daemon under real forwarding traffic through
- * the host DO (Option A). The container's command port then stops responding (a
- * hang: no crash, no container-exit event), so the DO recycles it. Multiplexing
- * ports does not address this; the fix is to move the guest data path off the
- * host DO (Option B: connect directly to the target volume) or to debug the
- * A-proxied agentfs handshake. Direct-path mounts work regardless of this flag.
+ *   - NOT the DO opening extra getTcpPort connections — idle probe connections
+ *     leave a plain exec stable.
+ *   - NOT the DO forwarder wiring — channels + forwarders active with the guest
+ *     daemon NOT spawned: a mounted exec succeeds.
+ *   - NOT FUSE nesting — a guest daemon at a non-nested /mnt path hangs too.
+ *   - NOT the cross-DO RPC hop — a "null forwarder" answering guest frames from
+ *     THIS volume's own SQLite (no RPC) still hangs. So Option B (connect the
+ *     guest bridge directly to the target) would INHERIT the bug, not fix it.
+ *   - NOT the host DO — its /metrics stays responsive throughout the hang.
+ *   - NOT the container tier — standard-2 hangs the same as standard-1.
+ * It is a hang (no crash, no container-exit event). Neither port multiplexing
+ * nor Option B addresses it; re-enabling requires understanding the two-agentfs
+ * -daemon interaction at the agentfs/FUSE level. Direct-path mounts work
+ * regardless of this flag.
+ *
+ * NOTE for re-enablement: exec/job/schedule admission must gate on guest-mount
+ * readiness (or explicitly mark the run mount-degraded). Backgrounding the guest
+ * mount and admitting immediately would let a command see the stub and then have
+ * the mount appear mid-run — probabilistic split-brain.
  */
 const GUEST_FUSE_ENABLED = false;
 const CONTAINER_EXEC_TIMEOUT_MS = 310_000;
@@ -1850,6 +1860,11 @@ export class AiryFS extends Container<Env> {
       await this.connectGuestChannel(guest.invalidationTcpPort, guest.targetVolume, false, signal);
     }
 
+    // Mountpoints whose guest FUSE is not wired this run (feature gated off):
+    // the Container marks their stubs read-only so exec cannot write into a
+    // shadowed local stub.
+    const unavailableMounts = guests.length === 0 ? this.mounts().map((mount) => mount.mountpoint) : [];
+
     // 4. Mount FUSE — fire-and-forget, then poll for readiness.
     // Can't await because the mount blocks while FUSE queries flow through serve().
     this.containerFetch(
@@ -1865,6 +1880,7 @@ export class AiryFS extends Container<Env> {
             invalidationHttpPort: guest.invalidationHttpPort,
             authToken: guest.authToken,
           })),
+          unavailableMounts,
         }),
       }),
       4000

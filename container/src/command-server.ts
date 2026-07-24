@@ -472,10 +472,13 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
       try { mkdirSync(MOUNT_POINT, { recursive: true }); } catch { /* exists */ }
 
       const { buildPrimaryMountCommand, orderMountsByDepth } = await import('./mounts.js');
-      const mountBody = rawMount ? JSON.parse(rawMount) as { mounts?: unknown } : {};
+      const mountBody = rawMount ? JSON.parse(rawMount) as { mounts?: unknown; unavailableMounts?: unknown } : {};
       const guestMounts = orderMountsByDepth(
         Array.isArray(mountBody.mounts) ? mountBody.mounts as Array<{ mountpoint: string; targetVolume: string; dataHttpPort: number; invalidationHttpPort: number; authToken: string }> : [],
       );
+      const unavailableMounts = Array.isArray(mountBody.unavailableMounts)
+        ? (mountBody.unavailableMounts as unknown[]).filter((m): m is string => typeof m === 'string')
+        : [];
 
       fuseExitCode = null;
       const child = exec(buildPrimaryMountCommand(), { env: process.env });
@@ -506,6 +509,21 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
         }
         jsonResponse(res, 504, { ok: false, mounted: false, error: 'FUSE mount did not complete within 30 seconds' });
         return;
+      }
+
+      // Mounts whose guest FUSE is not wired this run keep the DO-written
+      // AIRYFS-MOUNT-UNAVAILABLE.txt marker in their stub. Make the stub
+      // read-only (a kernel-only bind remount — no daemon, so it does not touch
+      // the guest-daemon path that wedges the container) so a blind write in
+      // exec fails with EROFS instead of landing in shadowed local state.
+      for (const mountpoint of unavailableMounts) {
+        const stub = `${MOUNT_POINT}${mountpoint}`;
+        exec(
+          `mount --bind ${stub} ${stub} && mount -o remount,bind,ro ${stub} ${stub}`,
+          (err, stdout, stderr) => {
+            process.stderr.write(`[unavailable-mount] seal ${stub}: ${err ? `ERR ${err.message} ${stderr}` : 'ok'}\n`);
+          },
+        );
       }
 
       // The primary mount is live: report success immediately. Guest mounts are
