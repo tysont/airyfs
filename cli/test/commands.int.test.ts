@@ -212,6 +212,21 @@ describe('commands', () => {
     });
   });
 
+  it('patches a file range in place with write --offset', async () => {
+    const result = await invokeOneShot(['write', '--offset', '3', '/patch.bin'], 'BBBB');
+    expect(result.code).toBe(0);
+    expect(requests).toContainEqual({
+      method: 'PATCH', path: '/v1/volumes/vol/files/patch.bin?offset=3', body: 'BBBB',
+    });
+  });
+
+  it('feeds stdin to a command through the transient path with --stdin-file', async () => {
+    const result = await invokeOneShot(['exec', '--no-stream', '--stdin-file', '-', 'cat'], 'piped stdin');
+    expect(result.code).toBe(7);
+    const exec = requests.slice().reverse().find((request) => request.path === '/v1/volumes/vol/exec');
+    expect(JSON.parse(exec?.body || '{}').stdin).toBe(Buffer.from('piped stdin').toString('base64'));
+  });
+
   it('executes in the session cwd and propagates the remote exit code', async () => {
     const result = await invoke(['exec', '--no-stream', 'git', 'status']);
 
@@ -543,6 +558,10 @@ async function route(
   }
   if (request.method === 'PUT' && url.pathname.startsWith('/v1/volumes/vol/directories/')) {
     response.writeHead(204).end();
+    return;
+  }
+  if (request.method === 'PATCH' && url.pathname.startsWith('/v1/volumes/vol/files/')) {
+    response.writeHead(204, { 'X-AiryFS-Bytes-Written': String(Buffer.byteLength(_body)) }).end();
     return;
   }
   if (request.method === 'PUT' && url.pathname.startsWith('/v1/volumes/vol/files/')) {

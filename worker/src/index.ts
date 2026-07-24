@@ -22,7 +22,7 @@ import {
   handleFilesystemRequest,
   HttpError,
   parseV1Route,
-  readCommandRequest,
+  readExecRequest,
   readJsonObject,
   readJsonObjectBounded,
   readVolumeCreateRequest,
@@ -394,7 +394,7 @@ export class AiryFS extends Container<Env> {
   // ---------------------------------------------------------------------------
 
   /** Execute a shell command in the Container against the FUSE-mounted volume. */
-  async exec(command: string, signal?: AbortSignal): Promise<ExecResult> {
+  async exec(command: string, signal?: AbortSignal, stdin?: string): Promise<ExecResult> {
     if (this.activeExec || this.destroyPromise) {
       throw new HttpError(503, 'EXEC_BUSY', 'Another command or Container lifecycle operation is already running');
     }
@@ -424,7 +424,7 @@ export class AiryFS extends Container<Env> {
           new Request('http://localhost/exec', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command }),
+            body: JSON.stringify(stdin === undefined ? { command } : { command, stdin }),
             signal: AbortSignal.any(commandSignals),
           }),
           4000
@@ -529,7 +529,7 @@ export class AiryFS extends Container<Env> {
    * command runs. The real-command abort `signal` is propagated to the container
    * so aborting it (or the returned stream) terminates the process there.
    */
-  async execStream(command: string, signal?: AbortSignal): Promise<ReadableStream<Uint8Array>> {
+  async execStream(command: string, signal?: AbortSignal, stdin?: string): Promise<ReadableStream<Uint8Array>> {
     if (this.activeExec || this.destroyPromise) {
       throw new HttpError(503, 'EXEC_BUSY', 'Another command or Container lifecycle operation is already running');
     }
@@ -559,7 +559,12 @@ export class AiryFS extends Container<Env> {
       let resp: Awaited<ReturnType<typeof postContainerHttpStream>>;
       try {
         const socket = this.ctx.container!.getTcpPort(4000).connect('0.0.0.0:4000');
-        resp = await postContainerHttpStream(socket, '/exec/stream', { command, id }, commandSignal);
+        resp = await postContainerHttpStream(
+          socket,
+          '/exec/stream',
+          stdin === undefined ? { command, id } : { command, id, stdin },
+          commandSignal,
+        );
       } catch {
         commandAbort.abort();
         await this.quarantineRuntime(generation);
@@ -2586,9 +2591,9 @@ export class AiryFS extends Container<Env> {
             await this.cancelExec(body.id);
             return Response.json({ ok: true });
           }
-          const command = await readCommandRequest(request);
+          const execRequest = await readExecRequest(request);
           if (url.searchParams.get('stream') === 'true') {
-            return new Response(await this.execStream(command, request.signal), {
+            return new Response(await this.execStream(execRequest.command, request.signal, execRequest.stdin), {
               headers: {
                 'Content-Type': 'application/x-ndjson',
                 'Content-Encoding': 'Identity',
@@ -2596,7 +2601,7 @@ export class AiryFS extends Container<Env> {
               },
             });
           }
-          return Response.json(await this.exec(command, request.signal));
+          return Response.json(await this.exec(execRequest.command, request.signal, execRequest.stdin));
         }
 
         if (v1Route.resource === 'usage' && request.method === 'GET') {
@@ -2631,7 +2636,8 @@ export class AiryFS extends Container<Env> {
       }
 
       if (url.pathname === '/exec' && request.method === 'POST') {
-        return Response.json(await this.exec(await readCommandRequest(request), request.signal));
+        const execRequest = await readExecRequest(request);
+        return Response.json(await this.exec(execRequest.command, request.signal, execRequest.stdin));
       }
 
       if (url.pathname === '/destroy' && request.method === 'POST') {

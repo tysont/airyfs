@@ -145,6 +145,24 @@ export class AiryFSClient {
     } as RequestInit & { duplex: 'half' });
   }
 
+  /**
+   * Write `body` into an existing file starting at `offset`, extending the file
+   * when the write runs past its end. Patches bytes in place instead of
+   * replacing the whole file. Resolves to the number of bytes written.
+   */
+  async writeFileRange(path: string, offset: number, body: BodyInit, signal?: AbortSignal): Promise<number> {
+    const url = this.resourceUrl('files', path);
+    url.searchParams.set('offset', String(offset));
+    const response = await this.requestUrl(url, {
+      method: 'PATCH',
+      body,
+      signal,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    const written = response.headers.get('X-AiryFS-Bytes-Written');
+    return written === null ? 0 : Number(written);
+  }
+
   async deleteFile(path: string, permanent = false): Promise<TrashEntry | undefined> {
     const url = this.resourceUrl('files', path);
     if (permanent) url.searchParams.set('permanent', 'true');
@@ -275,25 +293,31 @@ export class AiryFSClient {
     return this.followCommand(job, options);
   }
 
-  /** Execute without durable tracking. Prefer {@link exec} unless immediate admission is required. */
-  execTransient(command: string, signal?: AbortSignal): Promise<ExecResult> {
+  /**
+   * Execute without durable tracking. Prefer {@link exec} unless immediate
+   * admission is required. Optional `stdin` is fed to the process on its
+   * standard input, which is then closed (EOF).
+   */
+  execTransient(command: string, signalOrOptions?: AbortSignal | ExecTransientOptions): Promise<ExecResult> {
+    const options = execTransientOptions(signalOrOptions);
     return this.json<ExecResult>(`${this.volumeBase}/exec`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
-      signal,
+      body: JSON.stringify(execBody(command, options.stdin)),
+      signal: options.signal,
     });
   }
 
   /** Stream without durable tracking. Prefer {@link execStream} for recoverable execution. */
-  async execStreamTransient(command: string, signal?: AbortSignal): Promise<AsyncIterable<ExecEvent>> {
+  async execStreamTransient(command: string, signalOrOptions?: AbortSignal | ExecTransientOptions): Promise<AsyncIterable<ExecEvent>> {
+    const options = execTransientOptions(signalOrOptions);
     const url = new URL(this.url(`${this.volumeBase}/exec`));
     url.searchParams.set('stream', 'true');
     const response = await this.requestUrl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
-      signal,
+      body: JSON.stringify(execBody(command, options.stdin)),
+      signal: options.signal,
     });
     return response.body ? decodeNdjsonStream<ExecEvent>(response.body) : emptyTransientEvents();
   }
@@ -714,6 +738,32 @@ function execOptions(value?: AbortSignal | ExecOptions): ExecOptions {
 function fromBase64(value: string): Uint8Array {
   const binary = atob(value);
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function toBase64(value: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < value.byteLength; i++) binary += String.fromCharCode(value[i]);
+  return btoa(binary);
+}
+
+/** Options for a transient (non-durable) exec: abort signal plus optional stdin. */
+export interface ExecTransientOptions {
+  signal?: AbortSignal;
+  stdin?: Uint8Array | string;
+}
+
+function execTransientOptions(value?: AbortSignal | ExecTransientOptions): ExecTransientOptions {
+  if (!value) return {};
+  return 'aborted' in value && typeof value.addEventListener === 'function'
+    ? { signal: value as AbortSignal }
+    : value as ExecTransientOptions;
+}
+
+/** Build an exec request body, base64-encoding stdin when present. */
+function execBody(command: string, stdin?: Uint8Array | string): Record<string, string> {
+  if (stdin === undefined) return { command };
+  const bytes = typeof stdin === 'string' ? new TextEncoder().encode(stdin) : stdin;
+  return { command, stdin: toBase64(bytes) };
 }
 
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {

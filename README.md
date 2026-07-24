@@ -162,9 +162,11 @@ curl -X POST "$BASE/v1/volumes/$VOLUME/exec" \
 curl "$BASE/v1/volumes/$VOLUME/usage"
 ```
 
-File writes do not create missing parent directories — create the directory first or the write returns `ENOENT`. File responses carry `Content-Length`, `Accept-Ranges`, `ETag`, `Last-Modified`, and `X-AiryFS-Inode`; reads honor `If-None-Match`, `If-Modified-Since`, single byte `Range`, and `If-Range` with correct 304/206/200 semantics. Errors are structured JSON with stable POSIX-style codes mapped to HTTP statuses (`ENOENT` → 404, `EEXIST`/`ENOTEMPTY` → 409, `EINVAL` → 400, `EPERM` → 403, `ENOSPC` → 507).
+File writes do not create missing parent directories — create the directory first or the write returns `ENOENT`. A `PUT` replaces the whole file; a `PATCH` with a `Content-Range: bytes <start>-<end>/*` header (or an `?offset=` query parameter) writes bytes in place starting at that offset, extending the file when the write runs past its end and returning the number of bytes written in `X-AiryFS-Bytes-Written`. This lets a client edit part of a large file without materializing the whole thing. File responses carry `Content-Length`, `Accept-Ranges`, `ETag`, `Last-Modified`, and `X-AiryFS-Inode`; reads honor `If-None-Match`, `If-Modified-Since`, single byte `Range`, and `If-Range` with correct 304/206/200 semantics. Errors are structured JSON with stable POSIX-style codes mapped to HTTP statuses (`ENOENT` → 404, `EEXIST`/`ENOTEMPTY` → 409, `EINVAL` → 400, `EPERM` → 403, `ENOSPC` → 507).
 
-The full v1 surface covers volume lifecycle (`PUT` to create, `DELETE` to permanently delete), files, directories, path operations (rename, copy, symlink, hard link, truncate, touch, chmod, append, checksum, du), tree archives, exec (buffered and streaming NDJSON), resumable checksummed uploads, browser uploads, content-addressed assets, snapshots and forks, scoped application SQL, durable jobs and logs, schedules, change feeds, webhooks, search, quotas, auth and capabilities, sites and shares, usage, usage history, and Prometheus metrics.
+Buffered and streaming `exec` accept an optional base64 `stdin` field alongside `command`; the bytes are fed to the process on its standard input, which is then closed so readers observe EOF instead of blocking until the command deadline.
+
+The full v1 surface covers volume lifecycle (`PUT` to create, `DELETE` to permanently delete), files (whole-file `PUT` and in-place ranged `PATCH`), directories, path operations (rename, copy, symlink, hard link, truncate, touch, chmod, append, checksum, du), tree archives, exec (buffered and streaming NDJSON, with optional stdin), resumable checksummed uploads, browser uploads, content-addressed assets, snapshots and forks, scoped application SQL, durable jobs and logs, schedules, change feeds, webhooks, search, quotas, auth and capabilities, sites and shares, usage, usage history, and Prometheus metrics.
 
 ### Workers RPC
 
@@ -245,7 +247,7 @@ if (change) console.log(change.type, change.oldPath, change.path);
 controller.abort();
 ```
 
-The client exposes files, directories, metadata, timestamps, permissions, symbolic and hard links, bounded append, subtree usage, tree archives, buffered and streaming exec, resumable upload primitives, checksums, durable jobs and logs, snapshots, change feeds, auth and capabilities, usage, diagnostics, lifecycle, KV state, and scoped application SQL. High-level helpers manage long-poll cursors, job output, exec IDs, and resumable `Blob` uploads.
+The client exposes files (whole-file writes and in-place ranged writes via `writeFileRange`), directories, metadata, timestamps, permissions, symbolic and hard links, bounded append, subtree usage, tree archives, buffered and streaming exec (transient variants accept optional stdin), resumable upload primitives, checksums, durable jobs and logs, snapshots, change feeds, auth and capabilities, usage, diagnostics, lifecycle, KV state, and scoped application SQL. High-level helpers manage long-poll cursors, job output, exec IDs, and resumable `Blob` uploads.
 
 ### CLI
 
@@ -275,7 +277,7 @@ A session stores an endpoint, volume, bearer token, and remote working directory
 
 The command surface spans navigation, inspection, mutation, resumable and transactional transfers, trash/undo/snapshot recovery, durable and interactive (`--pty`) execution, jobs, schedules, watches, webhooks, preview services, find/glob/grep/sql/kv, publishing (`site`, `share`, `asset`, `browser-upload`), volume operations (`volume create`/`info`/`list`/`fork`/`quota`, and `volume delete` to permanently remove a volume), and auth. Global options: `--session`, `--json`, `--no-color`, `--quiet`.
 
-**Durable exec by default.** CLI `exec` persists one command ID before execution, retries transient submission and polling failures without changing the idempotency key, replays paginated output from durable logs, and never automatically replays an admitted command whose outcome is ambiguous. Reusing an idempotency key with a different command or working directory returns `409 IDEMPOTENCY_CONFLICT`. `--no-wait` selects the lower-level transient route and fails fast with `EXEC_BUSY` when the single execution slot is held. The CLI also recognizes exact read-only argv (`cat`, `ls`, `pwd`, `readlink` with safe relative paths) and serves them straight from the Durable Object without a Container; `--container` disables that fast path.
+**Durable exec by default.** CLI `exec` persists one command ID before execution, retries transient submission and polling failures without changing the idempotency key, replays paginated output from durable logs, and never automatically replays an admitted command whose outcome is ambiguous. Reusing an idempotency key with a different command or working directory returns `409 IDEMPOTENCY_CONFLICT`. `--no-wait` selects the lower-level transient route and fails fast with `EXEC_BUSY` when the single execution slot is held. `--stdin-file <path>` feeds a local file (or `-` for the process's own stdin) to the command on standard input, running through the transient route that carries stdin. The CLI also recognizes exact read-only argv (`cat`, `ls`, `pwd`, `readlink` with safe relative paths) and serves them straight from the Durable Object without a Container; `--container` disables that fast path. `write --offset <bytes>` patches stdin into an existing file at a byte offset instead of replacing it.
 
 ## What you can build
 
@@ -295,7 +297,7 @@ AiryFS is *not* optimized for workloads dominated by thousands of sequential met
 | Persistent storage | Files, directories, links, POSIX metadata, and file chunks in Durable Object SQLite |
 | Direct file access | Binary-safe streaming reads and writes without starting the Container |
 | HTTP semantics | GET, HEAD, single byte ranges, content length, last-modified, inode headers, structured errors |
-| File mutations | Atomic replacement, append, delete, copy, rename, truncate, touch, chmod, true hard links |
+| File mutations | Atomic replacement, in-place ranged writes, append, delete, copy, rename, truncate, touch, chmod, true hard links |
 | Directory operations | Create, list with metadata, remove, recursive remove, tree views, logical usage |
 | Authentication | Optional root bearer auth, signed expiring capabilities scoped by volume/operation/path, per-volume passwords minting scoped tokens |
 | Web hosting | Opt-in static sites, atomic deploy with rollback, immutable assets, browser uploads, expiring shares |
@@ -444,7 +446,7 @@ Practical guidance:
 
 AiryFS coordinates direct access and FUSE mutations, but it does not implement every POSIX or transactional guarantee. The precise contract:
 
-- **Locking.** File-content reads, streaming reads, stat, directory listing, RPC `readSymlink`, and direct mutations use fair path-scoped locks. FUSE writes take a volume-wide lock because Hrana SQL statements do not carry normalized filesystem paths. (The HTTP `operations/readlink` endpoint does not currently hold a read lock and may interleave with mutations.)
+- **Locking.** File-content reads, streaming reads, stat, directory listing, symlink resolution (RPC `readSymlink` and the HTTP `operations/readlink` endpoint), and direct mutations use fair path-scoped locks. FUSE writes take a volume-wide lock because Hrana SQL statements do not carry normalized filesystem paths.
 - **Cross-path visibility.** FUSE-committed writes are immediately visible to the direct path. Direct-path mutations reach mounted FUSE clients asynchronously: bounded one-second entry/attribute caches, writeback caching disabled in bounded mode, and journal polling every 100 ms in batches of up to 256, with invalidations delivered on a transport channel independent of ordinary FUSE SQL.
 - **Atomicity.** HTTP file replacement is atomic after upload completion. Directory archive imports stage the complete tree and publish under a write lock, rolling back on failed publication. Resumable uploads enforce sequential offsets, 1 MiB chunks, per-chunk SHA-256, and full-file SHA-256 before atomic publication. Snapshot create/diff/restore/delete/clone use whole-volume coordination; restore and clone replace the live namespace and recycle attached compute.
 - **Open-inode leases.** A live remote FUSE handle pins its inode in `fs_open_inode`, so a direct unlink or streaming rename-over drops the pathname immediately but retains the inode and data until the handle closes or its 120-second lease expires. Heartbeats renew live handles and abort the mount if renewal fails, so a handle never outlasts its lease; stale leases from vanished mounts are reaped lazily. See `docs/OPEN_INODE_LEASES.md`.

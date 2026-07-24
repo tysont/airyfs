@@ -8,6 +8,7 @@ import {
   access,
   link,
   mkdir as mkdirLocal,
+  readFile as readFileLocal,
   rename as renameLocal,
   rm as removeLocal,
   stat as statLocal,
@@ -545,10 +546,22 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
 
   program.command('write')
     .argument('<remote>')
+    .option('--offset <bytes>', 'patch bytes in place at this offset instead of replacing the file')
     .description('Write stdin to a remote file')
-    .action(async (remote, _options, command) => perform(runtime, command, async (context) => {
+    .action(async (remote, options, command) => perform(runtime, command, async (context) => {
       if (context.shellMode) throw new ConfigError('`write` cannot consume stdin inside `airyfs shell`; use `put` instead');
       const remotePath = context.path(remote);
+      if (options.offset !== undefined) {
+        const offset = parseByteOffset(options.offset);
+        const written = await context.client().writeFileRange(
+          remotePath, offset, context.stdin as NonNullable<RequestInit['body']>,
+        );
+        context.output.success(
+          `Wrote ${written} bytes to ${remotePath} at offset ${offset}`,
+          { remote: remotePath, offset, bytes: written },
+        );
+        return;
+      }
       await context.client().writeFile(remotePath, context.stdin as NonNullable<RequestInit['body']>);
       context.output.success(`Wrote ${remotePath}`, { remote: remotePath });
     }));
@@ -857,6 +870,35 @@ function firstLineEnd(data: Uint8Array, lines: number): number | null {
     if (data[index] === 10 && --remaining === 0) return index + 1;
   }
   return null;
+}
+
+/** Largest stdin payload the CLI will read and send with a transient exec. */
+const MAX_EXEC_STDIN_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Resolve the optional `--stdin-file` argument to raw bytes. `-` reads the
+ * process's standard input (unavailable inside `airyfs shell`); any other value
+ * is a local file path. Returns undefined when the option was not provided.
+ */
+async function resolveExecStdin(context: CommandContext, path: string | undefined): Promise<Uint8Array | undefined> {
+  if (path === undefined) return undefined;
+  if (path === '-') {
+    if (context.shellMode) throw new ConfigError('`--stdin-file -` cannot consume stdin inside `airyfs shell`');
+    return readBoundedInput(context.stdin, MAX_EXEC_STDIN_BYTES);
+  }
+  const bytes = await readFileLocal(path);
+  if (bytes.byteLength > MAX_EXEC_STDIN_BYTES) {
+    throw new ConfigError(`stdin file exceeds ${MAX_EXEC_STDIN_BYTES} bytes`);
+  }
+  return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+function parseByteOffset(value: string): number {
+  const offset = Number(value);
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new ConfigError('`--offset` must be a non-negative integer');
+  }
+  return offset;
 }
 
 async function readBoundedInput(stream: NodeJS.ReadableStream, limit: number): Promise<Uint8Array> {
@@ -1261,13 +1303,23 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
     .option('--pty', 'run interactively in a remote pseudo-terminal')
     .option('--container', 'force execution through the Container instead of a direct read-only fast path')
     .option('--idempotency-key <key>', 'reuse the same durable command across submission retries')
+    .option('--stdin-file <path>', 'feed a local file (or "-" for stdin) to the command on standard input')
     .option('--timeout <duration>', 'maximum Container startup time for --pty', '90s')
     .description('Execute a command in the volume Container')
     .action(async (parts: string[], options, command) => perform(runtime, command, async (context) => {
       if (!options.wait && options.idempotencyKey) {
         throw new ConfigError('`--idempotency-key` cannot be combined with `--no-wait`');
       }
-      if (!options.container && !options.pty && await tryDirectReadOnlyExec(context, runtime, parts)) return;
+      // stdin is only carried on the transient (direct) exec path, so it cannot
+      // combine with durable idempotency keys or an interactive PTY.
+      const stdin = await resolveExecStdin(context, options.stdinFile);
+      if (stdin !== undefined && options.pty) {
+        throw new ConfigError('`--stdin-file` cannot be combined with `--pty`');
+      }
+      if (stdin !== undefined && options.idempotencyKey) {
+        throw new ConfigError('`--stdin-file` cannot be combined with `--idempotency-key`');
+      }
+      if (!options.container && !options.pty && stdin === undefined && await tryDirectReadOnlyExec(context, runtime, parts)) return;
       const commandText = commandForExec(parts);
       const remoteDirectory = context.cwd === '/' ? '/volume' : `/volume${context.cwd}`;
       const fullCommand = `cd -- ${shellQuote(remoteDirectory)} && ${commandText}`;
@@ -1286,14 +1338,15 @@ function registerExecCommand(program: Command, runtime: Runtime): void {
           return;
         }
         if (streaming) {
-          await runStreamingExec(context, runtime, fullCommand, spinner, !options.wait, options.idempotencyKey);
+          // stdin forces the transient path, which is the only one that carries it.
+          await runStreamingExec(context, runtime, fullCommand, spinner, !options.wait || stdin !== undefined, options.idempotencyKey, stdin);
           return;
         }
-        const result = options.wait
+        const result = options.wait && stdin === undefined
           ? await context.client().exec(fullCommand, {
             idempotencyKey: options.idempotencyKey,
           })
-          : await context.client().execTransient(fullCommand);
+          : await context.client().execTransient(fullCommand, { stdin });
         spinner?.stop();
         if (context.output.json) {
           context.output.value(result);
@@ -1408,6 +1461,7 @@ async function runStreamingExec(
   spinner: ReturnType<typeof ora> | null,
   transient = false,
   idempotencyKey?: string,
+  stdin?: Uint8Array,
 ): Promise<void> {
   const controller = new AbortController();
   let startId: string | undefined;
@@ -1424,7 +1478,7 @@ async function runStreamingExec(
 
   try {
     const events = transient
-      ? await context.client().execStreamTransient(fullCommand, controller.signal)
+      ? await context.client().execStreamTransient(fullCommand, { signal: controller.signal, stdin })
       : await context.client().execStream(fullCommand, { signal: controller.signal, idempotencyKey });
     for await (const event of events) {
       if (event.type === 'start') {

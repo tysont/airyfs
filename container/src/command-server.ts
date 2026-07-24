@@ -12,6 +12,8 @@ import { createServiceServer, SERVICE_CONTROL_PORT } from './service-server.js';
 
 const PORT = 4000;
 const MOUNT_POINT = '/volume';
+/** Cap decoded stdin so a single request cannot exhaust container memory. */
+const MAX_STDIN_BYTES = 10 * 1024 * 1024;
 const MOUNT_POLL_INTERVAL_MS = 1000;
 const MOUNT_POLL_MAX_ATTEMPTS = 30;
 const EXEC_TIMEOUT_MS = 300_000;
@@ -67,6 +69,37 @@ function jsonResponse(res: ServerResponse, status: number, value: unknown, heade
   res.end(JSON.stringify(value));
 }
 
+/** Signals a rejected stdin payload so the caller can answer 400 instead of 500. */
+class StdinError extends Error {}
+
+/**
+ * Decode the optional base64 `stdin` field. Returns null when absent so callers
+ * can still close stdin (EOF) without feeding any bytes.
+ */
+function decodeStdin(value: unknown): Buffer | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw new StdinError('"stdin" must be a base64 string when provided');
+  const decoded = Buffer.from(value, 'base64');
+  // Buffer.from silently drops invalid input; re-encoding catches non-base64.
+  if (decoded.toString('base64').replace(/=+$/, '') !== value.replace(/=+$/, '')) {
+    throw new StdinError('"stdin" must be canonical base64');
+  }
+  if (decoded.byteLength > MAX_STDIN_BYTES) {
+    throw new StdinError(`stdin exceeds ${MAX_STDIN_BYTES} bytes`);
+  }
+  return decoded;
+}
+
+/** Feed optional bytes to a child's stdin then close it so readers see EOF. */
+function writeStdin(child: ChildProcess, data: Buffer | null): void {
+  const stdin = child.stdin;
+  if (!stdin) return;
+  // A broken pipe (command never read stdin and already exited) is harmless.
+  stdin.on('error', () => { /* ignore EPIPE */ });
+  if (data && data.byteLength > 0) stdin.end(data);
+  else stdin.end();
+}
+
 /**
  * Build the command server without listening. The caller decides when (and
  * whether) to bind a port, which keeps the module importable from tests.
@@ -112,6 +145,7 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
 
       const body = await readBody(req);
       let command: string;
+      let stdin: Buffer | null;
       try {
         const parsed = JSON.parse(body);
         command = parsed.command;
@@ -119,7 +153,12 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
           jsonResponse(res, 400, { error: 'Missing "command" string in request body' });
           return;
         }
-      } catch {
+        stdin = decodeStdin(parsed.stdin);
+      } catch (err) {
+        if (err instanceof StdinError) {
+          jsonResponse(res, 400, { error: err.message });
+          return;
+        }
         jsonResponse(res, 400, { error: 'Invalid JSON in request body' });
         return;
       }
@@ -145,6 +184,9 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
         terminate: () => { try { child.kill('SIGTERM'); } catch { /* already gone */ } },
       };
       slot.active = execution;
+      // Always close stdin so commands that read it observe EOF instead of hanging
+      // until the exec timeout; feed the supplied bytes first when present.
+      writeStdin(child, stdin);
     })();
   }
 
@@ -156,6 +198,7 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
       const body = await readBody(req);
       let command: string;
       let requestedId: unknown;
+      let stdin: Buffer | null;
       try {
         const parsed = JSON.parse(body);
         command = parsed.command;
@@ -168,7 +211,12 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
           jsonResponse(res, 400, { error: '"id" must be a string when provided' });
           return;
         }
-      } catch {
+        stdin = decodeStdin(parsed.stdin);
+      } catch (err) {
+        if (err instanceof StdinError) {
+          jsonResponse(res, 400, { error: err.message });
+          return;
+        }
         jsonResponse(res, 400, { error: 'Invalid JSON in request body' });
         return;
       }
@@ -182,8 +230,10 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
         cwd,
         env: execEnv(),
         detached: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
+      // Close stdin (after feeding supplied bytes) so readers see EOF promptly.
+      writeStdin(child, stdin);
 
       let timedOut = false;
       let finalized = false;

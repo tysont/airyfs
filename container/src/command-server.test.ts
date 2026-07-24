@@ -261,6 +261,72 @@ test('buffered /exec still returns a single JSON object', async () => {
   assert.deepEqual(await response.json(), { exitCode: 3, stdout: 'hi', stderr: '' });
 });
 
+test('feeds base64 stdin to a streaming command', async () => {
+  const base = await start();
+  const response = await fetch(`${base}/exec/stream`, {
+    method: 'POST',
+    body: JSON.stringify({ command: 'cat', id: 'stdin-run', stdin: Buffer.from('piped input').toString('base64') }),
+  });
+  const events = await readEvents(response);
+  const stdout = events.filter((event) => event.type === 'stdout')
+    .map((event) => Buffer.from(event.data!, 'base64').toString()).join('');
+  assert.equal(stdout, 'piped input');
+  assert.equal(events.at(-1)!.exitCode, 0);
+});
+
+test('preserves arbitrary stdin bytes through base64', async () => {
+  const base = await start();
+  const payload = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
+  const response = await fetch(`${base}/exec/stream`, {
+    method: 'POST',
+    body: JSON.stringify({ command: 'cat', stdin: payload.toString('base64') }),
+  });
+  const events = await readEvents(response);
+  const bytes = Buffer.concat(
+    events.filter((event) => event.type === 'stdout').map((event) => Buffer.from(event.data!, 'base64')),
+  );
+  assert.deepEqual(Uint8Array.from(bytes), Uint8Array.from(payload));
+});
+
+test('closes stdin so a reader sees EOF instead of hanging', async () => {
+  const base = await start();
+  // With no stdin supplied, `cat` must still terminate promptly at EOF.
+  const response = await fetch(`${base}/exec/stream`, {
+    method: 'POST',
+    body: JSON.stringify({ command: 'cat', id: 'eof-run' }),
+  });
+  const events = await readEvents(response);
+  assert.equal(events.at(-1)!.type, 'exit');
+  assert.equal(events.at(-1)!.exitCode, 0);
+});
+
+test('feeds base64 stdin to a buffered command', async () => {
+  const base = await start();
+  const response = await fetch(`${base}/exec`, {
+    method: 'POST',
+    body: JSON.stringify({ command: 'cat', stdin: Buffer.from('buffered in').toString('base64') }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { exitCode: 0, stdout: 'buffered in', stderr: '' });
+});
+
+test('rejects non-canonical base64 stdin with 400', async () => {
+  const base = await start();
+  const bad = await fetch(`${base}/exec/stream`, {
+    method: 'POST',
+    body: JSON.stringify({ command: 'cat', stdin: 'not*base64' }),
+  });
+  assert.equal(bad.status, 400);
+  await bad.text();
+
+  const badType = await fetch(`${base}/exec`, {
+    method: 'POST',
+    body: JSON.stringify({ command: 'cat', stdin: 42 }),
+  });
+  assert.equal(badType.status, 400);
+  await badType.text();
+});
+
 test('ping remains responsive while a command is running', async () => {
   const base = await start();
   const response = await fetch(`${base}/exec/stream`, {

@@ -474,6 +474,86 @@ export async function writeFileStream(
   }
 }
 
+/**
+ * Determine the byte offset for a random-access (PATCH) write. Prefers a
+ * `Content-Range: bytes <start>-<end>/*` header (the end and any declared
+ * Content-Length must agree with it), and falls back to an `offset` query
+ * parameter. Throws a 400 when neither is present or they are inconsistent.
+ */
+export function parseWriteOffset(request: Request): number {
+  const contentRange = request.headers.get('Content-Range');
+  if (contentRange) {
+    const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(contentRange.trim());
+    if (!match) {
+      throw new HttpError(400, 'INVALID_RANGE', 'Content-Range must be "bytes <start>-<end>/*"');
+    }
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) {
+      throw new HttpError(400, 'INVALID_RANGE', 'Content-Range bounds are not satisfiable');
+    }
+    const declared = Number(request.headers.get('Content-Length'));
+    if (Number.isFinite(declared) && declared > 0 && declared !== end - start + 1) {
+      throw new HttpError(400, 'INVALID_RANGE', 'Content-Length does not match the Content-Range span');
+    }
+    return start;
+  }
+  const offsetParam = new URL(request.url).searchParams.get('offset');
+  if (offsetParam !== null) {
+    const offset = Number(offsetParam);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new HttpError(400, 'INVALID_ARGUMENT', 'offset must be a non-negative integer');
+    }
+    return offset;
+  }
+  throw new HttpError(400, 'INVALID_ARGUMENT', 'A Content-Range header or offset query parameter is required');
+}
+
+/**
+ * Write a request body into an existing file starting at `offset`, extending the
+ * file when the write runs past its current end. Unlike {@link writeFileStream}
+ * this patches bytes in place rather than replacing the whole file, so callers
+ * can edit large files without materializing them. Returns the bytes written.
+ */
+export async function writeFileRange(
+  fs: FileSystem,
+  path: string,
+  offset: number,
+  stream: ReadableStream<Uint8Array> | null,
+  access?: VolumeAccessCoordinator,
+): Promise<number> {
+  return withWrite(access, path, async () => {
+    const handle = await fs.open(path);
+    const stats = await handle.fstat();
+    if (!stats.isFile()) {
+      throw Object.assign(new Error(`EISDIR: illegal operation on '${path}'`), { code: 'EISDIR', path });
+    }
+    let position = offset;
+    if (stream) {
+      const reader = stream.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value.byteLength === 0) continue;
+          for (let chunkOffset = 0; chunkOffset < value.byteLength; chunkOffset += WRITE_CHUNK_SIZE) {
+            const chunk = value.subarray(chunkOffset, chunkOffset + WRITE_CHUNK_SIZE);
+            await handle.pwrite(position, Buffer.from(chunk));
+            position += chunk.byteLength;
+          }
+        }
+      } catch (error) {
+        await reader.cancel(error).catch(() => undefined);
+        throw error;
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    await handle.fsync();
+    return position - offset;
+  });
+}
+
 export async function appendFileData(
   fs: FileSystem,
   path: string,
@@ -554,6 +634,31 @@ export async function readCommandRequest(request: Request): Promise<string> {
   return requireString(body.command, 'command');
 }
 
+/** Largest base64-encoded stdin payload accepted for a single exec request. */
+export const MAX_EXEC_STDIN_JSON_BYTES = Math.ceil(10 * 1024 * 1024 * 4 / 3) + 64 * 1024;
+
+export interface ExecRequest {
+  command: string;
+  stdin?: string;
+}
+
+/**
+ * Parse an exec request body: a required `command` plus an optional base64
+ * `stdin` payload fed to the process on the standard input stream.
+ */
+export async function readExecRequest(request: Request): Promise<ExecRequest> {
+  const body = await readJsonObjectBounded(request, MAX_EXEC_STDIN_JSON_BYTES);
+  const command = requireString(body.command, 'command');
+  if (body.stdin === undefined || body.stdin === null) return { command };
+  if (typeof body.stdin !== 'string') {
+    throw new HttpError(400, 'INVALID_ARGUMENT', '"stdin" must be a base64 string');
+  }
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.stdin)) {
+    throw new HttpError(400, 'INVALID_ARGUMENT', '"stdin" must be canonical base64');
+  }
+  return { command, stdin: body.stdin };
+}
+
 /** Parse a JSON object request body, rejecting malformed JSON with a stable error. */
 export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
   return readJson<Record<string, unknown>>(request);
@@ -609,12 +714,18 @@ export async function handleFilesystemRequest(
         await onMutation?.([route.path]);
         return new Response(null, { status: 204 });
       }
+      if (request.method === 'PATCH') {
+        const offset = parseWriteOffset(request);
+        const written = await writeFileRange(fs, route.path, offset, request.body, access);
+        await onMutation?.([route.path]);
+        return new Response(null, { status: 204, headers: { 'X-AiryFS-Bytes-Written': String(written) } });
+      }
       if (request.method === 'DELETE') {
         await withWrite(access, route.path, () => fs.unlink(route.path));
         await onMutation?.([route.path]);
         return new Response(null, { status: 204 });
       }
-      throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, HEAD, PUT, DELETE' });
+      throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET, HEAD, PUT, PATCH, DELETE' });
     }
 
     if (route.resource === 'browser-uploads') {
@@ -675,7 +786,8 @@ export async function handleFilesystemRequest(
         return new Response(null, { status: 204 });
       }
       if (operation === 'readlink') {
-        return Response.json({ target: await fs.readlink(requireString(body.path, 'path')) });
+        const path = normalizePath(requireString(body.path, 'path'));
+        return Response.json({ target: await withRead(access, path, () => fs.readlink(path)) });
       }
       if (operation === 'checksum') {
         return Response.json(await sha256Path(fs, requireString(body.path, 'path'), access));

@@ -110,6 +110,30 @@ describe('AiryFSClient', () => {
     expect(init).toMatchObject({ method: 'POST', body: JSON.stringify({ from: '/from', to: '/to' }) });
   });
 
+  it('patches a file range via PATCH and returns the bytes written', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(null, { status: 204, headers: { 'X-AiryFS-Bytes-Written': '4' } }),
+    );
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    expect(await client.writeFileRange('/patch.bin', 3, 'BBBB')).toBe(4);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url.toString()).toBe('https://example.com/v1/volumes/vol/files/patch.bin?offset=3');
+    expect(init).toMatchObject({ method: 'PATCH', body: 'BBBB' });
+  });
+
+  it('base64-encodes stdin on transient exec requests', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({ commandId: 'run', exitCode: 0, stdout: 'hi', stderr: '' }),
+    );
+    const client = new AiryFSClient('https://example.com', 'vol', fetchMock);
+
+    await client.execTransient('cat', { stdin: 'hi' });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toEqual({ command: 'cat', stdin: btoa('hi') });
+  });
+
   it('sends direct filesystem primitive operations without exec', async () => {
     const fetchMock = vi.fn<typeof fetch>(async (url) => {
       if (url.toString().endsWith('/lstat')) return Response.json({ type: 'file' });

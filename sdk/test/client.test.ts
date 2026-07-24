@@ -155,6 +155,43 @@ describe('AiryFSClient', () => {
       && request.body === JSON.stringify({ path: '/file', data: 'AP8=' }))).toBe(true);
   });
 
+  it('patches a file range with PATCH and reports the bytes written', async () => {
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
+    const client = new AiryFSClient('https://example.com', 'vol', {
+      fetch: async (input, init) => {
+        requests.push({ url: input.toString(), method: init?.method ?? 'GET', body: init?.body });
+        return new Response(null, { status: 204, headers: { 'X-AiryFS-Bytes-Written': '4' } });
+      },
+    });
+
+    expect(await client.writeFileRange('/patch.bin', 3, 'BBBB')).toBe(4);
+    expect(requests).toEqual([{
+      url: 'https://example.com/v1/volumes/vol/files/patch.bin?offset=3',
+      method: 'PATCH',
+      body: 'BBBB',
+    }]);
+  });
+
+  it('base64-encodes stdin on transient exec requests', async () => {
+    const bodies: string[] = [];
+    const client = new AiryFSClient('https://example.com', 'vol', {
+      fetch: async (input, init) => {
+        bodies.push(String(init?.body));
+        const url = input.toString();
+        if (url.includes('stream=true')) {
+          return new Response('{"type":"start","id":"run"}\n{"type":"exit","id":"run","exitCode":0}\n');
+        }
+        return Response.json({ commandId: 'run', exitCode: 0, stdout: 'hi', stderr: '' });
+      },
+    });
+
+    await client.execTransient('cat', { stdin: 'hi' });
+    for await (const _ of await client.execStreamTransient('cat', { stdin: Uint8Array.from([1, 2, 3]) })) { /* drain */ }
+
+    expect(JSON.parse(bodies[0])).toEqual({ command: 'cat', stdin: btoa('hi') });
+    expect(JSON.parse(bodies[1])).toEqual({ command: 'cat', stdin: btoa('\u0001\u0002\u0003') });
+  });
+
   it('issues a DELETE to permanently remove a volume', async () => {
     const requests: Array<{ url: string; method: string }> = [];
     const client = new AiryFSClient('https://example.com', 'my volume', {

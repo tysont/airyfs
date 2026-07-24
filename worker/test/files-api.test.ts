@@ -12,9 +12,12 @@ import {
   HttpError,
   latestFileVersion,
   parseV1Route,
+  parseWriteOffset,
   readCommandRequest,
+  readExecRequest,
   readVolumeCreateRequest,
   VolumeAccessCoordinator,
+  writeFileRange,
   writeFileStream,
   type V1Route,
 } from '../src/files-api';
@@ -468,12 +471,12 @@ describe('filesystem HTTP API', () => {
 
   it('returns client errors for invalid methods, operations, and exec bodies', async () => {
     const method = await handleFilesystemRequest(
-      new Request('http://localhost', { method: 'PATCH' }),
+      new Request('http://localhost', { method: 'POST' }),
       route('files', '/x'),
       fs
     );
     expect(method?.status).toBe(405);
-    expect(method?.headers.get('Allow')).toBe('GET, HEAD, PUT, DELETE');
+    expect(method?.headers.get('Allow')).toBe('GET, HEAD, PUT, PATCH, DELETE');
 
     const operation = await handleFilesystemRequest(
       new Request('http://localhost', { method: 'POST', body: '{}' }),
@@ -507,6 +510,93 @@ describe('filesystem HTTP API', () => {
     );
     expect(response?.status).toBe(409);
     expect(await response?.json()).toMatchObject({ error: { code: 'SYMLINK_NOT_RESOLVED' } });
+  });
+
+  it('patches bytes in place at an offset without rewriting the whole file', async () => {
+    await fs.writeFile('/patch.bin', Buffer.from('AAAAAAAAAA'));
+    const mutations: string[][] = [];
+    const response = await handleFilesystemRequest(
+      new Request('http://localhost/v1/volumes/test/files/patch.bin?offset=3', {
+        method: 'PATCH',
+        body: Uint8Array.from(Buffer.from('BBBB')),
+      }),
+      route('files', '/patch.bin'),
+      fs,
+      undefined,
+      async (paths) => { mutations.push(paths); },
+    );
+    expect(response?.status).toBe(204);
+    expect(response?.headers.get('X-AiryFS-Bytes-Written')).toBe('4');
+    expect(await fs.readFile('/patch.bin', 'utf8')).toBe('AAABBBBAAA');
+    expect(mutations).toEqual([['/patch.bin']]);
+  });
+
+  it('extends a file when a ranged write runs past its end', async () => {
+    await fs.writeFile('/grow.bin', Buffer.from('123'));
+    const written = await writeFileRange(fs, '/grow.bin', 5, new Response(Buffer.from('XY')).body);
+    expect(written).toBe(2);
+    const bytes = new Uint8Array(await fs.readFile('/grow.bin'));
+    expect(bytes.length).toBe(7);
+    expect(bytes.subarray(0, 3)).toEqual(Uint8Array.from(Buffer.from('123')));
+    expect(bytes.subarray(5)).toEqual(Uint8Array.from(Buffer.from('XY')));
+  });
+
+  it('accepts a Content-Range header and rejects mismatched or missing offsets', async () => {
+    expect(parseWriteOffset(new Request('http://localhost', {
+      method: 'PATCH', headers: { 'Content-Range': 'bytes 4-7/*' },
+    }))).toBe(4);
+    expect(parseWriteOffset(new Request('http://localhost?offset=9', { method: 'PATCH' }))).toBe(9);
+    expect(() => parseWriteOffset(new Request('http://localhost', { method: 'PATCH' })))
+      .toThrow(HttpError);
+    expect(() => parseWriteOffset(new Request('http://localhost', {
+      method: 'PATCH', headers: { 'Content-Range': 'bytes 5-2/*' },
+    }))).toThrow(HttpError);
+    expect(() => parseWriteOffset(new Request('http://localhost?offset=-1', { method: 'PATCH' })))
+      .toThrow(HttpError);
+  });
+
+  it('rejects a ranged write to a missing file with 404', async () => {
+    const response = await handleFilesystemRequest(
+      new Request('http://localhost?offset=0', { method: 'PATCH', body: Uint8Array.from([1]) }),
+      route('files', '/absent.bin'),
+      fs,
+    );
+    expect(response?.status).toBe(404);
+    expect(await response?.json()).toMatchObject({ error: { code: 'ENOENT' } });
+  });
+
+  it('holds a read lock while resolving a symlink target', async () => {
+    await fs.symlink('/target.txt', '/link');
+    const access = new VolumeAccessCoordinator();
+    const releaseWriter = await access.acquireWrite('/link');
+    let resolved = false;
+    const readlink = handleFilesystemRequest(
+      new Request('http://localhost', { method: 'POST', body: JSON.stringify({ path: '/link' }) }),
+      route('operations', '/readlink'),
+      fs,
+      access,
+    ).then((response) => { resolved = true; return response; });
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    releaseWriter();
+    const response = await readlink;
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({ target: '/target.txt' });
+  });
+
+  it('parses an optional base64 stdin field on exec requests', async () => {
+    await expect(readExecRequest(new Request('http://localhost', {
+      method: 'POST', body: JSON.stringify({ command: 'cat', stdin: Buffer.from('hi').toString('base64') }),
+    }))).resolves.toEqual({ command: 'cat', stdin: Buffer.from('hi').toString('base64') });
+    await expect(readExecRequest(new Request('http://localhost', {
+      method: 'POST', body: JSON.stringify({ command: 'ls' }),
+    }))).resolves.toEqual({ command: 'ls' });
+    await expect(readExecRequest(new Request('http://localhost', {
+      method: 'POST', body: JSON.stringify({ command: 'cat', stdin: 'not*base64' }),
+    }))).rejects.toMatchObject({ status: 400, code: 'INVALID_ARGUMENT' });
+    await expect(readExecRequest(new Request('http://localhost', {
+      method: 'POST', body: JSON.stringify({ command: 'cat', stdin: 5 }),
+    }))).rejects.toMatchObject({ status: 400, code: 'INVALID_ARGUMENT' });
   });
 
   async function operationRequest(name: string, body: Record<string, unknown>): Promise<Response> {
