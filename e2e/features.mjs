@@ -18,9 +18,11 @@ const suffix = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const volume = `features-${suffix}`;
 const cloneVolume = `features-clone-${suffix}`;
 const forkVolume = `features-fork-${suffix}`;
+const mountTargetVolume = `features-mounttarget-${suffix}`;
 const client = new AiryFSClient(endpoint, volume, clientOptions);
 const clone = new AiryFSClient(endpoint, cloneVolume, clientOptions);
 const fork = new AiryFSClient(endpoint, forkVolume, clientOptions);
+const mountTarget = new AiryFSClient(endpoint, mountTargetVolume, clientOptions);
 let passed = 0;
 
 try {
@@ -340,6 +342,60 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   equal(completed.job.status, 'succeeded', 'durable job completion');
   equal(output.join(''), 'job-output', 'durable job persisted output');
 
+  // Mounts: expand storage by grafting another volume at a subdirectory. The
+  // direct-path plane is live; in-container guest FUSE is gated off.
+  const created = await client.createMount('/mnt-data', { target: mountTargetVolume, create: true });
+  equal(created.targetVolume, mountTargetVolume, 'mount create-and-mount');
+  assert((await client.listMounts()).mounts.some((m) => m.mountpoint === '/mnt-data'), 'mount appears in listing');
+
+  // Writes under the mountpoint forward to the target volume's own storage.
+  await client.writeFile('/mnt-data/forwarded.txt', 'lives-in-target');
+  equal(await client.readFileText('/mnt-data/forwarded.txt'), 'lives-in-target', 'forwarded read through mount');
+  equal(await mountTarget.readFileText('/forwarded.txt'), 'lives-in-target', 'forwarded write landed in target volume');
+  assert((await client.listDirectory('/mnt-data')).some((e) => e.name === 'forwarded.txt'), 'forwarded readdir over mountpoint');
+
+  // Cross-boundary rename returns EXDEV, like across Linux filesystems.
+  let exdev = false;
+  try { await client.rename('/mnt-data/forwarded.txt', '/top.txt'); }
+  catch (error) { exdev = error instanceof AiryFSApiError && error.code === 'EXDEV'; }
+  assert(exdev, 'cross-boundary rename returns EXDEV');
+
+  // Same-volume rename under the mount forwards and lands in the target.
+  await client.rename('/mnt-data/forwarded.txt', '/mnt-data/renamed.txt');
+  equal(await mountTarget.readFileText('/renamed.txt'), 'lives-in-target', 'same-volume rename under mount');
+
+  // Cycle prevention: a mount cannot loop back to a mounted host, nor mount itself.
+  let cycle = false;
+  try { await mountTarget.createMount('/back', { target: volume }); }
+  catch (error) { cycle = error instanceof AiryFSApiError && error.code === 'MOUNT_CYCLE'; }
+  assert(cycle, 'cycle-forming mount is rejected');
+  let self = false;
+  try { await client.createMount('/self', { target: volume }); }
+  catch (error) { self = error instanceof AiryFSApiError && error.code === 'MOUNT_SELF'; }
+  assert(self, 'self-mount is rejected');
+
+  // Document the extra-hop cost of a forwarded op (informational, not asserted).
+  const localStart = performance.now();
+  await client.readFileText('/src/main.txt');
+  const localMs = performance.now() - localStart;
+  const fwdStart = performance.now();
+  await client.readFileText('/mnt-data/renamed.txt');
+  const fwdMs = performance.now() - fwdStart;
+  console.log(`INFO: forwarded read ${fwdMs.toFixed(1)}ms vs local ${localMs.toFixed(1)}ms (+${(fwdMs - localMs).toFixed(1)}ms hop)`);
+
+  // In-container guest FUSE is gated off: the stub is sealed read-only with a
+  // marker. Restart the Container so it seals the mount created above, then
+  // confirm reads surface the marker and blind writes fail with EROFS.
+  await client.destroyContainer();
+  const mountLs = await exec('ls /volume/mnt-data');
+  assert(mountLs.stdout.includes('AIRYFS-MOUNT-UNAVAILABLE'), 'unavailable-mount marker visible in exec');
+  const blindWrite = await client.exec('echo blind > /volume/mnt-data/blind.txt');
+  assert(blindWrite.exitCode !== 0, 'blind write under sealed stub fails (read-only)');
+
+  // Removing the mount detaches it from the host namespace.
+  await client.deleteMount('/mnt-data');
+  assert(!(await client.listMounts()).mounts.some((m) => m.mountpoint === '/mnt-data'), 'mount removed from listing');
+
   // Volume deletion wipes all storage and deregisters the name.
   const deletionVolume = `${volume}-delete`;
   const deletion = new AiryFSClient(endpoint, deletionVolume, clientOptions);
@@ -383,7 +439,11 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   );
   console.log(`Feature smoke passed: ${passed} checks on ${volume}`);
 } finally {
-  await Promise.allSettled([client.destroyContainer(), clone.destroyContainer()]);
+  await Promise.allSettled([
+    client.destroyContainer(),
+    clone.destroyContainer(),
+    mountTarget.deleteVolume(),
+  ]);
 }
 
 function archive(files) {
