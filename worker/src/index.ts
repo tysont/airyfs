@@ -215,9 +215,15 @@ const GUEST_CONNECT_TIMEOUT_MS = 8_000;
  *   - NOT the host DO — its /metrics stays responsive throughout the hang.
  *   - NOT the container tier — standard-2 hangs the same as standard-1.
  * It is a hang (no crash, no container-exit event). Neither port multiplexing
- * nor Option B addresses it; re-enabling requires understanding the two-agentfs
- * -daemon interaction at the agentfs/FUSE level. Direct-path mounts work
- * regardless of this flag.
+ * nor Option B addresses it. Command-server plumbing is also ruled out: with
+ * the guest daemon spawned cwd=/ with drained non-FUSE stdio and no synchronous
+ * FUSE syscall on the event loop (async mkdir), it still wedges. So the cause is
+ * below the command-server layer — the FUSE/runtime boundary when a second
+ * agentfs daemon serves (e.g. the sandbox's handling of a second FUSE mount, or
+ * an agentfs two-instance issue). Next step is a separate-process /proc stack
+ * capture (the wedged Node process cannot report on itself) or verifying the
+ * platform supports a second FUSE mount at all; a single-daemon-multi-volume
+ * agentfs architecture would sidestep it. Direct-path mounts work regardless.
  *
  * NOTE for re-enablement: exec/job/schedule admission must gate on guest-mount
  * readiness (or explicitly mark the run mount-degraded). Backgrounding the guest

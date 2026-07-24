@@ -4,6 +4,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
 import { exec, spawn, type ChildProcess } from 'child_process';
 import { mkdirSync, appendFileSync } from 'fs';
+import { mkdir as fsMkdir } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import type { Bridge } from './bridge.js';
 import { createExecutionSlot, type ExecutionSlot } from './execution-slot.js';
@@ -155,10 +156,17 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
         const guestPoint = `${MOUNT_POINT}${guest.mountpoint}`;
         const logPath = `/tmp/guest${guest.mountpoint.replace(/\//g, '_')}.log`;
         const append = (text: string): void => { try { appendFileSync(logPath, text); } catch { /* ignore */ } };
-        try { mkdirSync(guestPoint, { recursive: true }); } catch { /* exists via primary FS */ }
+        // Invariant: never make a *synchronous* filesystem call on a FUSE path
+        // from the command-server event loop — it hosts both bridges, so a block
+        // wedges every plane. The stub exists (the host DO created it); use an
+        // async mkdir so a slow FUSE lookup parks a libuv thread, not the loop.
+        try { await fsMkdir(guestPoint, { recursive: true }); } catch { /* exists via primary FS */ }
         const command = buildGuestMountCommand(guest);
         append(`$ ${command}\n`);
-        const child = exec(command, { env: process.env });
+        // Spawn hygiene: cwd=/ (never inherit a FUSE-mounted cwd — self-deadlock
+        // risk) and stdio drained to a non-FUSE file (an unread pipe that fills
+        // blocks the daemon inside a FUSE callback).
+        const child = exec(command, { env: process.env, cwd: '/' });
         guestProcesses.push(child);
         child.stdout?.on('data', (d: string) => append(String(d)));
         child.stderr?.on('data', (d: string) => append(String(d)));
@@ -481,7 +489,7 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
         : [];
 
       fuseExitCode = null;
-      const child = exec(buildPrimaryMountCommand(), { env: process.env });
+      const child = exec(buildPrimaryMountCommand(), { env: process.env, cwd: '/' });
       fuseProcess = child;
 
       child.stdout?.on('data', (d: string) => process.stdout.write(`[fuse] ${d}`));
