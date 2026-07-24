@@ -371,6 +371,17 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   catch (error) { notFound = error instanceof AiryFSApiError && error.code === 'MOUNT_TARGET_NOT_FOUND'; }
   assert(notFound, 'mount to a non-existent target is rejected');
 
+  // A separately-established target (created the ordinary way, not via create:true)
+  // mounts without create — the existence check does not false-negative real volumes.
+  const existingTarget = `features-existing-${suffix}`;
+  const existing = new AiryFSClient(endpoint, existingTarget, clientOptions);
+  await existing.createVolume(256 * 1024);
+  await existing.writeFile('/hello.txt', 'already-here');
+  await client.createMount('/existing', { target: existingTarget });
+  equal(await client.readFileText('/existing/hello.txt'), 'already-here', 'mount an existing target without create');
+  await client.deleteMount('/existing');
+  await existing.deleteVolume();
+
   // Mount health is observable in usage so a degraded mount is discoverable.
   const usageMounts = (await client.usage()).mounts ?? [];
   assert(usageMounts.some((m) => m.mountpoint === '/mnt-data' && m.healthy === true), 'mount health reported in usage');

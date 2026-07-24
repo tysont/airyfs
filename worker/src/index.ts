@@ -215,15 +215,23 @@ const GUEST_CONNECT_TIMEOUT_MS = 8_000;
  *   - NOT the host DO — its /metrics stays responsive throughout the hang.
  *   - NOT the container tier — standard-2 hangs the same as standard-1.
  * It is a hang (no crash, no container-exit event). Neither port multiplexing
- * nor Option B addresses it. Command-server plumbing is also ruled out: with
- * the guest daemon spawned cwd=/ with drained non-FUSE stdio and no synchronous
- * FUSE syscall on the event loop (async mkdir), it still wedges. So the cause is
- * below the command-server layer — the FUSE/runtime boundary when a second
- * agentfs daemon serves (e.g. the sandbox's handling of a second FUSE mount, or
- * an agentfs two-instance issue). Next step is a separate-process /proc stack
- * capture (the wedged Node process cannot report on itself) or verifying the
- * platform supports a second FUSE mount at all; a single-daemon-multi-volume
- * agentfs architecture would sidestep it. Direct-path mounts work regardless.
+ * nor Option B addresses it. Three specific plumbing candidates are also ruled
+ * out: with the guest daemon spawned cwd=/ with drained non-FUSE stdio and no
+ * synchronous FUSE syscall on the event loop (async mkdir), it still wedges.
+ * What is NOT yet excluded is Node's shared fate itself: every config tested so
+ * far still routes both bridges through the one command-server process, so
+ * "not those three candidates" does not prove "not plumbing". The discriminator
+ * that actually separates the causes is a 2x2 — {shared vs separate-process
+ * transports} x {nested /volume/data vs sibling /mnt mount} — run under a
+ * separate-process /proc watchdog (a wedged Node process cannot report on
+ * itself; capture State/wchan/syscall for all three processes to disk or
+ * stdout, never the volume). The wedge pattern localizes the cause: sibling +
+ * separate wedges => sandbox/agentfs two-instance issue; only-nested =>
+ * FUSE-over-FUSE (try a sibling mount + bind into /volume/data, since kernel
+ * bind mounts are known to work here); only-shared-process => plumbing after
+ * all. Resist single-daemon-multi-volume agentfs until the 2x2 justifies it —
+ * it is the largest upstream deviation contemplated. Direct-path mounts work
+ * regardless of this flag.
  *
  * NOTE for re-enablement: exec/job/schedule admission must gate on guest-mount
  * readiness (or explicitly mark the run mount-degraded). Backgrounding the guest
@@ -331,9 +339,15 @@ export class AiryFS extends Container<Env> {
    * This distinguishes "real but empty" from "does not exist" without an RPC.
    */
   private volumeEstablished(): boolean {
-    return this.ctx.storage.sql
-      .exec("SELECT 1 FROM fs_config WHERE key = 'volume_name'")
-      .toArray().length > 0;
+    const sql = this.ctx.storage.sql;
+    if (sql.exec("SELECT 1 FROM fs_config WHERE key = 'volume_name'").toArray().length > 0) {
+      return true;
+    }
+    // Legacy fallback: a volume predating the volume_name marker (or established
+    // through a path that never set it) is still real if its filesystem holds any
+    // directory entry. A phantom DO instantiated only to answer a request has run
+    // initSchema (root inode only, no dentries), so this stays false for phantoms.
+    return sql.exec('SELECT 1 FROM fs_dentry LIMIT 1').toArray().length > 0;
   }
 
   /** Trusted RPC: whether this volume exists as a legitimate mount target. */
