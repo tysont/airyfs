@@ -193,6 +193,17 @@ export interface ExecResult {
 }
 
 const STARTUP_TIMEOUT_MS = 60_000;
+/** Bound for a single guest-mount channel to connect before it degrades to unavailable. */
+const GUEST_CONNECT_TIMEOUT_MS = 8_000;
+/**
+ * In-container FUSE visibility of mounted subtrees (Phase 2). Disabled: starting
+ * per-mount bridge port pairs destabilizes the Container instance on the current
+ * platform (the command port becomes unreachable and the instance is recycled).
+ * Direct-path mounts (HTTP/RPC/SDK/CLI/S3/WebDAV) work regardless of this flag.
+ * Re-enable once guest channels are multiplexed over the primary bridge
+ * connection instead of allocating new container ports per mount.
+ */
+const GUEST_FUSE_ENABLED = false;
 const CONTAINER_EXEC_TIMEOUT_MS = 310_000;
 const DESTROY_TIMEOUT_MS = 10_000;
 const EXEC_WATCHDOG_INITIAL_DELAY_MS = 10_000;
@@ -379,6 +390,7 @@ export class AiryFS extends Container<Env> {
     invalidationTcpPort: number;
     invalidationHttpPort: number;
   }> {
+    if (!GUEST_FUSE_ENABLED) return [];
     return this.mounts().map((mount, index) => ({
       mountpoint: mount.mountpoint,
       targetVolume: mount.targetVolume,
@@ -400,19 +412,25 @@ export class AiryFS extends Container<Env> {
     targetVolume: string,
     mutating: boolean,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const socket = this.ctx.container!.getTcpPort(tcpPort).connect(`0.0.0.0:${tcpPort}`);
     this.guestSockets.push(socket);
+    // Best-effort: a guest that will not connect must never hang or fail the
+    // primary mount. Bound the wait and degrade that subtree instead.
+    const openTimeout = AbortSignal.timeout(GUEST_CONNECT_TIMEOUT_MS);
     try {
-      await abortable(socket.opened, signal);
+      await abortable(socket.opened, AbortSignal.any([signal, openTimeout]));
     } catch (error) {
+      console.error(`guest channel ${tcpPort} -> ${targetVolume} failed to open`, error);
       await socket.close().catch(() => undefined);
-      throw error;
+      return false;
     }
     const sessionId = crypto.randomUUID();
     const stub = this.targetStub(targetVolume);
-    const forward = this.forwardGuestFrames(socket, stub, sessionId, mutating);
-    this.ctx.waitUntil(forward);
+    this.ctx.waitUntil(this.forwardGuestFrames(socket, stub, sessionId, mutating).catch((error) => {
+      console.error(`guest forwarder ${tcpPort} -> ${targetVolume} stopped`, error);
+    }));
+    return true;
   }
 
   private async forwardGuestFrames(
@@ -1812,7 +1830,9 @@ export class AiryFS extends Container<Env> {
     const { socket, servePromise } = await this.connectData(signal);
     await this.connectInvalidation(signal);
 
-    // 3b. Connect each guest mount's forwarding channels (host / A side).
+    // 3b. Connect each guest mount's forwarding channels (host / A side),
+    // best-effort so a guest problem degrades that subtree without blocking exec.
+    // Empty unless GUEST_FUSE_ENABLED (see the flag's note on the port constraint).
     const guests = this.guestMountRuntime();
     for (const guest of guests) {
       await this.connectGuestChannel(guest.dataTcpPort, guest.targetVolume, true, signal);
@@ -1899,10 +1919,11 @@ export class AiryFS extends Container<Env> {
     if (!setupResp.ok) {
       throw new Error(`Bridge setup failed (${setupResp.status}): ${await setupResp.text()}`);
     }
-    const setupResult = (await setupResp.json()) as { ok: boolean; error?: string };
+    const setupResult = (await setupResp.json()) as { ok: boolean; error?: string; guests?: number };
     if (!setupResult.ok) {
       throw new Error(`Bridge setup failed: ${setupResult.error}`);
     }
+    console.log(`bridge setup ok: guestChannels=${guestChannels.length} started=${setupResult.guests ?? 0}`);
   }
 
   private async connectData(signal: AbortSignal): Promise<{

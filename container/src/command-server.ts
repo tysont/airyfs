@@ -3,7 +3,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
 import { exec, spawn, type ChildProcess } from 'child_process';
-import { mkdirSync } from 'fs';
+import { mkdirSync, appendFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import type { Bridge } from './bridge.js';
 import { createExecutionSlot, type ExecutionSlot } from './execution-slot.js';
@@ -122,6 +122,50 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
     if (!fuseProcess) return 'FUSE daemon not started';
     if (fuseExitCode !== null) return `FUSE daemon exited with code ${fuseExitCode}`;
     return null;
+  }
+
+  /**
+   * Graft guest volumes over their stub directories, parent-first, fully isolated
+   * from the primary command server. Every failure mode — spawn error, crash,
+   * hang, throw — is contained so a guest can only degrade its own subtree.
+   */
+  async function mountGuests(
+    guestMounts: Array<{ mountpoint: string; targetVolume: string; dataHttpPort: number; invalidationHttpPort: number; authToken: string }>,
+  ): Promise<void> {
+    const { buildGuestMountCommand } = await import('./mounts.js');
+    for (const guest of guestMounts) {
+      try {
+        const guestPoint = `${MOUNT_POINT}${guest.mountpoint}`;
+        const logPath = `/tmp/guest${guest.mountpoint.replace(/\//g, '_')}.log`;
+        const append = (text: string): void => { try { appendFileSync(logPath, text); } catch { /* ignore */ } };
+        try { mkdirSync(guestPoint, { recursive: true }); } catch { /* exists via primary FS */ }
+        const command = buildGuestMountCommand(guest);
+        append(`$ ${command}\n`);
+        const child = exec(command, { env: process.env });
+        guestProcesses.push(child);
+        child.stdout?.on('data', (d: string) => append(String(d)));
+        child.stderr?.on('data', (d: string) => append(String(d)));
+        child.on('error', (err) => append(`[spawn error] ${err}\n`));
+        child.on('exit', (code) => append(`[exit ${code}]\n`));
+        let mounted = false;
+        for (let i = 0; i < MOUNT_POLL_MAX_ATTEMPTS; i++) {
+          await sleep(MOUNT_POLL_INTERVAL_MS);
+          mounted = await isMountedAt(guestPoint);
+          if (mounted) break;
+        }
+        if (!mounted) {
+          // A registered-but-unserved FUSE mount blocks every access; tear it
+          // down lazily so the stub stays usable rather than hanging.
+          try { child.kill('SIGTERM'); } catch { /* already gone */ }
+          exec(`fusermount -u -z ${guestPoint} 2>/dev/null || umount -l ${guestPoint} 2>/dev/null`);
+          append('[not mounted after poll; torn down]\n');
+        } else {
+          append('[mounted]\n');
+        }
+      } catch (err) {
+        process.stderr.write(`[guest-mount] ${guest.mountpoint} error: ${err}\n`);
+      }
+    }
   }
 
   /** Reject a request when a command is already running, matching /exec semantics. */
@@ -379,13 +423,15 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
     }
 
     if (req.method === 'POST' && req.url === '/setup') {
+      // Always drain the request body, even on the already-started fast path, so
+      // the Container HTTP proxy does not stall waiting for the body to be read.
+      const raw = await readBody(req);
       if (bridgeStarted) {
-        jsonResponse(res, 200, { ok: true });
+        jsonResponse(res, 200, { ok: true, guests: bridge?.guests.length ?? 0 });
         return;
       }
       try {
         const { startBridge } = await import('./bridge.js');
-        const raw = await readBody(req);
         const parsed = raw ? JSON.parse(raw) as { guestChannels?: unknown } : {};
         const guestChannels = Array.isArray(parsed.guestChannels) ? parsed.guestChannels : [];
         bridge = await startBridge(guestChannels);
@@ -398,6 +444,7 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
     }
 
     if (req.method === 'POST' && req.url === '/mount') {
+      const rawMount = await readBody(req);
       if (fuseProcess && fuseExitCode === null) {
         const mounted = await isMounted();
         res.writeHead(mounted ? 200 : 409, { 'Content-Type': 'application/json' });
@@ -407,8 +454,7 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
 
       try { mkdirSync(MOUNT_POINT, { recursive: true }); } catch { /* exists */ }
 
-      const { buildPrimaryMountCommand, buildGuestMountCommand, orderMountsByDepth } = await import('./mounts.js');
-      const rawMount = await readBody(req);
+      const { buildPrimaryMountCommand, orderMountsByDepth } = await import('./mounts.js');
       const mountBody = rawMount ? JSON.parse(rawMount) as { mounts?: unknown } : {};
       const guestMounts = orderMountsByDepth(
         Array.isArray(mountBody.mounts) ? mountBody.mounts as Array<{ mountpoint: string; targetVolume: string; dataHttpPort: number; invalidationHttpPort: number; authToken: string }> : [],
@@ -445,28 +491,14 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
         return;
       }
 
-      // Graft each guest volume over its stub directory, parent-first. Guest
-      // mounts are best-effort: a failed guest degrades that subtree to EIO but
-      // never fails the primary mount.
-      const guestResults: Array<{ mountpoint: string; mounted: boolean }> = [];
-      for (const guest of guestMounts) {
-        const guestPoint = `${MOUNT_POINT}${guest.mountpoint}`;
-        try { mkdirSync(guestPoint, { recursive: true }); } catch { /* exists via primary FS */ }
-        const guestChild = exec(buildGuestMountCommand(guest), { env: process.env });
-        guestProcesses.push(guestChild);
-        guestChild.stdout?.on('data', (d: string) => process.stdout.write(`[fuse:${guest.mountpoint}] ${d}`));
-        guestChild.stderr?.on('data', (d: string) => process.stderr.write(`[fuse:${guest.mountpoint}] ${d}`));
-        let guestMounted = false;
-        for (let i = 0; i < MOUNT_POLL_MAX_ATTEMPTS; i++) {
-          await sleep(MOUNT_POLL_INTERVAL_MS);
-          guestMounted = await isMountedAt(guestPoint);
-          if (guestMounted) break;
-        }
-        guestResults.push({ mountpoint: guest.mountpoint, mounted: guestMounted });
-      }
-
+      // The primary mount is live: report success immediately. Guest mounts are
+      // grafted in a fully isolated background task so a guest that hangs, exits,
+      // or throws can never block or crash the primary command server.
       cwd = MOUNT_POINT;
-      jsonResponse(res, 200, { ok: true, mounted: true, guests: guestResults });
+      jsonResponse(res, 200, { ok: true, mounted: true, guests: guestMounts.map((g) => g.mountpoint) });
+      void mountGuests(guestMounts).catch((err) => {
+        process.stderr.write(`[guest-mount] background task failed: ${err instanceof Error ? err.stack : err}\n`);
+      });
       return;
     }
 
