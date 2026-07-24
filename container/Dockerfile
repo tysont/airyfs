@@ -18,6 +18,9 @@ ENV npm_config_nodedir=/usr/local
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci
 
+# Bump BUILD_REV to force the src copy + compile layers to rebuild when the
+# build context cache would otherwise mask a source change.
+ARG BUILD_REV=2
 COPY src/ src/
 RUN npx tsc
 

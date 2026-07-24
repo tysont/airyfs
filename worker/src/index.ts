@@ -214,23 +214,26 @@ const GUEST_CONNECT_TIMEOUT_MS = 8_000;
  *     guest bridge directly to the target) would INHERIT the bug, not fix it.
  *   - NOT the host DO — its /metrics stays responsive throughout the hang.
  *   - NOT the container tier — standard-2 hangs the same as standard-1.
- * It is a hang (no crash, no container-exit event). Neither port multiplexing
- * nor Option B addresses it. Three specific plumbing candidates are also ruled
- * out: with the guest daemon spawned cwd=/ with drained non-FUSE stdio and no
- * synchronous FUSE syscall on the event loop (async mkdir), it still wedges.
- * What is NOT yet excluded is Node's shared fate itself: every config tested so
- * far still routes both bridges through the one command-server process, so
- * "not those three candidates" does not prove "not plumbing". The discriminator
- * that actually separates the causes is a 2x2 — {shared vs separate-process
- * transports} x {nested /volume/data vs sibling /mnt mount} — run under a
- * separate-process /proc watchdog (a wedged Node process cannot report on
- * itself; capture State/wchan/syscall for all three processes to disk or
- * stdout, never the volume). The wedge pattern localizes the cause: sibling +
- * separate wedges => sandbox/agentfs two-instance issue; only-nested =>
- * FUSE-over-FUSE (try a sibling mount + bind into /volume/data, since kernel
- * bind mounts are known to work here); only-shared-process => plumbing after
- * all. Resist single-daemon-multi-volume agentfs until the 2x2 justifies it —
- * it is the largest upstream deviation contemplated. Direct-path mounts work
+ * RESOLVED (kept gated pending the safe-enable checklist below). The
+ * separate-process /proc watchdog settled it: at "wedge" time the command
+ * server was State S in ep_poll (a healthy, idle event loop) and the primary
+ * daemon was in fuse_dev_do_read — nothing was wedged. The earlier "process
+ * wedges" reading was wrong. The real cause was plumbing candidate 1: a
+ * synchronous mkdirSync on a FUSE path from the event loop that hosts both
+ * bridges, which starved the bridge the guest mount handshake needs, so the
+ * guest daemon parked in futex_wait and never reached its serve loop. With the
+ * mkdir made async (plus cwd=/, drained stdio, backgrounded/isolated mount,
+ * lazy teardown) the guest mount completes and serves data: exec reads and
+ * writes the target volume through the nested FUSE mount, verified end to end
+ * on int, container stable throughout.
+ *
+ * Still gated because enabling safely needs, in order: (1) admission gating so
+ * exec/job/schedule wait for guest-mount readiness — the watchdog showed a
+ * few-second window where the mount is not yet live and reads see the stub;
+ * (2) the fs-wrapper invariant guard (no synchronous FUSE-path fs call from the
+ * command server) landed as enforcement, so the next violation is a stack trace
+ * not a stall; (3) multi-session B (per-session journal cursors + retention).
+ * These are a known checklist, not a mystery. Direct-path mounts work
  * regardless of this flag.
  *
  * NOTE for re-enablement: exec/job/schedule admission must gate on guest-mount
