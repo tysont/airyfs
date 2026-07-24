@@ -449,6 +449,12 @@ export async function startChannel(tcpPort: number, httpPort: number): Promise<B
     }
   });
 
+  // Permanent error handlers: a Server that emits 'error' with no listener
+  // crashes the whole Node process by default. The bind phase attaches its own
+  // one-shot handler; these keep post-bind errors from taking down the process.
+  tcpServer.on('error', (error) => process.stderr.write(`[bridge tcp ${tcpPort}] error: ${error}\n`));
+  httpServer.on('error', (error) => process.stderr.write(`[bridge http ${httpPort}] error: ${error}\n`));
+
   const [boundTcpPort, boundHttpPort] = await Promise.all([
     listen(tcpServer, tcpPort),
     listen(httpServer, httpPort),

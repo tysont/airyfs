@@ -39,6 +39,22 @@ type ExecEvent =
   | { type: 'stderr'; id: string; data: string }
   | { type: 'exit'; id: string; exitCode: number; signal?: string; timedOut?: boolean };
 
+// Surface why the command server exits: a silent process death reads as
+// "container not listening" at the DO and triggers a recycle. Logging here
+// distinguishes a crash (uncaughtException/unhandledRejection) from a clean exit.
+let processInstrumented = false;
+function instrumentProcess(): void {
+  if (processInstrumented) return;
+  processInstrumented = true;
+  process.on('uncaughtException', (error) => {
+    process.stderr.write(`[fatal] uncaughtException: ${error instanceof Error ? error.stack : error}\n`);
+  });
+  process.on('unhandledRejection', (reason) => {
+    process.stderr.write(`[fatal] unhandledRejection: ${reason instanceof Error ? reason.stack : reason}\n`);
+  });
+  process.on('exit', (code) => process.stderr.write(`[fatal] process exit code=${code}\n`));
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -109,6 +125,7 @@ function writeStdin(child: ChildProcess, data: Buffer | null): void {
  * whether) to bind a port, which keeps the module importable from tests.
  */
 export function createCommandServer(slot: ExecutionSlot = createExecutionSlot()): Server {
+  instrumentProcess();
   let cwd = '/tmp';
   let bridgeStarted = false;
   let bridge: Bridge | null = null;

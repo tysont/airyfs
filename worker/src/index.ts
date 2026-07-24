@@ -196,12 +196,23 @@ const STARTUP_TIMEOUT_MS = 60_000;
 /** Bound for a single guest-mount channel to connect before it degrades to unavailable. */
 const GUEST_CONNECT_TIMEOUT_MS = 8_000;
 /**
- * In-container FUSE visibility of mounted subtrees (Phase 2). Disabled: starting
- * per-mount bridge port pairs destabilizes the Container instance on the current
- * platform (the command port becomes unreachable and the instance is recycled).
- * Direct-path mounts (HTTP/RPC/SDK/CLI/S3/WebDAV) work regardless of this flag.
- * Re-enable once guest channels are multiplexed over the primary bridge
- * connection instead of allocating new container ports per mount.
+ * In-container FUSE visibility of mounted subtrees (Phase 2). Disabled.
+ *
+ * Root cause established by isolation on int (not assumed):
+ *   - NOT a platform port/listener cap — binding extra bridge channels
+ *     in-process leaves a plain exec stable.
+ *   - NOT the DO opening extra getTcpPort connections — two idle connections
+ *     leave a plain exec stable.
+ *   - NOT the DO guest wiring — with guest channels + frame forwarders active
+ *     but the guest agentfs daemon not spawned, a mounted exec succeeds.
+ *   - NOT FUSE nesting — spawning the guest daemon at a non-nested /mnt path
+ *     hangs the container just the same.
+ * The trigger is the guest agentfs daemon under real forwarding traffic through
+ * the host DO (Option A). The container's command port then stops responding (a
+ * hang: no crash, no container-exit event), so the DO recycles it. Multiplexing
+ * ports does not address this; the fix is to move the guest data path off the
+ * host DO (Option B: connect directly to the target volume) or to debug the
+ * A-proxied agentfs handshake. Direct-path mounts work regardless of this flag.
  */
 const GUEST_FUSE_ENABLED = false;
 const CONTAINER_EXEC_TIMEOUT_MS = 310_000;
@@ -1832,7 +1843,7 @@ export class AiryFS extends Container<Env> {
 
     // 3b. Connect each guest mount's forwarding channels (host / A side),
     // best-effort so a guest problem degrades that subtree without blocking exec.
-    // Empty unless GUEST_FUSE_ENABLED (see the flag's note on the port constraint).
+    // Empty unless GUEST_FUSE_ENABLED (see the flag's root-cause note).
     const guests = this.guestMountRuntime();
     for (const guest of guests) {
       await this.connectGuestChannel(guest.dataTcpPort, guest.targetVolume, true, signal);
@@ -2222,6 +2233,24 @@ export class AiryFS extends Container<Env> {
         } catch (error) {
           if ((error as { code?: string }).code !== 'EEXIST') throw error;
         }
+      }
+      // While in-container FUSE visibility is disabled, the mountpoint's real
+      // data is reachable only via the direct-path API. Write a marker into the
+      // host volume's LOCAL stub (bypassing the mount router, which forwards to
+      // the target) so exec/FUSE surfaces the warning instead of a silently
+      // empty, writable directory. Direct-path readdir still forwards to the
+      // target and never sees this marker.
+      if (!GUEST_FUSE_ENABLED) {
+        const marker = `${path}/AIRYFS-MOUNT-UNAVAILABLE.txt`;
+        await fs.writeFile(
+          marker,
+          'This is an AiryFS mount point. Its data lives in another volume and is not\n'
+          + 'visible here: in-container FUSE visibility of mounts is currently disabled.\n'
+          + 'Do not read or write files under this directory from exec — writes land in a\n'
+          + 'local stub and will be shadowed when the mount is enabled. Use the direct-path\n'
+          + 'API (HTTP/SDK/CLI) to read and write this mount\'s data.\n',
+        );
+        created.push(marker);
       }
     } finally {
       release();
