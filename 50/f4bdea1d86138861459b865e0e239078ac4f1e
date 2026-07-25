@@ -1,0 +1,83 @@
+demos/01-filesystem-and-run.sh
+  s_e75ddacbc6cd54::t_f507eea1a2e4a9 1-7
+demos/02-read-write.sh
+  s_e75ddacbc6cd54::t_8256f8a08e4c67 1-9
+demos/03-ranged-write.sh
+  s_e75ddacbc6cd54::t_22c088131b7ad5 1-9
+demos/04-partial-read.sh
+  s_e75ddacbc6cd54::t_a853dcdf674102 1-5
+demos/05-resumable-upload.sh
+  s_e75ddacbc6cd54::t_72addd17d938bd 1-7
+demos/06-share-between-machines.sh
+  s_e75ddacbc6cd54::t_3870ff46746119 1-8
+demos/07-static-site.sh
+  s_e75ddacbc6cd54::t_6b972d9bc545e4 1-7
+demos/08-public-share.sh
+  s_e75ddacbc6cd54::t_06fd5e2a3c81be 1-6
+demos/09-s3-bucket.sh
+  s_e75ddacbc6cd54::t_772d8a03bef315 1-10
+demos/10-webdav.sh
+  s_e75ddacbc6cd54::t_9c2a2a4fafca3e 1-7
+demos/11-real-filesystem-in-container.sh
+  s_e75ddacbc6cd54::t_fb4a6424a44030 1-11
+demos/12-stream-command-output.sh
+  s_e75ddacbc6cd54::t_c2b4a6949102d5 1-8
+demos/13-durable-jobs.sh
+  s_e75ddacbc6cd54::t_ab47770d180787 1-8
+demos/14-schedule.sh
+  s_e75ddacbc6cd54::t_1e361cb4d95dcd 1-11
+demos/15-preview-service.sh
+  s_e75ddacbc6cd54::t_06e5d1d097dcfc 1-11
+demos/16-mount-volumes.sh
+  s_e75ddacbc6cd54::t_e045d0d80aa1b3 1-10
+demos/17-create-and-mount.sh
+  s_e75ddacbc6cd54::t_7decb230bdbdc2 1-13
+demos/18-snapshot-restore.sh
+  s_e75ddacbc6cd54::t_104a6f144e327f 1-13
+demos/19-fork.sh
+  s_e75ddacbc6cd54::t_afa5ad74865432 1-9
+demos/20-safe-delete-undo.sh
+  s_e75ddacbc6cd54::t_7a013a62d42e79 1-13
+demos/21-search.sh
+  s_e75ddacbc6cd54::t_c9fa4a239e7e74 1-10
+demos/22-change-feed.sh
+  s_e75ddacbc6cd54::t_a99ee6c7646880 1-6
+demos/23-webhooks.sh
+  s_e75ddacbc6cd54::t_6d4c12c9bd2440 1-13
+demos/24-tree-and-du.sh
+  s_e75ddacbc6cd54::t_14314f09cccf5f 1-13
+demos/25-scoped-sql.sh
+  s_e75ddacbc6cd54::t_730b4f0431a6bc 1-13
+demos/26-kv.sh
+  s_e75ddacbc6cd54::t_e4522bf2b6e064 1-7
+demos/27-content-addressed-assets.sh
+  s_e75ddacbc6cd54::t_0767183690a3fd 1-7
+demos/28-tree-archives.sh
+  s_e75ddacbc6cd54::t_60553f216adf68 1-10
+demos/29-auth-tokens.sh
+  s_e75ddacbc6cd54::t_9a45624076011b 1-8
+demos/30-quotas.sh
+  s_e75ddacbc6cd54::t_a51d681ceafd70 1-11
+demos/31-usage-and-metrics.sh
+  s_e75ddacbc6cd54::t_3ad066a63ecc23 1-16
+demos/32-scale-to-zero.sh
+  s_e75ddacbc6cd54::t_d59ef054f25ba9 1-7
+demos/README.md
+  s_e75ddacbc6cd54::t_3e569b23050753 1-12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "50f4bdea1d86138861459b865e0e239078ac4f1e",
+  "prompts": {},
+  "sessions": {
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
