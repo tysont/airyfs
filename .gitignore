@@ -11,3 +11,6 @@ agentfs/.build/
 agentfs/.target/
 .env
 opencode.json
+
+# macOS
+.DS_Store

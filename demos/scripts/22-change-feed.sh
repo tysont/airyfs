@@ -4,3 +4,4 @@ airy watch --once /event.txt          # or: airy watch /  (follows live)
 
 # Output:
 # A /event.txt
+# M /event.txt
