@@ -1,0 +1,31 @@
+container/Dockerfile
+  s_e75ddacbc6cd54::t_35c4e7b961c6bb 23
+e2e/features.mjs
+  s_0e08240248c09e::t_819fbbb2ef57c0 408-411
+e2e/guest-fuse.mjs
+  s_0e08240248c09e::t_1cf2157a0c8163 14-36,61-63,70-71,73-75
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2f30c0081259f139afb50fbabbc3b276c015e586",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
