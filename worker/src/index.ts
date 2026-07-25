@@ -1793,10 +1793,6 @@ export class AiryFS extends Container<Env> {
         guestSessions: this.guestSessions.size,
       },
       ...(mounts ? { mounts } : {}),
-      // Diagnostic only: while guest FUSE is under investigation, surface the
-      // watchdog's /proc snapshot so a wedge can be inspected from outside the
-      // wedged process. Off in production (flag is false), so no scrape cost.
-      ...(GUEST_FUSE_ENABLED ? { watchdog: await this.scrapeWatchdog() } : {}),
     };
   }
 
