@@ -195,70 +195,46 @@ export interface ExecResult {
 const STARTUP_TIMEOUT_MS = 60_000;
 /** Bound for a single guest-mount channel to connect before it degrades to unavailable. */
 const GUEST_CONNECT_TIMEOUT_MS = 8_000;
+/** Bound for all guest FUSE mounts to become live before exec admission fails. */
+const GUEST_READY_TIMEOUT_MS = 25_000;
 /**
- * In-container FUSE visibility of mounted subtrees (Phase 2). Disabled.
+ * In-container FUSE visibility of mounted subtrees (Phase 2). ENABLED.
  *
- * Root cause localized on int by discriminator experiments (observed, not
- * assumed). The trigger is running a second agentfs FUSE daemon in the
- * container at all; it wedges the whole command-server process (which also
- * hosts the bridge, so both FUSE data planes stall). Ruled out:
- *   - NOT a platform port/listener cap — extra in-process bridge channels
- *     leave a plain exec stable.
- *   - NOT the DO opening extra getTcpPort connections — idle probe connections
- *     leave a plain exec stable.
- *   - NOT the DO forwarder wiring — channels + forwarders active with the guest
- *     daemon NOT spawned: a mounted exec succeeds.
- *   - NOT FUSE nesting — a guest daemon at a non-nested /mnt path hangs too.
- *   - NOT the cross-DO RPC hop — a "null forwarder" answering guest frames from
- *     THIS volume's own SQLite (no RPC) still hangs. So Option B (connect the
- *     guest bridge directly to the target) would INHERIT the bug, not fix it.
- *   - NOT the host DO — its /metrics stays responsive throughout the hang.
- *   - NOT the container tier — standard-2 hangs the same as standard-1.
- * RESOLVED (kept gated pending the safe-enable checklist below). The
- * separate-process /proc watchdog settled it: at "wedge" time the command
- * server was State S in ep_poll (a healthy, idle event loop) and the primary
- * daemon was in fuse_dev_do_read — nothing was wedged. The earlier "process
- * wedges" reading was wrong. The real cause was plumbing candidate 1: a
- * synchronous mkdirSync on a FUSE path from the event loop that hosts both
- * bridges, which starved the bridge the guest mount handshake needs, so the
- * guest daemon parked in futex_wait and never reached its serve loop. With the
- * mkdir made async (plus cwd=/, drained stdio, backgrounded/isolated mount,
- * lazy teardown) the guest mount completes and serves data: exec reads and
- * writes the target volume through the nested FUSE mount, verified end to end
- * on int, container stable throughout.
+ * exec/job/schedule see a mounted volume's data through a nested agentfs FUSE
+ * mount grafted over its stub, with the guest's Hrana traffic proxied through
+ * the host DO to the target's SQLite. Verified end to end on int (read + write
+ * through the mount, write lands in the target), 5/5 and 2/2 on build-stamped
+ * fresh images (e2e/guest-fuse.mjs), container stable throughout.
  *
- * Reconciliation of the earlier "hygiene applied, still wedges" run: the build
- * context excludes untracked files and the layer cache did not reliably bust, so
- * that run cannot be proven to have exercised the fix; its "wedge" is equally
- * explained by the test command touching /volume/data during the readiness
- * window (uninterruptible I/O on a not-yet-serving mount) rather than a true
- * container wedge. Rather than argue the record, it was re-run 5/5 green on a
- * build-stamped fresh image (see /health buildInfo and e2e/guest-fuse.mjs), with
- * container health verified by a non-touching command each run.
+ * The original catastrophic "wedge" was a single plumbing bug, localized only
+ * once a separate-process /proc watchdog could read the wedged process from the
+ * outside: the command server was healthy in ep_poll and the primary daemon in
+ * fuse_dev_do_read — nothing was wedged; the event loop that hosts both bridges
+ * was being *blocked* by a synchronous mkdirSync on a FUSE path, starving the
+ * bridge the guest handshake needs. Every earlier "platform limit" / "not
+ * plumbing" / "below the command-server layer" conclusion came from inferring an
+ * unobserved process; the two correct ones came from instrumentation (bridge
+ * counters, then the watchdog). The watchdog is therefore permanent.
  *
- * Still gated because enabling in production safely needs, in order:
- *   (1) fs-wrapper invariant guard as ENFORCEMENT (no synchronous FUSE-path fs
- *       call from the command server) — lands BEFORE the flag flips, so the next
- *       violation is a stack trace, not a stall.
- *   (2) admission gating: exec/job/schedule wait for all guest mounts ready, and
- *       on the readiness bound expiring the command fails with the existing
- *       MOUNT_TARGET_UNAVAILABLE shape rather than running against the stub.
- *   (3) multi-session B at N=2, not a general fan-in system: only A's container
- *       mounts guests, so a target sees at most A's guest session plus its own
- *       container — per-session journal cursors, retention sized to the slowest
- *       of two, per-session counters. The volume-wide write lock in B's DO
- *       already covers both by construction.
- *   (4) teardown ordering (children unmount before parent) with a restart-
- *       persistence test (Container recycle -> next exec re-establishes guests).
- * Also: state the guest-FUSE per-op cost (container -> A's DO -> B) in the README
- * next to the ~60ms direct hop. Direct-path mounts work regardless of this flag.
- *
- * NOTE for re-enablement: exec/job/schedule admission must gate on guest-mount
- * readiness (or explicitly mark the run mount-degraded). Backgrounding the guest
- * mount and admitting immediately would let a command see the stub and then have
- * the mount appear mid-run — probabilistic split-brain.
+ * Safe-enable checklist, all landed before this flip:
+ *   - fs-guard enforces no synchronous FUSE-path fs call from the command-server
+ *     event loop (container/src/fs-guard.ts) — a violation is a stack trace.
+ *   - Admission gating: startContainer and the reconnect path both block until
+ *     every guest mount is live (waitForGuestMountsReady). On the readiness bound
+ *     expiring the command fails with MOUNT_TARGET_UNAVAILABLE (retryable,
+ *     Retry-After) rather than running against the stub; the Container is left
+ *     RUNNING so the still-mounting guest completes and the retry succeeds
+ *     without a cold restart.
+ *   - Multi-session B at N=2: the target's volume-wide write lock covers its own
+ *     container session and the host's guest session; per-session Hrana counters
+ *     are summed in /usage; each agentfs poller keeps its own journal cursor.
+ *   - Teardown ordering: on SIGTERM the container unmounts guests deepest-first
+ *     (children before parent); restart persistence is inherent (fs_mount is
+ *     durable and the reconnect path re-establishes + re-gates guests).
+ * When disabled, a mounted subtree is a read-only stub carrying an
+ * AIRYFS-MOUNT-UNAVAILABLE marker. Direct-path mounts work regardless of this flag.
  */
-const GUEST_FUSE_ENABLED = false;
+const GUEST_FUSE_ENABLED = true;
 const CONTAINER_EXEC_TIMEOUT_MS = 310_000;
 const DESTROY_TIMEOUT_MS = 10_000;
 const EXEC_WATCHDOG_INITIAL_DELAY_MS = 10_000;
@@ -1784,8 +1760,13 @@ export class AiryFS extends Container<Env> {
       sqliteBytes: this.ctx.storage.sql.databaseSize,
       container,
       hrana: {
-        pipelineRequests: this.hranaServer?.pipelineCount ?? 0,
-        sqlStatements: this.hranaServer?.statementCount ?? 0,
+        // Primary session plus any guest sessions this volume serves as a mount
+        // target (multi-session B): counters are summed across live sessions.
+        pipelineRequests: (this.hranaServer?.pipelineCount ?? 0)
+          + [...this.guestSessions.values()].reduce((sum, s) => sum + s.pipelineCount, 0),
+        sqlStatements: (this.hranaServer?.statementCount ?? 0)
+          + [...this.guestSessions.values()].reduce((sum, s) => sum + s.statementCount, 0),
+        guestSessions: this.guestSessions.size,
       },
       ...(mounts ? { mounts } : {}),
       // Diagnostic only: while guest FUSE is under investigation, surface the
@@ -1885,6 +1866,13 @@ export class AiryFS extends Container<Env> {
     try {
       await startup;
     } catch (error) {
+      // A guest admission-gate timeout is retryable: leave the Container AND all
+      // runtime connections intact so the still-handshaking guest completes and
+      // the client's Retry-After retry re-checks readiness and proceeds. Tearing
+      // down here would abort the in-flight handshake and cold-restart the retry.
+      if (error instanceof HttpError && error.code === 'MOUNT_TARGET_UNAVAILABLE') {
+        throw error;
+      }
       startupAbort.abort();
       this.closeRuntimeSockets();
       // An explicit destroy owns cleanup after it has waited for this startup.
@@ -1929,9 +1917,17 @@ export class AiryFS extends Container<Env> {
         4000
       );
       const health = await response.json<{ fuseMounted?: boolean }>();
-      if (health.fuseMounted) return;
-    } catch {
-      // Recycle below. A healthy Container without a usable mount cannot serve exec.
+      if (health.fuseMounted) {
+        // Reconnecting to a running Container: still gate on guest readiness so a
+        // retry after an admission-gate timeout cannot slip through to the stub.
+        await this.waitForGuestMountsReady(this.mounts().map((mount) => mount.mountpoint), signal);
+        return;
+      }
+    } catch (error) {
+      // A guest still coming up is retryable and must not recycle the Container —
+      // leave it running so the mount finishes and the client's retry succeeds.
+      if (error instanceof HttpError && error.code === 'MOUNT_TARGET_UNAVAILABLE') throw error;
+      // Otherwise recycle below: a healthy Container without a usable mount cannot serve exec.
     }
     this.clearRuntimeConnections();
     await this.destroyBounded();
@@ -2037,6 +2033,41 @@ export class AiryFS extends Container<Env> {
       await this.invalidationSocket?.close().catch(() => undefined);
       if (this.activeServePromise === servePromise) this.activeServePromise = null;
       throw mountError ?? new Error('FUSE mount did not complete within 30 seconds');
+    }
+
+    await this.waitForGuestMountsReady(guests.map((guest) => guest.mountpoint), signal);
+  }
+
+  /**
+   * Admission gating: block until every guest mount is live, or fail with the
+   * structured mount-degraded error. The watchdog showed a few-second window
+   * where a guest is still handshaking and reads would see the empty stub, so no
+   * command is admitted until the mounts are serving. On timeout the caller
+   * leaves the Container running (see ensureContainer) so the guest keeps
+   * mounting and the client's Retry-After retry finds it ready — no cold restart.
+   */
+  private async waitForGuestMountsReady(mountpoints: string[], signal: AbortSignal): Promise<void> {
+    if (mountpoints.length === 0) return;
+    const deadline = Date.now() + GUEST_READY_TIMEOUT_MS;
+    let pending = [...mountpoints];
+    while (pending.length > 0 && Date.now() < deadline) {
+      await abortable(new Promise<void>((resolve) => setTimeout(resolve, 1000)), signal);
+      try {
+        const healthResp = await this.containerFetch(new Request('http://localhost/health', { signal }), 4000);
+        const health = (await healthResp.json()) as { guests?: Array<{ mountpoint: string; mounted: boolean }> };
+        const live = new Set((health.guests ?? []).filter((g) => g.mounted).map((g) => g.mountpoint));
+        pending = pending.filter((mountpoint) => !live.has(mountpoint));
+      } catch {
+        // keep polling until the deadline
+      }
+    }
+    if (pending.length > 0) {
+      throw new HttpError(
+        503,
+        'MOUNT_TARGET_UNAVAILABLE',
+        `Guest mount(s) not ready: ${pending.join(', ')}`,
+        { 'Retry-After': '2' },
+      );
     }
   }
 

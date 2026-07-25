@@ -17,7 +17,7 @@ export interface MetricsSnapshot {
     fuseMounted?: unknown;
     [key: string]: unknown;
   };
-  hrana: { pipelineRequests: number; sqlStatements: number };
+  hrana: { pipelineRequests: number; sqlStatements: number; guestSessions?: number };
   /** Health of each mount grafted into this volume; absent when there are none. */
   mounts?: Array<{ mountpoint: string; targetVolume: string; healthy: boolean }>;
   /** Diagnostic /proc snapshot from the separate-process watchdog (guest-FUSE debugging only). */

@@ -20,7 +20,7 @@ RUN npm ci
 
 # Bump BUILD_REV to force the src copy + compile layers to rebuild when the
 # build context cache would otherwise mask a source change.
-ARG BUILD_REV=3
+ARG BUILD_REV=5
 COPY src/ src/
 RUN npx tsc && echo "rev=${BUILD_REV} built=$(date -u +%FT%TZ)" > /app/BUILD_INFO
 

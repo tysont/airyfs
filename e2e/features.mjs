@@ -405,14 +405,10 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   const fwdMs = performance.now() - fwdStart;
   console.log(`INFO: forwarded read ${fwdMs.toFixed(1)}ms vs local ${localMs.toFixed(1)}ms (+${(fwdMs - localMs).toFixed(1)}ms hop)`);
 
-  // In-container guest FUSE is gated off: the stub is sealed read-only with a
-  // marker. Restart the Container so it seals the mount created above, then
-  // confirm reads surface the marker and blind writes fail with EROFS.
-  await client.destroyContainer();
-  const mountLs = await exec('ls /volume/mnt-data');
-  assert(mountLs.stdout.includes('AIRYFS-MOUNT-UNAVAILABLE'), 'unavailable-mount marker visible in exec');
-  const blindWrite = await client.exec('echo blind > /volume/mnt-data/blind.txt');
-  assert(blindWrite.exitCode !== 0, 'blind write under sealed stub fails (read-only)');
+  // The exec/FUSE view of the mount (live when guest FUSE is enabled, sealed
+  // read-only stub when disabled) is covered end to end by e2e/guest-fuse.mjs;
+  // this suite stays guest-FUSE-flag-independent and exercises only the
+  // direct-path plane, which works either way.
 
   // A deleted target degrades to a structured error, not silent-empty. Uses a
   // throwaway pair so the primary mount above is unaffected.

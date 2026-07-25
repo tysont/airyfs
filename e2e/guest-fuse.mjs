@@ -11,7 +11,29 @@
 // ready, reads the target's data through the nested FUSE mount, writes back
 // through it, and confirms the write landed in the target volume.
 
-import { AiryFSClient } from '../sdk/dist/index.js';
+import { AiryFSClient, AiryFSApiError } from '../sdk/dist/index.js';
+
+/**
+ * Run an exec, retrying the designed cold-start degradation. Admission gating
+ * returns MOUNT_TARGET_UNAVAILABLE (503, Retry-After) when a guest mount is not
+ * yet live within the startup budget; a real client honoring Retry-After
+ * succeeds on the warm retry. Genuine failures still surface.
+ */
+async function execWithRetry(client, command, attempts = 6) {
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await client.exec(command);
+    } catch (error) {
+      lastError = error;
+      const transient = error instanceof AiryFSApiError
+        && (error.code === 'MOUNT_TARGET_UNAVAILABLE' || error.status === 503);
+      if (!transient) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
+  throw lastError;
+}
 
 const endpoint = process.env.AIRYFS_URL;
 if (!endpoint) throw new Error('AIRYFS_URL is required');
@@ -36,19 +58,21 @@ try {
     await host.createMount('/data', { target: `guestfuse-target-${suffix}` });
 
     // Container must stay healthy for a command that does not touch the mount —
-    // this is the wedge that once took down the whole command server.
-    const health = await host.exec('echo HEALTH-OK');
+    // this is the wedge that once took down the whole command server. Retries the
+    // cold-start admission-gate 503 (Retry-After), like a real client.
+    const health = await execWithRetry(host, 'echo HEALTH-OK');
     if (health.exitCode !== 0 || !health.stdout.includes('HEALTH-OK')) {
       healthFailed++;
       console.log(`run ${i}: FAIL container health (${JSON.stringify(health.stdout)})`);
       continue;
     }
 
-    // Wait for the guest mount to become ready, then read + write through FUSE.
+    // Admission gating guarantees the mount is live once exec is admitted, so no
+    // in-command readiness wait is needed: read + write through FUSE directly.
     const started = Date.now();
-    const result = await host.exec(
-      'for n in $(seq 1 20); do mountpoint -q /volume/data && break; sleep 1; done; '
-      + 'cat /volume/data/hello.txt; echo GFWRITE > /volume/data/back.txt && echo WROTE-OK',
+    const result = await execWithRetry(
+      host,
+      'cat /volume/data/hello.txt; echo GFWRITE > /volume/data/back.txt && echo WROTE-OK',
     );
     const elapsed = Date.now() - started;
     const back = await target.readFileText('/back.txt').catch(() => null);

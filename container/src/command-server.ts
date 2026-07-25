@@ -3,8 +3,9 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
 import { exec, spawn, type ChildProcess } from 'child_process';
-import { mkdirSync, appendFileSync, readFileSync } from 'fs';
 import { mkdir as fsMkdir } from 'fs/promises';
+// fs-guard enforces: no synchronous fs call on a FUSE path from this event loop.
+import { mkdirSync, appendFileSync, readFileSync } from './fs-guard.js';
 import { fileURLToPath } from 'url';
 import type { Bridge } from './bridge.js';
 import { createExecutionSlot, type ExecutionSlot } from './execution-slot.js';
@@ -56,10 +57,13 @@ function instrumentProcess(): void {
   process.on('exit', (code) => process.stderr.write(`[fatal] process exit code=${code}\n`));
 }
 
+/** Guest mountpoints live this run (module scope so graceful-stop teardown can reach them). */
+let activeGuestMountpoints: string[] = [];
+
 /** Build stamp baked into the image (see Dockerfile); lets an experiment confirm which artifact it hit. */
 const buildInfo: string = (() => {
   try {
-    return readFileSync('/app/BUILD_INFO', 'utf8').trim();
+    return readFileSync('/app/BUILD_INFO', 'utf8').toString().trim();
   } catch {
     return 'unknown';
   }
@@ -440,6 +444,11 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
       const mounted = await isMounted();
       if (mounted && cwd !== MOUNT_POINT) cwd = MOUNT_POINT;
       const bridgeStatus = bridge?.data.status() ?? { connected: false, pending: 0, queued: 0, admitted: 0 };
+      // Per-guest live-mount status so the DO can gate exec on all mounts ready.
+      const guests = await Promise.all(activeGuestMountpoints.map(async (mountpoint) => ({
+        mountpoint,
+        mounted: await isMountedAt(`${MOUNT_POINT}${mountpoint}`),
+      })));
       jsonResponse(res, 200, {
         status: 'ok',
         bridgeStarted,
@@ -448,6 +457,7 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
         bridgeQueued: bridgeStatus.queued,
         bridgeAdmitted: bridgeStatus.admitted,
         fuseMounted: mounted,
+        guests,
         fuseExitCode,
         cwd,
         // Verify the artifact, not the intent: the image's build stamp is baked
@@ -499,6 +509,7 @@ export function createCommandServer(slot: ExecutionSlot = createExecutionSlot())
       const unavailableMounts = Array.isArray(mountBody.unavailableMounts)
         ? (mountBody.unavailableMounts as unknown[]).filter((m): m is string => typeof m === 'string')
         : [];
+      activeGuestMountpoints = guestMounts.map((guest) => guest.mountpoint);
 
       fuseExitCode = null;
       const child = exec(buildPrimaryMountCommand(), { env: process.env, cwd: '/' });
@@ -591,4 +602,18 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const watchdogPath = fileURLToPath(new URL('./watchdog.js', import.meta.url));
   const watchdog = spawn('node', [watchdogPath], { detached: true, stdio: 'ignore' });
   watchdog.unref();
+
+  // Ordered teardown on graceful stop: unmount guests deepest-first (children
+  // before parent) so the primary FUSE daemon is never torn down under a live
+  // nested mount. Best-effort and lazy; the kernel force-cleans on SIGKILL.
+  process.once('SIGTERM', () => {
+    const deepestFirst = [...activeGuestMountpoints]
+      .sort((a, b) => b.split('/').length - a.split('/').length);
+    for (const mountpoint of deepestFirst) {
+      try {
+        exec(`fusermount -u -z ${MOUNT_POINT}${mountpoint} 2>/dev/null || umount -l ${MOUNT_POINT}${mountpoint} 2>/dev/null`);
+      } catch { /* best-effort */ }
+    }
+    setTimeout(() => process.exit(0), 500);
+  });
 }
