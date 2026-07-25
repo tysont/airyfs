@@ -529,6 +529,30 @@ export class AiryFS extends Container<Env> {
     }
   }
 
+  /**
+   * Mountpoints at or under a query scope. A fan-out read (search, tree, du,
+   * change feed) runs only against this volume's own filesystem, so it omits the
+   * data under these mounts — callers get `truncatedAtMounts` rather than a
+   * silently incomplete result.
+   */
+  private mountsWithinScope(scope: string): string[] {
+    const p = normalizePath(scope);
+    return this.mounts()
+      .map((mount) => mount.mountpoint)
+      .filter((mountpoint) => p === '/' || mountpoint === p || mountpoint.startsWith(`${p}/`))
+      .sort();
+  }
+
+  /**
+   * Header signalling that a fan-out read did not descend into mounts within its
+   * scope. A header keeps every body shape (arrays included) unchanged while
+   * making the incompleteness explicit instead of silent.
+   */
+  private truncationHeaders(scope: string): Record<string, string> | undefined {
+    const truncated = this.mountsWithinScope(scope);
+    return truncated.length > 0 ? { 'X-AiryFS-Truncated-At-Mounts': truncated.join(',') } : undefined;
+  }
+
   /** Resolve a single path for an RPC wrapper; null when the path is local. */
   private mountHit(path: string): { volume: string; targetPath: string } | null {
     const mounts = this.mounts();
@@ -2856,14 +2880,15 @@ export class AiryFS extends Container<Env> {
       throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'POST' });
     }
     const body = await readJsonObject(request);
-    return Response.json(await searchVolume(this.filesystem(), this.ctx.storage.sql, this.access, {
+    const results = await searchVolume(this.filesystem(), this.ctx.storage.sql, this.access, {
       mode: body.mode,
       path: body.path,
       pattern: body.pattern,
       regex: body.regex,
       ignoreCase: body.ignoreCase,
       limit: body.limit,
-    }));
+    });
+    return Response.json(results, { headers: this.truncationHeaders(typeof body.path === 'string' ? body.path : '/') });
   }
 
   /**
@@ -3166,7 +3191,7 @@ export class AiryFS extends Container<Env> {
           }
           return Response.json(
             await this.waitForChanges(since, limit, v1Route.path, wait, request.signal),
-            { headers: { 'Cache-Control': 'no-store' } },
+            { headers: { 'Cache-Control': 'no-store', ...this.truncationHeaders(v1Route.path) } },
           );
         }
 
@@ -3292,11 +3317,14 @@ export class AiryFS extends Container<Env> {
           if (request.method !== 'GET') {
             throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed', { Allow: 'GET' });
           }
-          return Response.json(await readTree(this.filesystem(), this.access, {
-            path: v1Route.path,
-            depth: optionalQueryNumber(url, 'depth'),
-            limit: optionalQueryNumber(url, 'limit'),
-          }));
+          return Response.json(
+            await readTree(this.filesystem(), this.access, {
+              path: v1Route.path,
+              depth: optionalQueryNumber(url, 'depth'),
+              limit: optionalQueryNumber(url, 'limit'),
+            }),
+            { headers: this.truncationHeaders(v1Route.path) },
+          );
         }
 
         if (v1Route.resource === 'quota') {

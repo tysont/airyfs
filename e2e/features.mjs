@@ -436,6 +436,16 @@ print(json.dumps({'files': len(results), 'bytes': sum(size for _, size, _ in res
   await client.deleteMount('/rst');
   await restoreTargetClient.deleteVolume();
 
+  // A fan-out read whose scope contains a mount signals the omission rather than
+  // returning a silently incomplete result.
+  await client.createMount('/fanout', { target: mountTargetVolume });
+  const treeResp = await fetch(`${endpoint}/v1/volumes/${encodeURIComponent(volume)}/tree/`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  const truncatedHeader = treeResp.headers.get('X-AiryFS-Truncated-At-Mounts') ?? '';
+  assert(truncatedHeader.split(',').includes('/fanout'), 'fan-out read signals truncation at mounts');
+  await client.deleteMount('/fanout');
+
   // Removing the mount detaches it from the host namespace.
   await client.deleteMount('/mnt-data');
   assert(!(await client.listMounts()).mounts.some((m) => m.mountpoint === '/mnt-data'), 'mount removed from listing');
