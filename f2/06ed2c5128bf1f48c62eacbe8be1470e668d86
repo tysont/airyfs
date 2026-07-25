@@ -1,0 +1,31 @@
+.gitignore
+  s_e75ddacbc6cd54::t_148ebb4088484b 14-16
+demos/gifs/play.sh
+  s_0e08240248c09e::t_2a1902fb62baaf 1-21
+demos/scripts/01-filesystem-and-run.sh
+  s_e75ddacbc6cd54::t_11c45fabf868e4 3-5,8-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f206ed2c5128bf1f48c62eacbe8be1470e668d86",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
