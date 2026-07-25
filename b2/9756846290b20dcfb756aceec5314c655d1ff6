@@ -1,0 +1,19 @@
+scripts/manual-test-mounts.sh
+  s_e75ddacbc6cd54::t_00485aa1cef58a 1-94
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b29756846290b20dcfb756aceec5314c655d1ff6",
+  "prompts": {},
+  "sessions": {
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
