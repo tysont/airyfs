@@ -58,7 +58,11 @@ export class AiryFSClient {
     options: AiryFSClientOptions = {},
   ) {
     this.volumeBase = `/v1/volumes/${encodeURIComponent(volume)}`;
-    this.fetchImpl = options.fetch ?? fetch;
+    // Bind to globalThis so the global fetch is never invoked with the wrong
+    // `this`. Node tolerates an unbound reference, but workerd (and browsers)
+    // reject it with "Illegal invocation" — which would break the SDK's
+    // documented support for running inside Cloudflare Workers.
+    this.fetchImpl = (options.fetch ?? fetch).bind(globalThis);
     this.token = options.token;
     this.defaultHeaders = options.headers ?? {};
   }
