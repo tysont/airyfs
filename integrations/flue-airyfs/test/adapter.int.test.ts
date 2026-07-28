@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { AiryFSClient, AiryFSApiError } from "airyfs-sdk";
+import { AiryFSClient, AiryFSApiError, waitForJob } from "airyfs-sdk";
 import { createSandboxSessionEnv } from "@flue/runtime";
 import type { SessionEnv } from "@flue/runtime";
 import { AiryFSSandboxApi } from "../src/adapter.js";
@@ -182,6 +182,24 @@ describe("exec semantics", () => {
     const r = await h.api.exec("sleep 5", { timeoutMs: 1000 });
     expect(r.exitCode).toBe(124);
     expect(r.stderr).toContain("timed out after 1s");
+  });
+
+  it("exec and submitJob resolve a volume-rooted cwd identically", async () => {
+    const h = makeHarness("cwdunify");
+    await h.client.makeDirectory("/sub");
+    // Each writes `pwd` to a file relative to its cwd, so we can read the
+    // resolved directory back as plain text over the direct path.
+    const viaExec = await h.client.exec("pwd > pwd-exec.txt", { cwd: "/sub" });
+    expect(viaExec.exitCode).toBe(0);
+    const job = await h.client.submitJob("pwd > pwd-job.txt", "/sub");
+    await waitForJob(h.client, job.id, {});
+
+    const execPwd = (await h.client.readFileText("/sub/pwd-exec.txt")).trim();
+    const jobPwd = (await h.client.readFileText("/sub/pwd-job.txt")).trim();
+    // Both durable exec and the job resolved the volume-rooted `/sub` to the
+    // same container directory — one convention, one resolver.
+    expect(execPwd).toBe("/volume/sub");
+    expect(jobPwd).toBe(execPwd);
   });
 
   it("durable exec queues concurrent commands instead of failing EXEC_BUSY", async () => {

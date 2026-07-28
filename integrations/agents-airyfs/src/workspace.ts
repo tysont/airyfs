@@ -119,7 +119,7 @@ export class AiryFSWorkspace {
    */
   async bash(
     command: string,
-    options: { timeoutMs?: number; idempotencyKey?: string } = {},
+    options: { timeoutMs?: number; idempotencyKey?: string; cwd?: string } = {},
   ): Promise<ExecOutcome> {
     if (this.snapshotBeforeBash) {
       await this.snapshotGuard();
@@ -127,10 +127,14 @@ export class AiryFSWorkspace {
     return this.exec(command, options);
   }
 
-  /** Low-level durable exec with an explicit idempotency key (for fibers). */
+  /**
+   * Low-level durable exec with an explicit idempotency key (for fibers).
+   * `cwd` is volume-rooted (`/` is the volume root) — the same convention as
+   * {@link AiryFSWorkspace.runJob}, since durable exec is itself a job.
+   */
   async exec(
     command: string,
-    options: { timeoutMs?: number; idempotencyKey?: string } = {},
+    options: { timeoutMs?: number; idempotencyKey?: string; cwd?: string } = {},
   ): Promise<ExecOutcome> {
     let full = command;
     let wrappedSeconds: number | undefined;
@@ -144,6 +148,7 @@ export class AiryFSWorkspace {
     }
     const r = await this.client.exec(full, {
       idempotencyKey: options.idempotencyKey ?? crypto.randomUUID(),
+      cwd: options.cwd,
     });
     let stderr = r.stderr;
     if (wrappedSeconds !== undefined && r.exitCode === 124) {

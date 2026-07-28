@@ -136,12 +136,12 @@ export class AiryFSSandboxApi implements SandboxApi {
       signal?: AbortSignal;
     },
   ): Promise<ShellResult> {
-    // Build the inner command in the /volume mount plane. cwd from Flue is
-    // already an absolute /volume/... path (the real container path), so no
-    // translation — just cd into it. env is exported inline.
-    const inner = this.buildInner(command, options);
+    // Flue hands cwd as a /volume-plane absolute path; translate it to the
+    // volume-rooted cwd the SDK's unified exec expects (`/volume/work` -> `/work`,
+    // `/volume` -> `/`). Env is still exported inline (exec has no env option).
+    const withEnv = this.applyEnv(command, options?.env);
 
-    let full = inner;
+    let full = withEnv;
     let wrappedSeconds: number | undefined;
     if (options?.timeoutMs && options.timeoutMs > 0) {
       // Round UP to whole seconds, never down (adapter-spec rule).
@@ -150,7 +150,7 @@ export class AiryFSSandboxApi implements SandboxApi {
         // Enforce the caller's deadline with timeout(1): exit 124 on expiry,
         // matching the cross-adapter / timeout(1) convention.
         wrappedSeconds = seconds;
-        full = `timeout ${seconds}s sh -c ${shellQuote(inner)}`;
+        full = `timeout ${seconds}s sh -c ${shellQuote(withEnv)}`;
       }
       // else: deadline exceeds the platform's 300s process ceiling. Do NOT
       // throw (exec is best-effort per spec, and a thrown error mid-loop is
@@ -161,10 +161,12 @@ export class AiryFSSandboxApi implements SandboxApi {
     // Durable exec (SDK default): queues behind the single execution slot
     // instead of failing with EXEC_BUSY, which is friendlier for an agent
     // loop. The per-call idempotency key gives retry/replay robustness within
-    // this one call (not cross-call dedupe).
+    // this one call (not cross-call dedupe). cwd goes through the SDK's unified
+    // volume-rooted cwd option — the same path jobs use.
     const result = await this.client.exec(full, {
       idempotencyKey: crypto.randomUUID(),
       signal: options?.signal,
+      cwd: options?.cwd ? toSdkPath(options.cwd) : undefined,
     });
 
     let stderr = result.stderr;
@@ -174,15 +176,11 @@ export class AiryFSSandboxApi implements SandboxApi {
     return { stdout: result.stdout, stderr, exitCode: result.exitCode };
   }
 
-  private buildInner(
-    command: string,
-    options?: { cwd?: string; env?: Record<string, string> },
-  ): string {
-    const exports = Object.entries(options?.env ?? {})
+  private applyEnv(command: string, env?: Record<string, string>): string {
+    const exports = Object.entries(env ?? {})
       .map(([k, v]) => `export ${k}=${shellQuote(v)}; `)
       .join("");
-    const cd = options?.cwd ? `cd ${shellQuote(options.cwd)} && ` : "";
-    return `${exports}${cd}${command}`;
+    return `${exports}${command}`;
   }
 }
 
