@@ -1,0 +1,21 @@
+integrations/agents-airyfs/src/workspace.ts
+  s_0e08240248c09e::t_7ea79f834d97f6 122,130-134,137,151
+integrations/flue-airyfs/test/adapter.int.test.ts
+  s_0e08240248c09e::t_7b6146571c78a2 2,187-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a2abf7320785770deb52fc760454bd14fbf297a7",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
