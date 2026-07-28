@@ -1,0 +1,73 @@
+examples/agents-workspace/.gitignore
+  s_e75ddacbc6cd54::t_8d88cb51cf3393 1-4
+examples/agents-workspace/.npmrc
+  s_e75ddacbc6cd54::t_ecb4a85c87a8fe 1-2
+examples/agents-workspace/package-lock.json
+  s_e75ddacbc6cd54::t_f0a0c21afd73ae 1-4488
+examples/agents-workspace/package.json
+  s_e75ddacbc6cd54::t_a2f478f732736d 1-18
+examples/agents-workspace/tsconfig.json
+  s_e75ddacbc6cd54::t_663062d40650d4 1-8
+examples/flue-cloudflare-rpc/.gitignore
+  s_e75ddacbc6cd54::t_45f24774d2e10e 1-3
+examples/flue-cloudflare-rpc/.npmrc
+  s_e75ddacbc6cd54::t_13c623b0ac77b7 1-2
+examples/flue-cloudflare-rpc/package-lock.json
+  s_e75ddacbc6cd54::t_0ed33fa3118ab6 1-5078
+examples/flue-cloudflare-rpc/package.json
+  s_e75ddacbc6cd54::t_470f0f640f53df 1-16
+examples/flue-cloudflare-rpc/tsconfig.json
+  s_e75ddacbc6cd54::t_e6492812d04efe 1-8
+examples/flue-repo-agent/.gitignore
+  s_e75ddacbc6cd54::t_91dc661c2763e0 1-7
+examples/flue-repo-agent/.npmrc
+  s_e75ddacbc6cd54::t_b34086cd894ea1 1-3
+examples/flue-repo-agent/drive.sh
+  s_e75ddacbc6cd54::t_c649921a955234 1-17
+examples/flue-repo-agent/flue.config.ts
+  s_e75ddacbc6cd54::t_0d7957290b703a 1-5
+examples/flue-repo-agent/package-lock.json
+  s_e75ddacbc6cd54::t_3b2bfdae1680f6 1-6850
+examples/flue-repo-agent/package.json
+  s_e75ddacbc6cd54::t_e1a0ac4771e32f 1-21
+integrations/agents-airyfs/.npmrc
+  s_e75ddacbc6cd54::t_3886ff54c62256 1-2
+integrations/agents-airyfs/package-lock.json
+  s_e75ddacbc6cd54::t_6cc66c7e99a9eb 1-1654
+integrations/agents-airyfs/package.json
+  s_e75ddacbc6cd54::t_a01599b9268eef 1-28
+integrations/agents-airyfs/tsconfig.json
+  s_e75ddacbc6cd54::t_1d2d460d132c67 1-9
+integrations/agents-airyfs/tsconfig.test.json
+  s_e75ddacbc6cd54::t_d6d750e820c3d7 1-3
+integrations/agents-airyfs/vitest.config.ts
+  s_0e08240248c09e::t_0f8e66a90b457e 1-10
+integrations/flue-airyfs/package-lock.json
+  s_e75ddacbc6cd54::t_b3c1fa814538de 1-5406
+integrations/flue-airyfs/test/adapter.int.test.ts
+  s_0e08240248c09e::t_fb21e78e22c2c8 1-199
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3baa79cbede274db6ec53a4a4608ba7e546f1b3a",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
