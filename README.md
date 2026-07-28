@@ -615,6 +615,12 @@ Publishing exposes the selected subtree to anyone with the URL — prefer a dedi
 
 ## Interoperability
 
+**AI agents.** An AiryFS volume is a natural durable workspace for an agent: a coding harness's split between file operations and command execution maps directly onto AiryFS's [direct path](#the-direct-path) and [execution path](#the-execution-path), so the agent reads, writes, and lists for free on Durable Object SQLite and only wakes a Container when it needs a real shell. Keying the volume to the agent's instance id gives it durable files that persist across turns, restarts, and Container eviction — decoupled from the agent's own conversation state. Three integrations live in [`integrations/`](./integrations) and [`examples/`](./examples):
+
+- **`@airyfs/flue-sandbox`** — a [Flue](https://flueframework.com) `SandboxApi` adapter over the SDK. The default choice for a Flue agent; talks to any AiryFS deployment over HTTP.
+- **`@airyfs/agents-toolkit`** — AiryFS as [Agents SDK](https://developers.cloudflare.com/agents/) tools (read/write/list/bash, durable-job handoff, published artifacts) plus `runFiber`/`stash` durable-execution composition. Use it for agents built directly on the Agents SDK.
+- **Workers RPC** — the Flue adapter over a cross-script Durable Object binding (`script_name`) rather than HTTP. Use it when the agent Worker and AiryFS share an account and you want DO-to-DO calls with no HTTP layer, without merging AiryFS into your Worker.
+
 **S3.** Each volume is a path-style S3 bucket at `/s3/<volume>` supporting `HeadBucket`, `GetBucketLocation`, `ListObjectsV2`, and single-object `HeadObject`, `GetObject` (with ranges), `PutObject`, and `DeleteObject`. Keys map to unambiguous filesystem paths; `PutObject` creates missing parents; listings bound at 100,000 entries. Multipart uploads, object metadata, ACLs, versioning, batch deletion, presigned query auth, and `STREAMING-*` signatures are not implemented. Authenticated deployments use SigV4 with access key `airyfs` and `AIRYFS_AUTH_SECRET` as the secret:
 
 ```sh
@@ -719,6 +725,8 @@ airyfs/
     build.sh                    Patch verification, tests, and Linux build
   cli/                          Typed API client, sessions, commands, and shell
   sdk/                          Universal typed client, DTOs, and async workflows
+  integrations/                 Flue and Agents SDK adapters (file:-linked to sdk/)
+  examples/                     Runnable agent samples for the integrations
   demos/                        Recorded CLI demos and the scripts that produce them
   e2e/                          Deployed end-to-end tests, smoke tests, benchmarks
   docs/                         Design and operational notes
