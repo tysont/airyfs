@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "agents-workspace",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Workers AI binding (used when you extend the agent with a model tool loop).
+  "ai": { "binding": "AI" },
+
+  "durable_objects": {
+    "bindings": [{ "name": "WorkspaceAgent", "class_name": "WorkspaceAgent" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorkspaceAgent"] }],
+
+  "vars": {
+    "AIRYFS_ENDPOINT": "https://airyfs-int.tyson-s-sandbox.workers.dev"
+  }
+}

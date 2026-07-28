@@ -1,0 +1,21 @@
+{
+  "name": "flue-repo-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@airyfs/flue-sandbox": "file:../../integrations/flue-airyfs",
+    "@flue/runtime": "^1.0.0-beta.9",
+    "agents": "^0.14.5",
+    "airyfs-sdk": "file:../../sdk"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260728.1",
+    "@flue/cli": "^1.0.0-beta.9",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.114.0"
+  }
+}

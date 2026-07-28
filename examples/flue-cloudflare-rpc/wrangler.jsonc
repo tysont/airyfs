@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "flue-cloudflare-rpc",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Cross-script Durable Object binding: keep AiryFS deployed as its own Worker
+  // (here, the int deployment named "airyfs-int") and reference its `AiryFS`
+  // class from this Worker. getContainer/idFromName over this namespace does
+  // DO-to-DO RPC with zero build-system merging — the Container stays attached
+  // to the class in its defining Worker. Change `script_name` to your AiryFS
+  // Worker's deployed name.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AIRYFS",
+        "class_name": "AiryFS",
+        "script_name": "airyfs-int"
+      }
+    ]
+  }
+  // No `migrations` here: this Worker does not *define* the AiryFS class, it
+  // only binds to the class defined and migrated by the AiryFS Worker.
+}

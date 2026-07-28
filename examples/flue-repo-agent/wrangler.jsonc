@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "flue-repo-agent",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Workers AI binding. Flue's built-in `cloudflare/...` provider routes model
+  // calls through this binding, so no model API key is needed — billing follows
+  // the Worker's account (Workers AI has a daily free allocation).
+  "ai": { "binding": "AI" },
+
+  // Cloudflare requires an explicit migration for every Durable Object class.
+  // Flue generates the classes for discovered agents/workflows; we own the
+  // ordered migration history. `FlueRegistry` ships with every CF target;
+  // `src/agents/workspace.ts` generates `FlueWorkspaceAgent`.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "FlueRegistry",
+        "FlueWorkspaceAgent",
+        "FlueSummarizeWorkflow"
+      ]
+    }
+  ],
+
+  // Non-secret defaults for local dev. AIRYFS_TOKEN (if the endpoint requires
+  // auth) belongs in .dev.vars, not here.
+  "vars": {
+    "AIRYFS_ENDPOINT": "https://airyfs-int.tyson-s-sandbox.workers.dev"
+  }
+}

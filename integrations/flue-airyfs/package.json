@@ -1,0 +1,35 @@
+{
+  "name": "@airyfs/flue-sandbox",
+  "version": "0.1.0",
+  "description": "Flue sandbox adapter backed by an AiryFS durable volume",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "airyfs-sdk": "file:../../sdk"
+  },
+  "peerDependencies": {
+    "@flue/runtime": "^1.0.0-beta.9"
+  },
+  "devDependencies": {
+    "@flue/runtime": "^1.0.0-beta.9",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
