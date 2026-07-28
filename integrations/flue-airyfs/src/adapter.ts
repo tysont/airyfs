@@ -220,21 +220,12 @@ export function airyfs(config: AiryFSSandboxConfig): SandboxFactory {
     async createSessionEnv({ id }): Promise<SessionEnv> {
       const client = new AiryFSClient(config.endpoint, volumeFor(id), {
         token: config.token,
-        // Always hand the SDK a fetch with a correct `this`. The SDK stores
-        // `this.fetchImpl = fetch` and calls `this.fetchImpl(...)`, which binds
-        // `this` to the client — Node tolerates it, but workerd rejects it with
-        // "Illegal invocation". A wrapper closure sidesteps the binding so the
-        // adapter runs unchanged inside a Cloudflare Worker. (A one-line core
-        // fix — `fetch.bind(globalThis)` — would make this default unnecessary.)
-        fetch: config.fetch ?? boundFetch,
+        fetch: config.fetch,
       });
       return createSandboxSessionEnv(new AiryFSSandboxApi(client), MOUNT_ROOT);
     },
   };
 }
-
-/** Global fetch wrapped so it is never invoked with the wrong `this` (workerd-safe). */
-const boundFetch: typeof fetch = (input, init) => fetch(input, init);
 
 /**
  * Build a factory from an already-constructed {@link AiryFSClient}, mirroring

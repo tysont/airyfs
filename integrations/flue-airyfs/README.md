@@ -60,11 +60,10 @@ to pin or share volumes.
   unwrapped; the platform's own 300s process ceiling applies. `exec` never
   throws `SandboxOperationUnsupportedError` — a result the model can react to
   beats an exception mid-loop.
-- **workerd-safe fetch.** The adapter hands the SDK a wrapped `fetch` so the
-  global is never called with the wrong `this` (which workerd rejects as
-  "Illegal invocation"). A one-line core fix in `airyfs-sdk`
-  (`this.fetchImpl = (options.fetch ?? fetch).bind(globalThis)`) would make this
-  unnecessary; until then the adapter is self-contained.
+- **Runs in workerd.** `airyfs-sdk` binds the global `fetch` to `globalThis`, so
+  the adapter runs unchanged inside a Cloudflare Worker (an unbound global fetch
+  reference throws "Illegal invocation" in workerd). Pass a custom `fetch` via
+  the factory config if you need to (e.g. a CA bundle in tests).
 
 ## Security
 

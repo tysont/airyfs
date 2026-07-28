@@ -56,12 +56,9 @@ export class AiryFSWorkspace {
     volume: string,
     options: AiryFSWorkspaceOptions & { token?: string } = {},
   ) {
-    // Wrap fetch so the SDK never invokes global fetch with the wrong `this`
-    // (workerd rejects that as "Illegal invocation").
-    const boundFetch: typeof fetch = (input, init) => fetch(input, init);
     this.client = new AiryFSClient(endpoint, volume, {
       token: options.token,
-      fetch: options.fetch ?? boundFetch,
+      fetch: options.fetch,
     });
     this.snapshotRetention = options.snapshotRetention ?? 3;
     this.snapshotBeforeBash = options.snapshotBeforeBash ?? true;
