@@ -296,7 +296,9 @@ export class AiryFSClient {
   async execStream(command: string, signalOrOptions?: AbortSignal | ExecOptions): Promise<AsyncIterable<ExecEvent>> {
     const options = execOptions(signalOrOptions);
     const key = options.idempotencyKey ?? crypto.randomUUID();
-    const job = await this.submitJobWithRetry(command, '/', key, options.signal);
+    // Durable exec is a job. Forward the (volume-rooted) cwd so exec and
+    // submitJob share one convention and one server-side resolver.
+    const job = await this.submitJobWithRetry(command, options.cwd ?? '/', key, options.signal);
     return this.followCommand(job, options);
   }
 

@@ -579,7 +579,13 @@ export interface JobRunnerDeps {
   maxOutputBytes?: number;
 }
 
-/** Compose the shell command that runs a job in its remote cwd under /volume. */
+/**
+ * Compose the shell command that runs a job in its remote cwd. The single
+ * resolver for the volume-rooted cwd convention: `/` is the volume root, which
+ * lives at the container mount `/volume`. Both durable exec (SDK `exec` /
+ * `execStream`, which submit a job under the hood) and `submitJob` flow through
+ * here, so exec and jobs resolve cwd identically.
+ */
 export function composeJobCommand(command: string, cwd: string): string {
   const mountPath = cwd === '/' ? '/volume' : `/volume${cwd}`;
   return `cd -- ${shellQuote(mountPath)} && ${command}`;

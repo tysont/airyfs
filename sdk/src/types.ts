@@ -42,6 +42,13 @@ export interface ExecOptions {
   idempotencyKey?: string;
   /** Durable status polling interval. Defaults to 250 ms. */
   pollInterval?: number;
+  /**
+   * Working directory, **volume-rooted** — `/` is the volume root, `/src` a
+   * subdirectory. This is the same convention {@link AiryFSClient.submitJob}
+   * uses (durable exec is itself a job), so exec and jobs resolve cwd
+   * identically. Defaults to `/`.
+   */
+  cwd?: string;
 }
 export type ExecEvent =
   | { type: 'start'; id: string }
