@@ -86,6 +86,17 @@ export class AiryFSWorkspace {
     await this.client.makeDirectory(path, true);
   }
 
+  /**
+   * Read a line-addressed slice of a text file server-side (no Container).
+   * `mode` is `head`/`tail`/`range`; line numbers are 1-based inclusive.
+   */
+  async readLines(
+    path: string,
+    options: { mode?: "head" | "tail" | "range"; count?: number; start?: number; end?: number } = {},
+  ): Promise<{ lines: string[]; startLine: number; endLine: number; totalLines: number; truncated: boolean }> {
+    return this.client.readLines(path, options);
+  }
+
   async listDir(path: string): Promise<ListEntry[]> {
     const entries = await this.client.listDirectory(path);
     return entries.map((e) => ({ name: e.name, type: e.type, size: e.size }));

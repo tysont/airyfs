@@ -69,6 +69,20 @@ export function createWorkspaceTools(
       parameters: z.object({ path: z.string().default("/") }),
       execute: async ({ path }) => ws.listDir(path),
     },
+    read_lines: {
+      description:
+        "Read a line-addressed slice of a text file (fast, no container). Use mode 'head' (first count), " +
+        "'tail' (last count), or 'range' (1-based inclusive start..end). Prefer this over reading whole files.",
+      parameters: z.object({
+        path: z.string(),
+        mode: z.enum(["head", "tail", "range"]).default("head"),
+        count: z.number().int().positive().optional(),
+        start: z.number().int().positive().optional(),
+        end: z.number().int().positive().optional(),
+      }),
+      execute: async ({ path, mode, count, start, end }) =>
+        ws.readLines(path, { mode, count, start, end }),
+    },
   };
 
   if (includeBash) {

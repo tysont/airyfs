@@ -16,6 +16,8 @@ import type {
   DatabaseInfo,
   DirectoryEntry,
   DiskUsage,
+  ReadLinesOptions,
+  ReadLinesResult,
   ExecEvent,
   ExecOptions,
   ExecResult,
@@ -265,6 +267,10 @@ export class AiryFSClient {
 
   async appendFile(path: string, data: Uint8Array): Promise<void> {
     await this.operation('append', { path, data: Buffer.from(data).toString('base64') });
+  }
+
+  readLines(path: string, options: ReadLinesOptions = {}): Promise<ReadLinesResult> {
+    return this.operation<ReadLinesResult>('readLines', { path, ...options });
   }
 
   async diskUsage(path: string): Promise<DiskUsage> {

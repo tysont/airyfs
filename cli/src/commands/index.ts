@@ -33,6 +33,7 @@ import type {
   JobLogEntry,
   JobStatus,
   Operation,
+  ReadLinesOptions,
   WebhookEvent,
 } from '../api/types.js';
 import {
@@ -524,6 +525,33 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       }
       const response = await context.client().readFile(context.path(path));
       await pipeResponse(response, context.output.stdout, false);
+    }));
+
+  program.command('lines')
+    .argument('<path>')
+    .option('-n, --count <n>', 'number of lines for head/tail', Number)
+    .option('-t, --tail', 'read the last lines instead of the first')
+    .option('-r, --range <start:end>', 'read a 1-based inclusive line range, e.g. 200:250')
+    .description('Read a line-addressed slice of a text file (server-side, no container)')
+    .action(async (path, options, command) => perform(runtime, command, async (context) => {
+      let opts: ReadLinesOptions;
+      if (options.range) {
+        const [start, end] = String(options.range).split(':').map(Number);
+        if (!Number.isInteger(start) || !Number.isInteger(end)) {
+          throw new ConfigError('--range must be start:end, e.g. 200:250');
+        }
+        opts = { mode: 'range', start, end };
+      } else if (options.tail) {
+        opts = { mode: 'tail', count: options.count };
+      } else {
+        opts = { mode: 'head', count: options.count };
+      }
+      const result = await context.client().readLines(context.path(path), opts);
+      if (context.output.json) {
+        context.output.value(result);
+      } else {
+        for (const line of result.lines) context.output.stdout.write(`${line}\n`);
+      }
     }));
 
   program.command('head')

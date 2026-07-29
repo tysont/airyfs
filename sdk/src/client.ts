@@ -12,6 +12,8 @@ import type {
   DatabaseInfo,
   DiskUsage,
   DirectoryEntry,
+  ReadLinesOptions,
+  ReadLinesResult,
   AiryFSClientOptions,
   ExecEvent,
   ExecOptions,
@@ -280,6 +282,15 @@ export class AiryFSClient {
 
   appendFile(path: string, data: Uint8Array): Promise<void> {
     return this.operation('append', { path, data: encodeBase64(data) });
+  }
+
+  /**
+   * Read a bounded, line-addressed slice of a text file server-side (no
+   * Container). Line numbers are 1-based and inclusive. `mode` is `head`
+   * (first `count`), `tail` (last `count`), or `range` (`start`..`end`).
+   */
+  readLines(path: string, options: ReadLinesOptions = {}): Promise<ReadLinesResult> {
+    return this.operation<ReadLinesResult>('readLines', { path, ...options });
   }
 
   diskUsage(path: string): Promise<DiskUsage> {

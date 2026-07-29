@@ -36,6 +36,26 @@ export interface TrashEntry {
 }
 export interface RestoredTrashEntry extends TrashEntry { restoredPath: string }
 export interface ExecResult { commandId?: string; exitCode: number; stdout: string; stderr: string; outputTruncated?: boolean }
+export interface ReadLinesOptions {
+  /** `head` (first `count`), `tail` (last `count`), or `range` (`start`..`end`). Default `head`. */
+  mode?: 'head' | 'tail' | 'range';
+  /** Line count for `head`/`tail`. Defaults to 1000, max 10000. */
+  count?: number;
+  /** 1-based inclusive start line for `range`. */
+  start?: number;
+  /** 1-based inclusive end line for `range`. */
+  end?: number;
+}
+export interface ReadLinesResult {
+  lines: string[];
+  /** 1-based line number of the first returned line, or 0 when none. */
+  startLine: number;
+  /** 1-based line number of the last returned line, or 0 when none. */
+  endLine: number;
+  totalLines: number;
+  /** True when the file has more lines beyond those returned (in the read direction). */
+  truncated: boolean;
+}
 export interface ExecOptions {
   signal?: AbortSignal;
   /** Reuse this key to recover the same command after a client or network failure. */

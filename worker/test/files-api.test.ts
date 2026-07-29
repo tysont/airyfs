@@ -425,6 +425,30 @@ describe('filesystem HTTP API', () => {
     expect(await intoSelf.json()).toMatchObject({ error: { code: 'EINVAL' } });
   });
 
+  it('readLines reads head, tail, and 1-based inclusive ranges with metadata', async () => {
+    await fs.writeFile('/log.txt', Buffer.from('l1\nl2\nl3\nl4\nl5\n')); // 5 lines + trailing newline
+    const call = async (body: Record<string, unknown>) =>
+      (await operationRequest('readLines', body)).json() as Promise<{
+        lines: string[]; startLine: number; endLine: number; totalLines: number; truncated: boolean;
+      }>;
+
+    const head = await call({ path: '/log.txt', mode: 'head', count: 2 });
+    expect(head).toMatchObject({ lines: ['l1', 'l2'], startLine: 1, endLine: 2, totalLines: 5, truncated: true });
+
+    const tail = await call({ path: '/log.txt', mode: 'tail', count: 2 });
+    expect(tail).toMatchObject({ lines: ['l4', 'l5'], startLine: 4, endLine: 5, truncated: true });
+
+    const range = await call({ path: '/log.txt', mode: 'range', start: 2, end: 4 });
+    expect(range).toMatchObject({ lines: ['l2', 'l3', 'l4'], startLine: 2, endLine: 4, truncated: true });
+
+    const all = await call({ path: '/log.txt', mode: 'head', count: 100 });
+    expect(all).toMatchObject({ lines: ['l1', 'l2', 'l3', 'l4', 'l5'], totalLines: 5, truncated: false });
+
+    // Directory is rejected.
+    await fs.mkdir('/d');
+    expect((await operationRequest('readLines', { path: '/d' })).status).toBe(409);
+  });
+
   it('appends binary data at the locked current file size', async () => {
     await fs.writeFile('/log.bin', Buffer.from([0, 1]));
     sql.exec('UPDATE fs_inode SET ctime = 1 WHERE ino = ?', (await fs.stat('/log.bin')).ino);

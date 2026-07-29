@@ -3699,6 +3699,7 @@ function operationAccess(body: Record<string, unknown> | null, operation: string
     case 'checksum':
     case 'lstat':
     case 'du':
+    case 'readLines':
       return { operation: 'read', paths: pick('path') };
     case 'rename':
     case 'copy':

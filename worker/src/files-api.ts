@@ -7,6 +7,7 @@ import { sha256Path } from './checksum';
 import type { SqlExec } from './schema';
 import type { DiskUsage, FilesystemPrimitives } from './filesystem-primitives';
 import { normalizePath } from './auth';
+import { readLines } from './text-ops';
 
 const READ_CHUNK_SIZE = 256 * 1024;
 const WRITE_CHUNK_SIZE = 256 * 1024;
@@ -954,6 +955,9 @@ export async function handleFilesystemRequest(
       if (operation === 'du') {
         const path = normalizePath(requireString(body.path, 'path'));
         return Response.json(await withRead(access, path, async () => primitivesOrThrow(primitives).diskUsage(path)));
+      }
+      if (operation === 'readLines') {
+        return Response.json(await readLines(fs, access, body));
       }
       throw new HttpError(404, 'UNKNOWN_OPERATION', `Unknown filesystem operation: ${operation}`);
     }

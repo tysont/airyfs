@@ -20,6 +20,20 @@ export interface DirectoryEntry extends FileStats {
 
 export interface DiskUsage { bytes: number; inodes: number }
 
+export interface ReadLinesOptions {
+  mode?: 'head' | 'tail' | 'range';
+  count?: number;
+  start?: number;
+  end?: number;
+}
+export interface ReadLinesResult {
+  lines: string[];
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  truncated: boolean;
+}
+
 export interface ExecResult {
   commandId?: string;
   exitCode: number;
