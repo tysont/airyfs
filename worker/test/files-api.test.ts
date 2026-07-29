@@ -510,6 +510,11 @@ describe('filesystem HTTP API', () => {
     expect(bad.status).toBe(400);
     // Non-$ query => 400.
     expect((await operationRequest('jsonQuery', { path: '/data.json', query: 'name' })).status).toBe(400);
+
+    // A JSON file over the bind cap gets a clean 413, not an opaque bind error.
+    const big = `{"v":"${'x'.repeat(1024 * 1024 + 50)}"}`;
+    await fs.writeFile('/big.json', Buffer.from(big));
+    expect((await operationRequest('jsonQuery', { path: '/big.json', query: '$.v' })).status).toBe(413);
   });
 
   it('appends binary data at the locked current file size', async () => {

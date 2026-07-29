@@ -14,6 +14,13 @@ export const DEFAULT_LINES = 1000;
 export const MAX_LINES = 10_000;
 /** Hard ceiling on matches a single replaceText call may rewrite. */
 export const MAX_MATCHES = 100_000;
+/**
+ * Largest JSON file jsonQuery will bind to SQLite. Empirically, Durable Object
+ * SQLite rejects a bound parameter somewhere between 2 and 3 MiB (an opaque
+ * failure), so this sits well below that with margin. readLines/replaceText/
+ * lineStats keep the 10 MiB bound because they never bind content to SQL.
+ */
+export const MAX_JSON_QUERY_BYTES = 1024 * 1024;
 
 function escapeRegExp(value: string): string {
   return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
@@ -312,8 +319,8 @@ export async function jsonQuery(
     if (stats.isDirectory()) {
       throw new HttpError(409, 'EISDIR', `EISDIR: illegal operation on a directory, jsonQuery '${original}'`);
     }
-    if (stats.size > MAX_TEXT_FILE_BYTES) {
-      throw new HttpError(413, 'FILE_TOO_LARGE', `file exceeds ${MAX_TEXT_FILE_BYTES} bytes; use exec for larger files`);
+    if (stats.size > MAX_JSON_QUERY_BYTES) {
+      throw new HttpError(413, 'FILE_TOO_LARGE', `JSON file exceeds ${MAX_JSON_QUERY_BYTES} bytes; use exec (jq) for larger files`);
     }
     const content = (await fs.readFile(path, 'utf8')) as unknown as string;
 
