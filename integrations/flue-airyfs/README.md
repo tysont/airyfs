@@ -65,6 +65,23 @@ to pin or share volumes.
   reference throws "Illegal invocation" in workerd). Pass a custom `fetch` via
   the factory config if you need to (e.g. a CA bundle in tests).
 
+## Typed text operations (optional)
+
+AiryFS also exposes typed, server-side text operations that run in the Durable
+Object with no Container — `readLines`, `replaceText`, `lineStats`, `jsonQuery`
+— on the underlying `airyfs-sdk` client. The Flue `SandboxApi` surface is the
+fixed nine methods, so these are **not** exposed as model tools by default.
+
+To offer them to a Flue agent, supply a `SessionToolFactory` via the sandbox
+factory's `tools` option and wrap the client calls as `AgentTool`s. Note the
+Flue contract: **`tools` replaces the framework's entire default tool list**, so
+if you add these you must also re-declare the file/shell tools you still want —
+don't clobber the defaults by accident. Most agents don't need this; the model's
+`bash` tool can call the same operations, and application code can call the SDK
+directly (e.g. in a workflow) for the fast, Container-free path. The
+`@airyfs/agents-toolkit` package exposes all four as ready-made tools if you are
+on the Agents SDK rather than Flue.
+
 ## Security
 
 Prefer a volume-scoped `read,write,exec` AiryFS capability token over the root

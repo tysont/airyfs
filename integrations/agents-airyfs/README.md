@@ -45,6 +45,12 @@ actions drive them without a model.
 
 - **Direct-path tools** — `read_file`, `write_file` (auto-creates parent dirs),
   `list_dir`. Served from Durable Object SQLite, no Container.
+- **Typed text-operation tools** (server-side, no Container) — `read_lines`
+  (head/tail/range), `replace_text` (regex find/replace, **defaults to a dry
+  run** so the model sees the match count before writing), `line_stats`
+  (line/word/byte counts), and `json_query` (JSONPath via SQLite). These are the
+  fast path for the file inspection/edits models reach for; reserve `bash` for
+  work that needs a real shell.
 - **`bash`** — runs in the Container (`cwd` `/volume`, ~300s ceiling). Takes a
   recoverable guard snapshot first, then **prunes old `pre-exec-*` snapshots to
   a bounded count** (default 3) so a file-churning agent can't slowly fill the
