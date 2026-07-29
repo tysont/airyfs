@@ -171,8 +171,33 @@ export class AiryFSClient {
     return permanent ? undefined : await response.json() as TrashEntry;
   }
 
-  async makeDirectory(path: string): Promise<void> {
-    await this.request(this.resourcePath('directories', path), { method: 'PUT' });
+  async makeDirectory(path: string, recursive = false): Promise<void> {
+    const url = new URL(this.url(this.resourcePath('directories', path)));
+    if (recursive) url.searchParams.set('recursive', 'true');
+    await this.requestUrl(url, { method: 'PUT' });
+  }
+
+  /**
+   * Remove a file or directory in one request regardless of type. Soft-deletes
+   * to trash by default; `permanent` hard-deletes, `recursive` is required for a
+   * non-empty directory, `force` ignores a missing path.
+   */
+  async remove(
+    path: string,
+    options: { recursive?: boolean; force?: boolean; permanent?: boolean } = {},
+  ): Promise<TrashEntry | undefined> {
+    const url = new URL(this.url(this.resourcePath('directories', path)));
+    if (options.recursive) url.searchParams.set('recursive', 'true');
+    if (options.permanent) url.searchParams.set('permanent', 'true');
+    try {
+      const response = await this.requestUrl(url, { method: 'DELETE' });
+      return options.permanent ? undefined : (await response.json()) as TrashEntry;
+    } catch (error) {
+      if (options.force && error instanceof AiryFSApiError && error.code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   async removeDirectory(path: string, recursive = false, permanent = false): Promise<TrashEntry | undefined> {
@@ -205,8 +230,8 @@ export class AiryFSClient {
     await this.operation('rename', { from, to });
   }
 
-  async copy(from: string, to: string): Promise<void> {
-    await this.operation('copy', { from, to });
+  async copy(from: string, to: string, recursive = false): Promise<void> {
+    await this.operation('copy', recursive ? { from, to, recursive: true } : { from, to });
   }
 
   async symlink(target: string, path: string): Promise<void> {

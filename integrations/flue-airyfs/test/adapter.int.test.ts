@@ -165,6 +165,28 @@ describe("path-plane consistency across file ops and exec", () => {
   });
 });
 
+describe("round-trip counts (server-side recursion is one request)", () => {
+  it("mkdir -p and cp -r each cost a single HTTP request", async () => {
+    let calls = 0;
+    const client = new AiryFSClient(ENDPOINT, freshVolumeName("rtt"), {
+      token: TOKEN,
+      fetch: (input, init) => {
+        calls++;
+        return fetch(input, init);
+      },
+    });
+    createdVolumes.push(client);
+
+    await client.makeDirectory("/a/b/c/d", true); // 4 levels deep
+    expect(calls).toBe(1);
+
+    await client.writeFile("/a/b/c/d/f.txt", "x");
+    calls = 0;
+    await client.copy("/a", "/copy", true); // recursive subtree copy
+    expect(calls).toBe(1);
+  });
+});
+
 describe("exec semantics", () => {
   it("honors cwd and env in the /volume plane", async () => {
     const h = makeHarness("execenv");

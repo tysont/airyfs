@@ -81,20 +81,9 @@ export class AiryFSWorkspace {
     }
   }
 
-  /** Recursively create a directory, tolerating existing directories. */
+  /** Recursively create a directory (server-side `mkdir -p`, one request). */
   async mkdirp(path: string): Promise<void> {
-    const parts = path.split("/").filter(Boolean);
-    let current = "";
-    for (const part of parts) {
-      current += "/" + part;
-      try {
-        await this.client.makeDirectory(current);
-      } catch (err) {
-        if (!(err instanceof AiryFSApiError) || err.code !== "EEXIST") throw err;
-        const existing = await this.client.lstat(current);
-        if (existing.type !== "directory") throw err;
-      }
-    }
+    await this.client.makeDirectory(path, true);
   }
 
   async listDir(path: string): Promise<ListEntry[]> {

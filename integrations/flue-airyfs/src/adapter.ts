@@ -81,50 +81,21 @@ export class AiryFSSandboxApi implements SandboxApi {
   }
 
   async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
-    const sdkPath = toSdkPath(path);
-    if (!options?.recursive) {
-      await this.client.makeDirectory(sdkPath);
-      return;
-    }
-    // Recursive: segment-walk over the direct path. Tolerate EEXIST only when
-    // the existing entry is a directory — a *file* occupying a segment must
-    // propagate as an error, not be silently swallowed.
-    const parts = sdkPath.split("/").filter(Boolean);
-    let current = "";
-    for (const part of parts) {
-      current += "/" + part;
-      try {
-        await this.client.makeDirectory(current);
-      } catch (err) {
-        if (apiCode(err) !== "EEXIST") throw err;
-        const existing = await this.client.lstat(current);
-        if (existing.type !== "directory") {
-          throw err; // e.g. ENOTDIR: a file sits where a directory segment is needed
-        }
-      }
-    }
+    // Recursion (and EEXIST-only-if-dir tolerance) runs server-side in one
+    // request; no client-side segment-walk.
+    await this.client.makeDirectory(toSdkPath(path), options?.recursive ?? false);
   }
 
   async rm(
     path: string,
     options?: { recursive?: boolean; force?: boolean },
   ): Promise<void> {
-    const sdkPath = toSdkPath(path);
-    let type: string;
-    try {
-      ({ type } = await this.client.lstat(sdkPath));
-    } catch (err) {
-      // force ignores a missing path; otherwise propagate ENOENT.
-      if (options?.force && apiCode(err) === "ENOENT") return;
-      throw err;
-    }
-    if (type === "directory") {
-      // Soft delete (trash-backed, recoverable) — a strictly safer superset of
-      // rm for an agent workspace. recursive is honored exactly.
-      await this.client.removeDirectory(sdkPath, options?.recursive ?? false, false);
-    } else {
-      await this.client.deleteFile(sdkPath, false);
-    }
+    // Type-agnostic, trash-backed (recoverable) delete server-side; force
+    // ignores a missing path. No client-side lstat-then-branch.
+    await this.client.remove(toSdkPath(path), {
+      recursive: options?.recursive ?? false,
+      force: options?.force ?? false,
+    });
   }
 
   async exec(

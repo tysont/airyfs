@@ -31,7 +31,7 @@ export interface AiryFSRpcStub {
   writeFileStream(path: string, stream: ReadableStream<Uint8Array>): Promise<void>;
   listDir(path: string): Promise<string[]>;
   lstatPath(path: string): Promise<StatsDto>;
-  makeDir(path: string): Promise<void>;
+  makeDir(path: string, recursive?: boolean): Promise<void>;
   removePath(path: string, recursive?: boolean): Promise<void>;
   exec(command: string): Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
@@ -130,37 +130,22 @@ export class AiryFSRpcApi implements SandboxApi {
   }
 
   async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
-    const sdkPath = toSdkPath(path);
-    if (!options?.recursive) {
-      await this.stub.makeDir(sdkPath);
-      return;
-    }
-    const parts = sdkPath.split("/").filter(Boolean);
-    let current = "";
-    for (const part of parts) {
-      current += "/" + part;
-      try {
-        await this.stub.makeDir(current);
-      } catch (err) {
-        if (rpcCode(err) !== "EEXIST") throw err;
-        const existing = await this.stub.lstatPath(current);
-        if (existing.type !== "directory") throw err;
-      }
-    }
+    // Recursion runs in the DO in one RPC; no client-side segment-walk.
+    await this.stub.makeDir(toSdkPath(path), options?.recursive ?? false);
   }
 
   async rm(
     path: string,
     options?: { recursive?: boolean; force?: boolean },
   ): Promise<void> {
-    const sdkPath = toSdkPath(path);
+    // removePath is type-agnostic (file or dir); force ignores a missing path.
+    // No client-side lstat-then-branch.
     try {
-      await this.stub.lstatPath(sdkPath);
+      await this.stub.removePath(toSdkPath(path), options?.recursive ?? false);
     } catch (err) {
       if (options?.force && rpcCode(err) === "ENOENT") return;
       throw err;
     }
-    await this.stub.removePath(sdkPath, options?.recursive ?? false);
   }
 
   async exec(

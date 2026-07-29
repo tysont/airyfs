@@ -627,18 +627,8 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
     .description('Create a remote directory')
     .action(async (path, options, command) => perform(runtime, command, async (context) => {
       const target = context.path(path);
-      if (options.parents) {
-        const parts = target.split('/').filter(Boolean);
-        let current = '';
-        for (const part of parts) {
-          current += `/${part}`;
-          await context.client().makeDirectory(current).catch((error: unknown) => {
-            if (!(error instanceof AiryFSApiError && error.code === 'EEXIST')) throw error;
-          });
-        }
-      } else {
-        await context.client().makeDirectory(target);
-      }
+      // Recursion runs server-side in one request when -p is set.
+      await context.client().makeDirectory(target, options.parents === true);
       context.output.success(`Created ${target}`, { path: target });
     }));
 
@@ -660,10 +650,11 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
     .action(async (path, options, command) => perform(runtime, command, async (context) => {
       const target = context.path(path);
       if (target === '/') throw new ConfigError('Refusing to remove the volume root');
-      const entry = await statRemote(context, target);
-      const trashed = entry.type === 'directory'
-        ? await context.client().removeDirectory(target, options.recursive, options.permanent)
-        : await context.client().deleteFile(target, options.permanent);
+      // Type-agnostic server-side remove; no client-side stat-then-branch.
+      const trashed = await context.client().remove(target, {
+        recursive: options.recursive,
+        permanent: options.permanent,
+      });
       context.output.success(options.permanent ? `Permanently removed ${target}` : `Moved ${target} to trash`, trashed ?? { path: target });
     }));
 
@@ -714,11 +705,13 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
   program.command('cp')
     .argument('<from>')
     .argument('<to>')
-    .description('Copy a remote file')
-    .action(async (from, to, _options, command) => perform(runtime, command, async (context) => {
+    .option('-r, --recursive', 'copy directories recursively')
+    .description('Copy a remote file or directory')
+    .action(async (from, to, options, command) => perform(runtime, command, async (context) => {
       const source = context.path(from);
       const target = context.path(to);
-      await context.client().copy(source, target);
+      // Recursive copy runs server-side in a single request.
+      await context.client().copy(source, target, options.recursive === true);
       context.output.success(`Copied ${source} to ${target}`, { from: source, to: target });
     }));
 
