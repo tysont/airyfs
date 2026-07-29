@@ -1,0 +1,27 @@
+cli/src/api/client.ts
+  s_0e08240248c09e::t_2dc191be7f50a7 174-200,233-234
+cli/src/commands/index.ts
+  s_0e08240248c09e::t_22f0565c0882a0 630-631,653-657,708-710,713-714
+examples/flue-cloudflare-rpc/src/sandboxes/airyfs-rpc.ts
+  s_0e08240248c09e::t_a848dfda4fdc08 34,133-134,141-142,144
+integrations/agents-airyfs/src/workspace.ts
+  s_0e08240248c09e::t_4c803f8e2256bd 84,86
+integrations/flue-airyfs/src/adapter.ts
+  s_0e08240248c09e::t_a4452c2330d6d7 84-86,93-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8f522a40fc16f78343bcb234a9e5ba0ef67ea86e",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
