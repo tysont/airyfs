@@ -212,6 +212,86 @@ export async function mkdirRecursive(fs: FileSystem, path: string): Promise<void
   }
 }
 
+/** Upper bound on entries a single recursive copy may touch. */
+export const MAX_COPY_ENTRIES = 100_000;
+
+function isSameOrDescendant(parent: string, candidate: string): boolean {
+  const p = normalizePath(parent);
+  const c = normalizePath(candidate);
+  return c === p || p === '/' || c.startsWith(`${p}/`);
+}
+
+/**
+ * Copy a file, or a whole subtree when the source is a directory, server-side
+ * in one request. The source is fully enumerated first and rejected with
+ * `INVALID_ARGUMENT` (400) if it exceeds {@link MAX_COPY_ENTRIES} *before any
+ * mutation*, so hitting the cap never leaves a partial tree. File modes are
+ * preserved by `copyFile`; directories are created with the default mode;
+ * symlinks are copied as links (targets are not followed). A quota `ENOSPC`
+ * can still fail mid-copy, as in POSIX.
+ */
+export async function copyRecursive(fs: FileSystem, from: string, to: string): Promise<void> {
+  const src = normalizePath(from);
+  const dest = normalizePath(to);
+  const srcStat = await fs.lstat(src);
+
+  if (!srcStat.isDirectory()) {
+    if (srcStat.isSymbolicLink()) {
+      await fs.symlink(await fs.readlink(src), dest);
+      return;
+    }
+    await fs.copyFile(src, dest);
+    return;
+  }
+
+  if (isSameOrDescendant(src, dest)) {
+    const error = new Error(`EINVAL: cannot copy '${from}' into itself, '${to}'`) as ErrnoLike;
+    error.code = 'EINVAL';
+    throw error;
+  }
+
+  // 1) Enumerate the entire source subtree first (bounded). No mutation yet.
+  type CopyOp = { kind: 'dir' | 'file' | 'symlink'; src: string; dest: string };
+  const ops: CopyOp[] = [{ kind: 'dir', src, dest }];
+  const queue = [src];
+  let count = 0;
+  while (queue.length > 0) {
+    const dir = queue.shift()!;
+    const entries = await fs.readdirPlus(dir);
+    for (const entry of entries) {
+      if (dir === '/' && entry.name === '.airyfs-trash') continue;
+      if (++count > MAX_COPY_ENTRIES) {
+        throw new HttpError(400, 'INVALID_ARGUMENT', `copy exceeds ${MAX_COPY_ENTRIES} entries`);
+      }
+      const s = dir === '/' ? `/${entry.name}` : `${dir}/${entry.name}`;
+      const d = `${dest}${s.slice(src.length)}`;
+      if (entry.stats.isDirectory()) {
+        ops.push({ kind: 'dir', src: s, dest: d });
+        queue.push(s);
+      } else if (entry.stats.isSymbolicLink()) {
+        ops.push({ kind: 'symlink', src: s, dest: d });
+      } else {
+        ops.push({ kind: 'file', src: s, dest: d });
+      }
+    }
+  }
+
+  // 2) Apply. BFS order guarantees each parent directory precedes its children.
+  for (const op of ops) {
+    if (op.kind === 'dir') {
+      try {
+        await fs.mkdir(op.dest);
+      } catch (error) {
+        if ((error as ErrnoLike)?.code !== 'EEXIST') throw error;
+      }
+    } else if (op.kind === 'symlink') {
+      await fs.symlink(await fs.readlink(op.src), op.dest);
+    } else {
+      await fs.copyFile(op.src, op.dest);
+    }
+  }
+}
+
 export function errorResponse(error: unknown): Response {
   if (error instanceof HttpError) {
     return Response.json(
@@ -797,7 +877,9 @@ export async function handleFilesystemRequest(
       if (operation === 'copy') {
         const from = requireString(body.from, 'from');
         const to = requireString(body.to, 'to');
-        await withWrite(access, [from, to], () => fs.copyFile(from, to));
+        const recursive = body.recursive === true;
+        await withWrite(access, [from, to], () =>
+          recursive ? copyRecursive(fs, from, to) : fs.copyFile(from, to));
         await onMutation?.([to]);
         return new Response(null, { status: 204 });
       }

@@ -400,6 +400,31 @@ describe('filesystem HTTP API', () => {
     expect(blocked?.status).toBeGreaterThanOrEqual(400);
   });
 
+  it('cp -r copies a subtree (modes preserved, symlinks as links); rejects dir without recursive and copy-into-itself', async () => {
+    await fs.mkdir('/src');
+    await fs.mkdir('/src/sub');
+    await fs.writeFile('/src/a.txt', Buffer.from('alpha'));
+    await fs.writeFile('/src/sub/run.sh', Buffer.from('#!/bin/sh\n'));
+    primitives.chmod('/src/sub/run.sh', 0o755);
+    await fs.symlink('/src/a.txt', '/src/link');
+
+    const noRec = await operationRequest('copy', { from: '/src', to: '/nope' });
+    expect(noRec.status).toBe(409);
+    expect(await noRec.json()).toMatchObject({ error: { code: 'EISDIR' } });
+
+    const rec = await operationRequest('copy', { from: '/src', to: '/dst', recursive: true });
+    expect(rec.status).toBe(204);
+    expect(await fs.readFile('/dst/a.txt', 'utf8')).toBe('alpha');
+    expect(await fs.readFile('/dst/sub/run.sh', 'utf8')).toBe('#!/bin/sh\n');
+    expect(((await fs.stat('/dst/sub/run.sh')).mode & 0o777).toString(8)).toBe('755');
+    expect((await fs.lstat('/dst/link')).isSymbolicLink()).toBe(true);
+    expect(await fs.readlink('/dst/link')).toBe('/src/a.txt');
+
+    const intoSelf = await operationRequest('copy', { from: '/src', to: '/src/sub/self', recursive: true });
+    expect(intoSelf.status).toBe(400);
+    expect(await intoSelf.json()).toMatchObject({ error: { code: 'EINVAL' } });
+  });
+
   it('appends binary data at the locked current file size', async () => {
     await fs.writeFile('/log.bin', Buffer.from([0, 1]));
     sql.exec('UPDATE fs_inode SET ctime = 1 WHERE ino = ?', (await fs.stat('/log.bin')).ino);

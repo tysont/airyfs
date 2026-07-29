@@ -23,6 +23,7 @@ import {
   handleFilesystemRequest,
   HttpError,
   mkdirRecursive,
+  copyRecursive,
   parseV1Route,
   readExecRequest,
   readJsonObject,
@@ -1278,13 +1279,13 @@ export class AiryFS extends Container<Env> {
     } finally { release(); }
   }
 
-  async copyPath(from: string, to: string, hops = 0): Promise<void> {
+  async copyPath(from: string, to: string, recursive = false, hops = 0): Promise<void> {
     const hit = this.twoPathHit(from, to);
-    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).copyPath(hit.a, hit.b, hops + 1); }
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).copyPath(hit.a, hit.b, recursive, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite([from, to]);
     try {
-      await fs.copyFile(from, to);
+      await (recursive ? copyRecursive(fs, from, to) : fs.copyFile(from, to));
       await this.recordMutations(fs, [to]);
     } finally { release(); }
   }

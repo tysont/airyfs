@@ -214,8 +214,9 @@ export class AiryFSClient {
     return this.operation('rename', { from, to });
   }
 
-  copy(from: string, to: string): Promise<void> {
-    return this.operation('copy', { from, to });
+  /** Copy a file, or a whole subtree with `recursive` (server-side in one request). */
+  copy(from: string, to: string, recursive = false): Promise<void> {
+    return this.operation('copy', recursive ? { from, to, recursive: true } : { from, to });
   }
 
   symlink(target: string, path: string): Promise<void> {
