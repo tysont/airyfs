@@ -115,6 +115,11 @@ export class AiryFSWorkspace {
     return this.client.lineStats(path);
   }
 
+  /** Evaluate a JSONPath (e.g. `$.a.b[0]`) against a JSON file server-side. */
+  async jsonQuery(path: string, query: string): Promise<{ value: unknown; type: string | null; found: boolean }> {
+    return this.client.jsonQuery(path, query);
+  }
+
   async listDir(path: string): Promise<ListEntry[]> {
     const entries = await this.client.listDirectory(path);
     return entries.map((e) => ({ name: e.name, type: e.type, size: e.size }));

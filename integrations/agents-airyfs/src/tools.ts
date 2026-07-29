@@ -88,6 +88,13 @@ export function createWorkspaceTools(
       parameters: z.object({ path: z.string() }),
       execute: async ({ path }) => ws.lineStats(path),
     },
+    json_query: {
+      description:
+        "Extract a value from a JSON file by JSONPath (e.g. $.items[0].name), fast and no container. " +
+        "JSONPath subset only (not a jq/query language). Returns { value, type, found }.",
+      parameters: z.object({ path: z.string(), query: z.string() }),
+      execute: async ({ path, query }) => ws.jsonQuery(path, query),
+    },
     replace_text: {
       description:
         "Find/replace text in a file (server-side, atomic). Global by default. Runs as a dry run " +

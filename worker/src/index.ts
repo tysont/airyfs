@@ -3226,6 +3226,7 @@ export class AiryFS extends Container<Env> {
           (paths) => this.recordMutations(fs, paths),
           (ino) => latestFileVersion(this.ctx.storage.sql, ino),
           this.directFilesystem,
+          this.ctx.storage.sql,
         );
         if (filesystemResponse) {
           return v1Route.resource === 'browser-uploads'
@@ -3701,6 +3702,7 @@ function operationAccess(body: Record<string, unknown> | null, operation: string
     case 'du':
     case 'readLines':
     case 'lineStats':
+    case 'jsonQuery':
       return { operation: 'read', paths: pick('path') };
     case 'rename':
     case 'copy':

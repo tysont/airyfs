@@ -489,6 +489,29 @@ describe('filesystem HTTP API', () => {
     expect((await operationRequest('lineStats', { path: '/d3' })).status).toBe(409);
   });
 
+  it('jsonQuery extracts JSONPath values with typed results', async () => {
+    await fs.writeFile('/data.json', Buffer.from(JSON.stringify({
+      name: 'Alice', admin: true, tags: ['a', 'b'], meta: { n: 42 },
+    })));
+    const q = async (query: string) =>
+      (await operationRequest('jsonQuery', { path: '/data.json', query })).json() as Promise<{
+        value: unknown; type: string | null; found: boolean;
+      }>;
+
+    expect(await q('$.name')).toMatchObject({ value: 'Alice', type: 'text', found: true });
+    expect(await q('$.admin')).toMatchObject({ value: true, type: 'true', found: true });
+    expect(await q('$.meta.n')).toMatchObject({ value: 42, found: true });
+    expect(await q('$.tags')).toMatchObject({ value: ['a', 'b'], type: 'array', found: true });
+    expect(await q('$.missing')).toMatchObject({ value: null, type: null, found: false });
+
+    // Invalid JSON => 400.
+    await fs.writeFile('/bad.json', Buffer.from('{not json'));
+    const bad = await operationRequest('jsonQuery', { path: '/bad.json', query: '$.x' });
+    expect(bad.status).toBe(400);
+    // Non-$ query => 400.
+    expect((await operationRequest('jsonQuery', { path: '/data.json', query: 'name' })).status).toBe(400);
+  });
+
   it('appends binary data at the locked current file size', async () => {
     await fs.writeFile('/log.bin', Buffer.from([0, 1]));
     sql.exec('UPDATE fs_inode SET ctime = 1 WHERE ino = ?', (await fs.stat('/log.bin')).ino);
@@ -713,6 +736,7 @@ describe('filesystem HTTP API', () => {
       undefined,
       undefined,
       primitives,
+      sql,
     ))!;
   }
 });

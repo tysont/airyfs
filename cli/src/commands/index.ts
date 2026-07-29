@@ -554,6 +554,22 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       }
     }));
 
+  program.command('json')
+    .argument('<path>')
+    .argument('<query>')
+    .description('Extract a JSONPath (e.g. $.a.b[0]) from a JSON file (server-side)')
+    .action(async (path, query, _options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().jsonQuery(context.path(path), query);
+      if (context.output.json) {
+        context.output.value(result);
+      } else if (!result.found) {
+        context.output.success('No match', result);
+      } else {
+        const rendered = typeof result.value === 'string' ? result.value : JSON.stringify(result.value, null, 2);
+        context.output.stdout.write(`${rendered}\n`);
+      }
+    }));
+
   program.command('stats')
     .argument('<path>')
     .description('Count lines, words, and bytes of a text file (server-side)')

@@ -470,3 +470,8 @@ export interface CreateMountInput {
   chunkSize?: number;
   options?: Record<string, unknown>;
 }
+export interface JsonQueryResult {
+  value: unknown;
+  type: string | null;
+  found: boolean;
+}

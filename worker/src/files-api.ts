@@ -7,7 +7,7 @@ import { sha256Path } from './checksum';
 import type { SqlExec } from './schema';
 import type { DiskUsage, FilesystemPrimitives } from './filesystem-primitives';
 import { normalizePath } from './auth';
-import { readLines, replaceText, lineStats } from './text-ops';
+import { readLines, replaceText, lineStats, jsonQuery } from './text-ops';
 
 const READ_CHUNK_SIZE = 256 * 1024;
 const WRITE_CHUNK_SIZE = 256 * 1024;
@@ -805,6 +805,7 @@ export async function handleFilesystemRequest(
   onMutation?: (paths: string[]) => Promise<void>,
   versionForInode?: (ino: number) => number,
   primitives?: FilesystemPrimitives,
+  sql?: SqlExec,
 ): Promise<Response | null> {
   try {
     if (route.resource === 'files') {
@@ -961,6 +962,9 @@ export async function handleFilesystemRequest(
       }
       if (operation === 'lineStats') {
         return Response.json(await lineStats(fs, access, body));
+      }
+      if (operation === 'jsonQuery') {
+        return Response.json(await jsonQuery(fs, access, sql, body));
       }
       if (operation === 'replaceText') {
         const result = await replaceText(fs, access, body);

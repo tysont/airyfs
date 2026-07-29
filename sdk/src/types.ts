@@ -75,6 +75,11 @@ export interface LineStatsResult {
   words: number;
   bytes: number;
 }
+export interface JsonQueryResult {
+  value: unknown;
+  type: string | null;
+  found: boolean;
+}
 export interface ExecOptions {
   signal?: AbortSignal;
   /** Reuse this key to recover the same command after a client or network failure. */

@@ -2,6 +2,7 @@
 // ABOUTME: Object with no Container — line reads today, more to follow.
 
 import type { FileSystem } from 'agentfs-sdk/cloudflare';
+import type { SqlExec } from './schema';
 import { normalizePath } from './auth';
 import { HttpError, VolumeAccessCoordinator, writeFileStream } from './files-api';
 
@@ -262,6 +263,97 @@ export async function lineStats(
     const lines = splitLines(text).length;
     const words = text.split(/\s+/).filter((w) => w.length > 0).length;
     return { path, lines, words, bytes: stats.size };
+  } finally {
+    release();
+  }
+}
+
+export interface JsonQueryInput {
+  path?: unknown;
+  /** A JSONPath expression starting with `$`, e.g. `$.items[0].name`. */
+  query?: unknown;
+}
+
+export interface JsonQueryResult {
+  /** The extracted value (objects/arrays parsed; booleans/null typed). */
+  value: unknown;
+  /** SQLite json_type of the match, or null when the path did not match. */
+  type: string | null;
+  /** True when the JSONPath matched something in the document. */
+  found: boolean;
+}
+
+/**
+ * Evaluate a JSONPath against a JSON file using SQLite's built-in json_extract
+ * — a defined JSONPath subset, not a jq/query DSL — server-side (no Container).
+ * Trusted internal SQL with the content bound as a parameter (not the scoped-SQL
+ * path). Bounded to a {@link MAX_TEXT_FILE_BYTES} file; verify this stays within
+ * the DO SQLite bind limit.
+ */
+export async function jsonQuery(
+  fs: FileSystem,
+  access: VolumeAccessCoordinator | undefined,
+  sql: SqlExec | undefined,
+  input: JsonQueryInput,
+): Promise<JsonQueryResult> {
+  const original = reqString(input.path, 'path');
+  const path = normalizePath(original);
+  const query = reqString(input.query, 'query');
+  if (!query.startsWith('$')) {
+    throw new HttpError(400, 'INVALID_ARGUMENT', 'query must be a JSONPath starting with "$"');
+  }
+  if (!sql) {
+    throw new HttpError(500, 'INTERNAL_ERROR', 'SQL executor unavailable for jsonQuery');
+  }
+
+  const release = access ? await access.acquireRead(path) : () => undefined;
+  try {
+    const stats = await fs.lstat(path);
+    if (stats.isDirectory()) {
+      throw new HttpError(409, 'EISDIR', `EISDIR: illegal operation on a directory, jsonQuery '${original}'`);
+    }
+    if (stats.size > MAX_TEXT_FILE_BYTES) {
+      throw new HttpError(413, 'FILE_TOO_LARGE', `file exceeds ${MAX_TEXT_FILE_BYTES} bytes; use exec for larger files`);
+    }
+    const content = (await fs.readFile(path, 'utf8')) as unknown as string;
+
+    const valid = sql.exec('SELECT json_valid(?) AS ok', content).toArray();
+    if (Number(valid[0]?.ok ?? 0) !== 1) {
+      throw new HttpError(400, 'INVALID_JSON', 'file content is not valid JSON');
+    }
+
+    let type: string | null;
+    try {
+      const typeRow = sql.exec('SELECT json_type(?, ?) AS t', content, query).toArray();
+      type = typeRow[0]?.t == null ? null : String(typeRow[0].t);
+    } catch (error) {
+      // Malformed JSONPath surfaces as a SQLite error; map to a clean 400.
+      throw new HttpError(400, 'INVALID_ARGUMENT', `invalid JSONPath: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (type === null) {
+      return { value: null, type: null, found: false };
+    }
+
+    const raw = sql.exec('SELECT json_extract(?, ?) AS v', content, query).toArray()[0]?.v;
+    let value: unknown;
+    switch (type) {
+      case 'object':
+      case 'array':
+        value = JSON.parse(String(raw));
+        break;
+      case 'true':
+        value = true;
+        break;
+      case 'false':
+        value = false;
+        break;
+      case 'null':
+        value = null;
+        break;
+      default:
+        value = raw; // integer | real | text
+    }
+    return { value, type, found: true };
   } finally {
     release();
   }

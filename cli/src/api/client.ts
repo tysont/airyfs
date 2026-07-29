@@ -21,6 +21,7 @@ import type {
   ReplaceTextOptions,
   ReplaceTextResult,
   LineStatsResult,
+  JsonQueryResult,
   ExecEvent,
   ExecOptions,
   ExecResult,
@@ -287,6 +288,10 @@ export class AiryFSClient {
 
   lineStats(path: string): Promise<LineStatsResult> {
     return this.operation<LineStatsResult>('lineStats', { path });
+  }
+
+  jsonQuery(path: string, query: string): Promise<JsonQueryResult> {
+    return this.operation<JsonQueryResult>('jsonQuery', { path, query });
   }
 
   async diskUsage(path: string): Promise<DiskUsage> {

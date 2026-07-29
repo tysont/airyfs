@@ -17,6 +17,7 @@ import type {
   ReplaceTextOptions,
   ReplaceTextResult,
   LineStatsResult,
+  JsonQueryResult,
   AiryFSClientOptions,
   ExecEvent,
   ExecOptions,
@@ -313,6 +314,11 @@ export class AiryFSClient {
   /** Count lines, words, and bytes of one text file server-side (no Container). */
   lineStats(path: string): Promise<LineStatsResult> {
     return this.operation<LineStatsResult>('lineStats', { path });
+  }
+
+  /** Evaluate a JSONPath (e.g. `$.a.b[0]`) against a JSON file server-side. */
+  jsonQuery(path: string, query: string): Promise<JsonQueryResult> {
+    return this.operation<JsonQueryResult>('jsonQuery', { path, query });
   }
 
   diskUsage(path: string): Promise<DiskUsage> {
