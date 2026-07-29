@@ -384,6 +384,22 @@ describe('filesystem HTTP API', () => {
     expect(await response.json()).toMatchObject({ type: 'symlink' });
   });
 
+  it('mkdir -p creates missing parents, is idempotent on dirs, and rejects a file in a segment', async () => {
+    const put = (path: string, recursive: boolean) =>
+      handleFilesystemRequest(
+        new Request(`http://localhost${recursive ? '?recursive=true' : ''}`, { method: 'PUT' }),
+        route('directories', path),
+        fs,
+      );
+    expect((await put('/a/b/c', true))?.status).toBe(204);
+    expect((await fs.stat('/a/b/c')).isDirectory()).toBe(true);
+    expect((await put('/a/b/c', true))?.status).toBe(204);
+    expect((await put('/x/y/z', false))?.status).toBe(404);
+    await fs.writeFile('/a/file', Buffer.from('x'));
+    const blocked = await put('/a/file/child', true);
+    expect(blocked?.status).toBeGreaterThanOrEqual(400);
+  });
+
   it('appends binary data at the locked current file size', async () => {
     await fs.writeFile('/log.bin', Buffer.from([0, 1]));
     sql.exec('UPDATE fs_inode SET ctime = 1 WHERE ino = ?', (await fs.stat('/log.bin')).ino);

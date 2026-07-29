@@ -22,6 +22,7 @@ import {
   latestFileVersion,
   handleFilesystemRequest,
   HttpError,
+  mkdirRecursive,
   parseV1Route,
   readExecRequest,
   readJsonObject,
@@ -1244,13 +1245,13 @@ export class AiryFS extends Container<Env> {
     }
   }
 
-  async makeDir(path: string, hops = 0): Promise<void> {
+  async makeDir(path: string, recursive = false, hops = 0): Promise<void> {
     const hit = this.mountHit(path);
-    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).makeDir(hit.targetPath, hops + 1); }
+    if (hit) { this.checkHops(hops); return this.targetStub(hit.volume).makeDir(hit.targetPath, recursive, hops + 1); }
     const fs = this.filesystem();
     const release = await this.access.acquireWrite(path);
     try {
-      await fs.mkdir(path);
+      await (recursive ? mkdirRecursive(fs, path) : fs.mkdir(path));
       await this.recordMutations(fs, [path]);
     } finally { release(); }
   }

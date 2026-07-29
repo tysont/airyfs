@@ -177,8 +177,11 @@ export class AiryFSClient {
     return permanent ? undefined : await response.json() as TrashEntry;
   }
 
-  async makeDirectory(path: string): Promise<void> {
-    await this.request(this.resourcePath('directories', path), { method: 'PUT' });
+  /** Create a directory. With `recursive`, creates missing parents (`mkdir -p`) server-side in one request. */
+  async makeDirectory(path: string, recursive = false): Promise<void> {
+    const url = this.resourceUrl('directories', path);
+    if (recursive) url.searchParams.set('recursive', 'true');
+    await this.requestUrl(url, { method: 'PUT' });
   }
 
   async removeDirectory(path: string, recursive = false, permanent = false): Promise<TrashEntry | undefined> {

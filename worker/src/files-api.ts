@@ -191,6 +191,27 @@ export function toStatsDto(stats: Stats): StatsDto {
   };
 }
 
+/**
+ * Create a directory and any missing parents (POSIX `mkdir -p`), server-side in
+ * one request. Tolerates an existing *directory* at any segment; a *file*
+ * occupying a segment re-throws the underlying error (EEXIST/ENOTDIR). Not
+ * atomic — matches `mkdir -p` and the single-`mkdir` scoping already used here.
+ */
+export async function mkdirRecursive(fs: FileSystem, path: string): Promise<void> {
+  const parts = normalizePath(path).split('/').filter(Boolean);
+  let current = '';
+  for (const part of parts) {
+    current += `/${part}`;
+    try {
+      await fs.mkdir(current);
+    } catch (error) {
+      if ((error as ErrnoLike)?.code !== 'EEXIST') throw error;
+      const stats = await fs.lstat(current);
+      if (!stats.isDirectory()) throw error;
+    }
+  }
+}
+
 export function errorResponse(error: unknown): Response {
   if (error instanceof HttpError) {
     return Response.json(
@@ -746,7 +767,9 @@ export async function handleFilesystemRequest(
         })));
       }
       if (request.method === 'PUT') {
-        await withWrite(access, route.path, () => fs.mkdir(route.path));
+        const recursive = new URL(request.url).searchParams.get('recursive') === 'true';
+        await withWrite(access, route.path, () =>
+          recursive ? mkdirRecursive(fs, route.path) : fs.mkdir(route.path));
         await onMutation?.([route.path]);
         return new Response(null, { status: 204 });
       }
