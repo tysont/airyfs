@@ -3,7 +3,7 @@
 
 import type { FileSystem } from 'agentfs-sdk/cloudflare';
 import { normalizePath } from './auth';
-import { HttpError, VolumeAccessCoordinator } from './files-api';
+import { HttpError, VolumeAccessCoordinator, writeFileStream } from './files-api';
 
 /** Largest file a text operation will read, matching grep's scan bound. */
 export const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024;
@@ -11,6 +11,12 @@ export const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_LINES = 1000;
 /** Hard ceiling on lines returned in a single readLines call. */
 export const MAX_LINES = 10_000;
+/** Hard ceiling on matches a single replaceText call may rewrite. */
+export const MAX_MATCHES = 100_000;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+}
 
 function reqString(value: unknown, name: string): string {
   if (typeof value !== 'string' || value.length === 0) {
@@ -132,6 +138,85 @@ export async function readLines(
       totalLines: total,
       truncated: mode === 'tail' ? startIdx > 0 : endExclusive < total,
     };
+  } finally {
+    release();
+  }
+}
+
+export interface ReplaceTextInput {
+  path?: unknown;
+  /** Search pattern — a JS regular expression source, or a literal when `literal` is set. */
+  pattern?: unknown;
+  /** Replacement string. Supports `$1`..`$n`, `$&`, `$\`` and `$'` (JS String.replace semantics). */
+  replacement?: unknown;
+  /** Case-insensitive matching. Default false. */
+  ignoreCase?: unknown;
+  /** Treat `pattern` as a literal string instead of a regular expression. Default false. */
+  literal?: unknown;
+  /** Report the match count without writing. Default false. */
+  dryRun?: unknown;
+}
+
+export interface ReplaceTextResult {
+  /** Number of matches found (and replaced, unless dryRun). */
+  matches: number;
+  /** True when the file was rewritten (matches > 0 and not dryRun). */
+  changed: boolean;
+  dryRun: boolean;
+}
+
+/**
+ * Find/replace over one text file, written back atomically (temp + rename) so a
+ * reader never sees a partial file. Bounded to a {@link MAX_TEXT_FILE_BYTES}
+ * file and {@link MAX_MATCHES} matches; rejects a too-broad match before
+ * writing. `dryRun` reports the count without mutating. Global by default
+ * (all occurrences).
+ */
+export async function replaceText(
+  fs: FileSystem,
+  access: VolumeAccessCoordinator | undefined,
+  input: ReplaceTextInput,
+): Promise<ReplaceTextResult> {
+  const original = reqString(input.path, 'path');
+  const path = normalizePath(original);
+  if (typeof input.pattern !== 'string' || input.pattern.length === 0) {
+    throw new HttpError(400, 'INVALID_ARGUMENT', 'Missing "pattern" string');
+  }
+  if (typeof input.replacement !== 'string') {
+    throw new HttpError(400, 'INVALID_ARGUMENT', 'Missing "replacement" string');
+  }
+  const dryRun = input.dryRun === true;
+  const source = input.literal === true ? escapeRegExp(input.pattern) : input.pattern;
+  let regex: RegExp;
+  try {
+    regex = new RegExp(source, input.ignoreCase === true ? 'gi' : 'g');
+  } catch (error) {
+    throw new HttpError(400, 'INVALID_PATTERN', error instanceof Error ? error.message : String(error));
+  }
+
+  const release = access ? await access.acquireWrite(path) : () => undefined;
+  try {
+    const stats = await fs.lstat(path);
+    if (stats.isDirectory()) {
+      throw new HttpError(409, 'EISDIR', `EISDIR: illegal operation on a directory, replaceText '${original}'`);
+    }
+    if (stats.size > MAX_TEXT_FILE_BYTES) {
+      throw new HttpError(413, 'FILE_TOO_LARGE', `file exceeds ${MAX_TEXT_FILE_BYTES} bytes; use exec for larger files`);
+    }
+    const content = (await fs.readFile(path, 'utf8')) as unknown as string;
+    const matches = content.match(regex)?.length ?? 0;
+    if (matches > MAX_MATCHES) {
+      throw new HttpError(400, 'INVALID_ARGUMENT', `pattern matches more than ${MAX_MATCHES} times; narrow it`);
+    }
+    if (dryRun || matches === 0) {
+      return { matches, changed: false, dryRun };
+    }
+    const next = content.replace(regex, input.replacement);
+    // Atomic write-back: we already hold the path write lock, so hand
+    // writeFileStream a null coordinator to avoid re-locking.
+    const stream = new Response(next).body as ReadableStream<Uint8Array>;
+    await writeFileStream(fs, path, stream, undefined);
+    return { matches, changed: true, dryRun: false };
   } finally {
     release();
   }

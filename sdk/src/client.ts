@@ -14,6 +14,8 @@ import type {
   DirectoryEntry,
   ReadLinesOptions,
   ReadLinesResult,
+  ReplaceTextOptions,
+  ReplaceTextResult,
   AiryFSClientOptions,
   ExecEvent,
   ExecOptions,
@@ -291,6 +293,20 @@ export class AiryFSClient {
    */
   readLines(path: string, options: ReadLinesOptions = {}): Promise<ReadLinesResult> {
     return this.operation<ReadLinesResult>('readLines', { path, ...options });
+  }
+
+  /**
+   * Find/replace over one text file server-side, written back atomically.
+   * Global by default; `dryRun` returns the match count without writing.
+   * Returns `{ matches, changed, dryRun }`.
+   */
+  replaceText(
+    path: string,
+    pattern: string,
+    replacement: string,
+    options: ReplaceTextOptions = {},
+  ): Promise<ReplaceTextResult> {
+    return this.operation<ReplaceTextResult>('replaceText', { path, pattern, replacement, ...options });
   }
 
   diskUsage(path: string): Promise<DiskUsage> {

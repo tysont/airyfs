@@ -56,6 +56,19 @@ export interface ReadLinesResult {
   /** True when the file has more lines beyond those returned (in the read direction). */
   truncated: boolean;
 }
+export interface ReplaceTextOptions {
+  /** Case-insensitive matching. Default false. */
+  ignoreCase?: boolean;
+  /** Treat the pattern as a literal string, not a regex. Default false. */
+  literal?: boolean;
+  /** Report the match count without writing. Default false. */
+  dryRun?: boolean;
+}
+export interface ReplaceTextResult {
+  matches: number;
+  changed: boolean;
+  dryRun: boolean;
+}
 export interface ExecOptions {
   signal?: AbortSignal;
   /** Reuse this key to recover the same command after a client or network failure. */

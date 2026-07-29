@@ -449,6 +449,36 @@ describe('filesystem HTTP API', () => {
     expect((await operationRequest('readLines', { path: '/d' })).status).toBe(409);
   });
 
+  it('replaceText replaces globally, supports dryRun and literal, and writes back', async () => {
+    await fs.writeFile('/f.txt', Buffer.from('foo bar foo baz foo'));
+    const call = async (body: Record<string, unknown>) =>
+      (await operationRequest('replaceText', body)).json() as Promise<{ matches: number; changed: boolean; dryRun: boolean }>;
+
+    // dryRun counts without writing.
+    const dry = await call({ path: '/f.txt', pattern: 'foo', replacement: 'X', dryRun: true });
+    expect(dry).toMatchObject({ matches: 3, changed: false, dryRun: true });
+    expect(await fs.readFile('/f.txt', 'utf8')).toBe('foo bar foo baz foo');
+
+    // Real replace rewrites the file.
+    const done = await call({ path: '/f.txt', pattern: 'foo', replacement: 'X' });
+    expect(done).toMatchObject({ matches: 3, changed: true, dryRun: false });
+    expect(await fs.readFile('/f.txt', 'utf8')).toBe('X bar X baz X');
+
+    // literal treats regex metachars as text.
+    await fs.writeFile('/g.txt', Buffer.from('a.b a.b axb'));
+    const lit = await call({ path: '/g.txt', pattern: 'a.b', replacement: 'Z', literal: true });
+    expect(lit.matches).toBe(2);
+    expect(await fs.readFile('/g.txt', 'utf8')).toBe('Z Z axb');
+
+    // No match => not changed.
+    const none = await call({ path: '/g.txt', pattern: 'nope', replacement: 'x' });
+    expect(none).toMatchObject({ matches: 0, changed: false });
+
+    // Directory rejected.
+    await fs.mkdir('/d2');
+    expect((await operationRequest('replaceText', { path: '/d2', pattern: 'a', replacement: 'b' })).status).toBe(409);
+  });
+
   it('appends binary data at the locked current file size', async () => {
     await fs.writeFile('/log.bin', Buffer.from([0, 1]));
     sql.exec('UPDATE fs_inode SET ctime = 1 WHERE ino = ?', (await fs.stat('/log.bin')).ino);

@@ -554,6 +554,30 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       }
     }));
 
+  program.command('replace')
+    .argument('<path>')
+    .argument('<pattern>')
+    .argument('<replacement>')
+    .option('-i, --ignore-case', 'case-insensitive matching')
+    .option('-l, --literal', 'treat the pattern as a literal string, not a regex')
+    .option('--dry-run', 'report the match count without writing')
+    .description('Find/replace text in a file server-side, written back atomically')
+    .action(async (path, pattern, replacement, options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().replaceText(context.path(path), pattern, replacement, {
+        ignoreCase: options.ignoreCase,
+        literal: options.literal,
+        dryRun: options.dryRun,
+      });
+      context.output.success(
+        result.dryRun
+          ? `${result.matches} match${result.matches === 1 ? '' : 'es'} (dry run, not written)`
+          : result.changed
+            ? `Replaced ${result.matches} match${result.matches === 1 ? '' : 'es'}`
+            : 'No matches',
+        result,
+      );
+    }));
+
   program.command('head')
     .argument('<path>')
     .option('-n, --lines <count>', 'number of leading lines', Number, 10)

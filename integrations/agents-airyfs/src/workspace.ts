@@ -97,6 +97,19 @@ export class AiryFSWorkspace {
     return this.client.readLines(path, options);
   }
 
+  /**
+   * Find/replace over one text file server-side, written back atomically.
+   * Global by default; `dryRun` returns the match count without writing.
+   */
+  async replaceText(
+    path: string,
+    pattern: string,
+    replacement: string,
+    options: { ignoreCase?: boolean; literal?: boolean; dryRun?: boolean } = {},
+  ): Promise<{ matches: number; changed: boolean; dryRun: boolean }> {
+    return this.client.replaceText(path, pattern, replacement, options);
+  }
+
   async listDir(path: string): Promise<ListEntry[]> {
     const entries = await this.client.listDirectory(path);
     return entries.map((e) => ({ name: e.name, type: e.type, size: e.size }));

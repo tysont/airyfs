@@ -3710,6 +3710,7 @@ function operationAccess(body: Record<string, unknown> | null, operation: string
     case 'touch':
     case 'chmod':
     case 'append':
+    case 'replaceText':
       return { operation: 'write', paths: pick('path') };
     case 'link':
       return { operation: 'write', paths: [...pick('existing'), ...pick('path')] };

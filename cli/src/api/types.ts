@@ -33,6 +33,16 @@ export interface ReadLinesResult {
   totalLines: number;
   truncated: boolean;
 }
+export interface ReplaceTextOptions {
+  ignoreCase?: boolean;
+  literal?: boolean;
+  dryRun?: boolean;
+}
+export interface ReplaceTextResult {
+  matches: number;
+  changed: boolean;
+  dryRun: boolean;
+}
 
 export interface ExecResult {
   commandId?: string;

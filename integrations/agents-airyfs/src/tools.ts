@@ -83,6 +83,22 @@ export function createWorkspaceTools(
       execute: async ({ path, mode, count, start, end }) =>
         ws.readLines(path, { mode, count, start, end }),
     },
+    replace_text: {
+      description:
+        "Find/replace text in a file (server-side, atomic). Global by default. Runs as a dry run " +
+        "unless dryRun is false — inspect the returned match count first, then re-run with dryRun:false to write.",
+      parameters: z.object({
+        path: z.string(),
+        pattern: z.string(),
+        replacement: z.string(),
+        ignoreCase: z.boolean().default(false),
+        literal: z.boolean().default(false),
+        // Model-facing default is a preview: the risk is a regex matching more than intended.
+        dryRun: z.boolean().default(true),
+      }),
+      execute: async ({ path, pattern, replacement, ignoreCase, literal, dryRun }) =>
+        ws.replaceText(path, pattern, replacement, { ignoreCase, literal, dryRun }),
+    },
   };
 
   if (includeBash) {
