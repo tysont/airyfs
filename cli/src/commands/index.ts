@@ -554,6 +554,18 @@ function registerFileCommands(program: Command, runtime: Runtime): void {
       }
     }));
 
+  program.command('stats')
+    .argument('<path>')
+    .description('Count lines, words, and bytes of a text file (server-side)')
+    .action(async (path, _options, command) => perform(runtime, command, async (context) => {
+      const result = await context.client().lineStats(context.path(path));
+      if (context.output.json) {
+        context.output.value(result);
+      } else {
+        context.output.success(`${result.lines} lines, ${result.words} words, ${result.bytes} bytes`, result);
+      }
+    }));
+
   program.command('replace')
     .argument('<path>')
     .argument('<pattern>')

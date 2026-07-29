@@ -43,6 +43,12 @@ export interface ReplaceTextResult {
   changed: boolean;
   dryRun: boolean;
 }
+export interface LineStatsResult {
+  path: string;
+  lines: number;
+  words: number;
+  bytes: number;
+}
 
 export interface ExecResult {
   commandId?: string;

@@ -20,6 +20,7 @@ import type {
   ReadLinesResult,
   ReplaceTextOptions,
   ReplaceTextResult,
+  LineStatsResult,
   ExecEvent,
   ExecOptions,
   ExecResult,
@@ -282,6 +283,10 @@ export class AiryFSClient {
     options: ReplaceTextOptions = {},
   ): Promise<ReplaceTextResult> {
     return this.operation<ReplaceTextResult>('replaceText', { path, pattern, replacement, ...options });
+  }
+
+  lineStats(path: string): Promise<LineStatsResult> {
+    return this.operation<LineStatsResult>('lineStats', { path });
   }
 
   async diskUsage(path: string): Promise<DiskUsage> {

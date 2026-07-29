@@ -69,6 +69,12 @@ export interface ReplaceTextResult {
   changed: boolean;
   dryRun: boolean;
 }
+export interface LineStatsResult {
+  path: string;
+  lines: number;
+  words: number;
+  bytes: number;
+}
 export interface ExecOptions {
   signal?: AbortSignal;
   /** Reuse this key to recover the same command after a client or network failure. */

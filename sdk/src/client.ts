@@ -16,6 +16,7 @@ import type {
   ReadLinesResult,
   ReplaceTextOptions,
   ReplaceTextResult,
+  LineStatsResult,
   AiryFSClientOptions,
   ExecEvent,
   ExecOptions,
@@ -307,6 +308,11 @@ export class AiryFSClient {
     options: ReplaceTextOptions = {},
   ): Promise<ReplaceTextResult> {
     return this.operation<ReplaceTextResult>('replaceText', { path, pattern, replacement, ...options });
+  }
+
+  /** Count lines, words, and bytes of one text file server-side (no Container). */
+  lineStats(path: string): Promise<LineStatsResult> {
+    return this.operation<LineStatsResult>('lineStats', { path });
   }
 
   diskUsage(path: string): Promise<DiskUsage> {

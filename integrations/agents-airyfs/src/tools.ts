@@ -83,6 +83,11 @@ export function createWorkspaceTools(
       execute: async ({ path, mode, count, start, end }) =>
         ws.readLines(path, { mode, count, start, end }),
     },
+    line_stats: {
+      description: "Count the lines, words, and bytes of a text file (fast, no container).",
+      parameters: z.object({ path: z.string() }),
+      execute: async ({ path }) => ws.lineStats(path),
+    },
     replace_text: {
       description:
         "Find/replace text in a file (server-side, atomic). Global by default. Runs as a dry run " +

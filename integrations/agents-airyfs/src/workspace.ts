@@ -110,6 +110,11 @@ export class AiryFSWorkspace {
     return this.client.replaceText(path, pattern, replacement, options);
   }
 
+  /** Count lines, words, and bytes of one text file server-side (no Container). */
+  async lineStats(path: string): Promise<{ path: string; lines: number; words: number; bytes: number }> {
+    return this.client.lineStats(path);
+  }
+
   async listDir(path: string): Promise<ListEntry[]> {
     const entries = await this.client.listDirectory(path);
     return entries.map((e) => ({ name: e.name, type: e.type, size: e.size }));

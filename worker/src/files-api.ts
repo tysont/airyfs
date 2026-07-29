@@ -7,7 +7,7 @@ import { sha256Path } from './checksum';
 import type { SqlExec } from './schema';
 import type { DiskUsage, FilesystemPrimitives } from './filesystem-primitives';
 import { normalizePath } from './auth';
-import { readLines, replaceText } from './text-ops';
+import { readLines, replaceText, lineStats } from './text-ops';
 
 const READ_CHUNK_SIZE = 256 * 1024;
 const WRITE_CHUNK_SIZE = 256 * 1024;
@@ -958,6 +958,9 @@ export async function handleFilesystemRequest(
       }
       if (operation === 'readLines') {
         return Response.json(await readLines(fs, access, body));
+      }
+      if (operation === 'lineStats') {
+        return Response.json(await lineStats(fs, access, body));
       }
       if (operation === 'replaceText') {
         const result = await replaceText(fs, access, body);

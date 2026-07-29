@@ -479,6 +479,16 @@ describe('filesystem HTTP API', () => {
     expect((await operationRequest('replaceText', { path: '/d2', pattern: 'a', replacement: 'b' })).status).toBe(409);
   });
 
+  it('lineStats counts lines, words, and bytes; rejects a directory', async () => {
+    await fs.writeFile('/s.txt', Buffer.from('one two\nthree four five\n')); // 2 lines, 5 words, 24 bytes
+    const r = await (await operationRequest('lineStats', { path: '/s.txt' })).json() as {
+      lines: number; words: number; bytes: number;
+    };
+    expect(r).toMatchObject({ lines: 2, words: 5, bytes: 24 });
+    await fs.mkdir('/d3');
+    expect((await operationRequest('lineStats', { path: '/d3' })).status).toBe(409);
+  });
+
   it('appends binary data at the locked current file size', async () => {
     await fs.writeFile('/log.bin', Buffer.from([0, 1]));
     sql.exec('UPDATE fs_inode SET ctime = 1 WHERE ino = ?', (await fs.stat('/log.bin')).ino);

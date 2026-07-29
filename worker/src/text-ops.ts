@@ -221,3 +221,48 @@ export async function replaceText(
     release();
   }
 }
+
+export interface LineStatsInput {
+  path?: unknown;
+}
+
+export interface LineStatsResult {
+  path: string;
+  lines: number;
+  words: number;
+  bytes: number;
+}
+
+/**
+ * Count lines, whitespace-delimited words, and bytes of one text file,
+ * server-side (no Container). Bytes are the exact file size; a single trailing
+ * newline does not add an empty line. Match counting is intentionally excluded
+ * — that lives in `search` (grep) where match semantics are defined once.
+ * Bounded to a {@link MAX_TEXT_FILE_BYTES} file. Single-file only; a directory
+ * is rejected (aggregate scope is not offered here to avoid silently crossing
+ * mount boundaries).
+ */
+export async function lineStats(
+  fs: FileSystem,
+  access: VolumeAccessCoordinator | undefined,
+  input: LineStatsInput,
+): Promise<LineStatsResult> {
+  const original = reqString(input.path, 'path');
+  const path = normalizePath(original);
+  const release = access ? await access.acquireRead(path) : () => undefined;
+  try {
+    const stats = await fs.lstat(path);
+    if (stats.isDirectory()) {
+      throw new HttpError(409, 'EISDIR', `EISDIR: illegal operation on a directory, lineStats '${original}'`);
+    }
+    if (stats.size > MAX_TEXT_FILE_BYTES) {
+      throw new HttpError(413, 'FILE_TOO_LARGE', `file exceeds ${MAX_TEXT_FILE_BYTES} bytes; use exec for larger files`);
+    }
+    const text = (await fs.readFile(path, 'utf8')) as unknown as string;
+    const lines = splitLines(text).length;
+    const words = text.split(/\s+/).filter((w) => w.length > 0).length;
+    return { path, lines, words, bytes: stats.size };
+  } finally {
+    release();
+  }
+}

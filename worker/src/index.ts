@@ -3700,6 +3700,7 @@ function operationAccess(body: Record<string, unknown> | null, operation: string
     case 'lstat':
     case 'du':
     case 'readLines':
+    case 'lineStats':
       return { operation: 'read', paths: pick('path') };
     case 'rename':
     case 'copy':
