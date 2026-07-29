@@ -1,0 +1,19 @@
+sdk/src/client.ts
+  s_e75ddacbc6cd54::t_9df6a2af957d90 187-212,260-264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "123e67cdcc2e29764d9f388839dc41368142aeca",
+  "prompts": {},
+  "sessions": {
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
