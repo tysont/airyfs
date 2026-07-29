@@ -17,7 +17,9 @@ function makeWorkspace(tag: string, opts = {}): AiryFSWorkspace {
   return ws;
 }
 async function run<S extends WorkspaceTool>(tool: S, args: unknown): Promise<unknown> {
-  return tool.execute(args as never);
+  // Mirror how the AI SDK invokes a tool: validate/parse inputs through the
+  // zod schema (applying defaults like replace_text's dryRun:true) before execute.
+  return tool.execute(tool.parameters.parse(args) as never);
 }
 
 afterAll(async () => {
@@ -77,6 +79,43 @@ describe("tool descriptors execute end to end", () => {
     const r = await ws.bash("sleep 5", { timeoutMs: 1000 });
     expect(r.exitCode).toBe(124);
     expect(r.stderr).toContain("timed out");
+  });
+});
+
+describe("typed text-operation tools (server-side, no container)", () => {
+  it("read_lines / replace_text / line_stats / json_query execute end to end", async () => {
+    const ws = makeWorkspace("textops");
+    const tools = createWorkspaceTools(ws);
+
+    await ws.writeFile("/log.txt", "l1\nl2\nl3\nl4\nl5\n");
+    const tail = (await run(tools.read_lines!, { path: "/log.txt", mode: "tail", count: 2 })) as {
+      lines: string[];
+    };
+    expect(tail.lines.join(",")).toBe("l4,l5");
+
+    await ws.writeFile("/r.txt", "foo foo bar");
+    // Tool defaults to dryRun:true — count without writing.
+    const dry = (await run(tools.replace_text!, { path: "/r.txt", pattern: "foo", replacement: "x" })) as {
+      matches: number; changed: boolean;
+    };
+    expect(dry).toMatchObject({ matches: 2, changed: false });
+    expect(await ws.readFile("/r.txt")).toBe("foo foo bar");
+    // Explicit dryRun:false writes.
+    const wrote = (await run(tools.replace_text!, {
+      path: "/r.txt", pattern: "foo", replacement: "x", dryRun: false,
+    })) as { changed: boolean };
+    expect(wrote.changed).toBe(true);
+    expect(await ws.readFile("/r.txt")).toBe("x x bar");
+
+    await ws.writeFile("/s.txt", "a b\nc d e\n");
+    const stats = (await run(tools.line_stats!, { path: "/s.txt" })) as { lines: number; words: number };
+    expect(stats).toMatchObject({ lines: 2, words: 5 });
+
+    await ws.writeFile("/d.json", JSON.stringify({ items: [{ name: "first" }] }));
+    const jq = (await run(tools.json_query!, { path: "/d.json", query: "$.items[0].name" })) as {
+      value: unknown; found: boolean;
+    };
+    expect(jq).toMatchObject({ value: "first", found: true });
   });
 });
 
