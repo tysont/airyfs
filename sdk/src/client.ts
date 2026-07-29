@@ -184,6 +184,32 @@ export class AiryFSClient {
     await this.requestUrl(url, { method: 'PUT' });
   }
 
+  /**
+   * Remove a file or directory in one request, regardless of type — no need to
+   * lstat first to choose between {@link deleteFile} and {@link removeDirectory}.
+   * Soft-deletes to trash by default (recoverable; returns the TrashEntry);
+   * `permanent` hard-deletes, `recursive` is required to permanently remove a
+   * non-empty directory, and `force` ignores a missing path. Routed through the
+   * type-agnostic delete path (trash move for soft, `fs.rm` for permanent).
+   */
+  async remove(
+    path: string,
+    options: { recursive?: boolean; force?: boolean; permanent?: boolean } = {},
+  ): Promise<TrashEntry | undefined> {
+    const url = this.resourceUrl('directories', path);
+    if (options.recursive) url.searchParams.set('recursive', 'true');
+    if (options.permanent) url.searchParams.set('permanent', 'true');
+    try {
+      const response = await this.requestUrl(url, { method: 'DELETE' });
+      return options.permanent ? undefined : (await response.json()) as TrashEntry;
+    } catch (error) {
+      if (options.force && error instanceof AiryFSApiError && error.code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   async removeDirectory(path: string, recursive = false, permanent = false): Promise<TrashEntry | undefined> {
     const url = this.resourceUrl('directories', path);
     if (recursive) url.searchParams.set('recursive', 'true');
@@ -231,6 +257,11 @@ export class AiryFSClient {
     return this.operation('truncate', { path, size });
   }
 
+  /**
+   * Metadata for a path. AiryFS does not transparently follow symlinks, so
+   * this reports the link itself for a symlink path (there is no separate
+   * follow-symlink stat).
+   */
   lstat(path: string): Promise<import('./types.js').FileStats> {
     return this.operation('lstat', { path });
   }
