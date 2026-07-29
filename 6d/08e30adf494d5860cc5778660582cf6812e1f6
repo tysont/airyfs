@@ -1,0 +1,19 @@
+worker/src/text-ops.ts
+  s_e75ddacbc6cd54::t_c4eb36afa5f860 6,14-19,145-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6d08e30adf494d5860cc5778660582cf6812e1f6",
+  "prompts": {},
+  "sessions": {
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
