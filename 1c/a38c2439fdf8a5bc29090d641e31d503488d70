@@ -1,0 +1,29 @@
+sdk/src/client.ts
+  s_0e08240248c09e::t_2155274e9776d7 15-16,287-295
+sdk/src/types.ts
+  s_0e08240248c09e::t_f4efa1ee96c245 39-58
+worker/src/files-api.ts
+  s_0e08240248c09e::t_24a20498728edc 10,959-961
+worker/src/index.ts
+  s_0e08240248c09e::t_a3c1d4ca2635e3 3702
+worker/src/text-ops.ts
+  s_0e08240248c09e::t_013d6e49e4a8d1 1-138
+worker/test/files-api.test.ts
+  s_0e08240248c09e::t_f2ce4f02a10944 428-451
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1ca38c2439fdf8a5bc29090d641e31d503488d70",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
