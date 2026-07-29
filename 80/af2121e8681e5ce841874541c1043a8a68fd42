@@ -1,0 +1,39 @@
+cli/src/api/client.ts
+  s_e75ddacbc6cd54::t_445d1b91059272 24,293-296
+cli/src/api/types.ts
+  s_e75ddacbc6cd54::t_9dcab9c8d39a1b 473-477
+cli/src/commands/index.ts
+  s_0e08240248c09e::t_2c8911d1c4702d 557-572
+sdk/src/client.ts
+  s_e75ddacbc6cd54::t_e584257fb62e96 20,319-323
+sdk/src/types.ts
+  s_e75ddacbc6cd54::t_7dc12b671891e8 78-82
+worker/src/files-api.ts
+  s_e75ddacbc6cd54::t_7691189f8d148a 10,808,966-968
+worker/src/text-ops.ts
+  s_e75ddacbc6cd54::t_74e32273534dcc 5,270-360
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "80af2121e8681e5ce841874541c1043a8a68fd42",
+  "prompts": {},
+  "sessions": {
+    "s_0e08240248c09e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a79db42bffeFGH1NhhfllQP9L",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    },
+    "s_e75ddacbc6cd54": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08a80ddb6ffeRDIWAlqbrqcFrj",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Tyson Trautmann <ttrautmann@cloudflare.com>"
+    }
+  }
+}
